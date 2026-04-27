@@ -41,6 +41,20 @@
                     </constraints>
                     <control type="list" format="string"/>
                 </setting>
+                <setting id="max_resolution" type="string" label="32050" help="32051">
+                    <level>0</level>
+                    <default>auto</default>
+                    <constraints>
+                        <allowempty>false</allowempty>
+                        <options>
+                            <option label="Auto (server-picked)">auto</option>
+                            <option label="1080p (max 1920x1080)">1080p</option>
+                            <option label="720p (max 1280x720)">720p</option>
+                            <option label="480p (max 854x480)">480p</option>
+                        </options>
+                    </constraints>
+                    <control type="list" format="string"/>
+                </setting>
             </group>
         </category>
         <category id="genders" label="32100" help="">

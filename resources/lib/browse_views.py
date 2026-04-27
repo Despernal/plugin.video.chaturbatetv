@@ -79,6 +79,18 @@ def main_menu(handle: int, **_params: Any) -> None:
     kodi_helpers.add_dir(handle, "Search", "search_prompt")
     kodi_helpers.add_dir(handle, "TV Mode", "tv_list")
     kodi_helpers.add_dir(handle, "Favorites", "favs")
+    # Maintenance entries at the bottom - rarely needed but always visible
+    # so the user has a path back without ssh access.
+    kodi_helpers.add_dir(
+        handle,
+        "[COLOR FFc8e8f8]>> Refresh artwork (icon / fanart)[/COLOR]",
+        "refresh_artwork",
+    )
+    kodi_helpers.add_dir(
+        handle,
+        "[COLOR FFff8080]>> Restart Kodi (clears stuck audio buffer)[/COLOR]",
+        "restart_kodi",
+    )
     kodi_helpers.end_directory(handle, content_type="videos")
 
 

@@ -170,6 +170,52 @@ def test_resolve_live_slug_sets_isa_properties_matrix_plus(
     assert li.getProperty("inputstreamaddon") == ""
 
 
+def test_resolve_live_slug_applies_max_resolution_when_set(
+    mock_xbmcgui: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the user picks a max_resolution cap, the ListItem must
+    carry ``inputstream.adaptive.max_resolution = WIDTHxHEIGHT`` so ISA
+    refuses to upshift past that variant. Empty cap (``auto``) means
+    the property is NOT set at all so ISA picks unconstrained.
+    """
+    import resources.lib.addon_settings as addon_settings_mod
+    monkeypatch.setattr(addon_settings_mod, "max_resolution", lambda: "1280x720")
+
+    resolver = _import_resolver()
+    result = resolver.resolve_to_listitem(
+        slug="alice",
+        name="alice",
+        resolve_func=lambda s: _live_resolution(s),
+        start_proxy_func=lambda *_a, **_kw: _FakeProxyHandle(),
+    )
+    li = result.listitem
+    assert li is not None
+    assert li.getProperty("inputstream.adaptive.max_resolution") == "1280x720"
+
+
+def test_resolve_live_slug_omits_max_resolution_when_auto(
+    mock_xbmcgui: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``auto`` cap = empty string from settings = property NOT set.
+    Without this, ISA would interpret an empty string as an invalid cap
+    and refuse to play."""
+    import resources.lib.addon_settings as addon_settings_mod
+    monkeypatch.setattr(addon_settings_mod, "max_resolution", lambda: "")
+
+    resolver = _import_resolver()
+    result = resolver.resolve_to_listitem(
+        slug="alice",
+        name="alice",
+        resolve_func=lambda s: _live_resolution(s),
+        start_proxy_func=lambda *_a, **_kw: _FakeProxyHandle(),
+    )
+    li = result.listitem
+    assert li is not None
+    assert li.getProperty("inputstream.adaptive.max_resolution") == ""
+
+
 def test_resolve_live_slug_sets_manifest_type_hls(mock_xbmcgui: MagicMock) -> None:
     resolver = _import_resolver()
     result = resolver.resolve_to_listitem(

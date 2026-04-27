@@ -187,6 +187,75 @@ def test_build_playlist_url_round_trips_slug_and_name(
     assert "Alice" in url or "Alice%20" in url or "Alice+" in url
 
 
+def _patch_playlist(kodi_mods: dict[str, Any], size: int, pos: int) -> None:
+    """Make ``xbmc.PlayList(VIDEO).size()`` and ``getposition()`` return
+    the integers we want. The default MagicMock returns more MagicMocks,
+    which compare against ints unpredictably.
+    """
+    fake_pl = MagicMock()
+    fake_pl.size.return_value = size
+    fake_pl.getposition.return_value = pos
+    kodi_mods["xbmc"].PlayList = MagicMock(return_value=fake_pl)
+
+
+def test_tvplayer_tier_next_button_does_not_fire_takeover(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """Regression: when the user clicks Next in the player to advance
+    to the next tier member, Kodi resolves the queued plugin URL via
+    playvid, which produces a localhost proxy URL like
+    ``http://127.0.0.1:42327/master.m3u8``. The queued_paths set holds
+    the UNRESOLVED plugin URLs; the naive ``cur in queued_paths`` check
+    would always fail and fire TAKEOVER, stopping TV mode.
+
+    The fix: also accept the path when it's a 127.0.0.1 proxy URL AND
+    the playlist size + position match what we queued. User direct-play
+    REPLACES the playlist, so size mismatch still classifies a real
+    takeover correctly.
+    """
+    tl = _import()
+    p = tl._TVPlayer()
+    p.queued_paths = {
+        tl._build_playlist_url("alice", "alice"),
+        tl._build_playlist_url("bob", "bob"),
+    }
+    p.tracked_file = "http://127.0.0.1:42327/master.m3u8"  # alice's proxy
+    # Playlist still has 2 items (our tier), advanced to position 1.
+    _patch_playlist(kodi_mods, size=2, pos=1)
+    # Override getPlayingFile to return the new proxy URL.
+    p.getPlayingFile = lambda: "http://127.0.0.1:55555/master.m3u8"  # type: ignore[method-assign]
+
+    p.onAVStarted()
+
+    assert p.switched is False, (
+        "tier-internal advance must NOT fire takeover"
+    )
+
+
+def test_tvplayer_user_direct_play_fires_takeover(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """User clicks a non-queued model directly while TV is playing:
+    Kodi REPLACES the playlist with a one-item one. Size no longer
+    matches our queued count (2 -> 1); takeover MUST fire."""
+    tl = _import()
+    p = tl._TVPlayer()
+    p.queued_paths = {
+        tl._build_playlist_url("alice", "alice"),
+        tl._build_playlist_url("bob", "bob"),
+    }
+    p.tracked_file = "http://127.0.0.1:42327/master.m3u8"
+    # User direct-play replaced the playlist with a single item.
+    _patch_playlist(kodi_mods, size=1, pos=0)
+    p.getPlayingFile = lambda: "http://127.0.0.1:99999/master.m3u8"  # type: ignore[method-assign]
+
+    p.onAVStarted()
+
+    assert p.switched is True, (
+        "user direct-play must fire takeover (playlist size mismatch)"
+    )
+
+
 def test_inner_loop_queues_urls_with_slug_not_name(
     kodi_mods: dict[str, Any],
 ) -> None:

@@ -147,6 +147,49 @@ def test_screensaver_color_empty_falls_back_to_cyan(
 
 
 # --------------------------------------------------------------------------- #
+# max_resolution
+# --------------------------------------------------------------------------- #
+
+
+def test_max_resolution_auto_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``auto`` -> empty string -> caller skips setProperty so ISA picks."""
+    _install_xbmcaddon(monkeypatch, {"max_resolution": "auto"})
+    assert _import().max_resolution() == ""
+
+
+def test_max_resolution_1080p(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_xbmcaddon(monkeypatch, {"max_resolution": "1080p"})
+    assert _import().max_resolution() == "1920x1080"
+
+
+def test_max_resolution_720p(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_xbmcaddon(monkeypatch, {"max_resolution": "720p"})
+    assert _import().max_resolution() == "1280x720"
+
+
+def test_max_resolution_480p(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_xbmcaddon(monkeypatch, {"max_resolution": "480p"})
+    assert _import().max_resolution() == "854x480"
+
+
+def test_max_resolution_unknown_falls_back_to_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_xbmcaddon(monkeypatch, {"max_resolution": "8k"})
+    assert _import().max_resolution() == ""
+
+
+def test_max_resolution_kodi_missing_falls_back_to_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = MagicMock()
+    fake.Addon = MagicMock(side_effect=RuntimeError("no Kodi"))
+    monkeypatch.setitem(sys.modules, "xbmcaddon", fake)
+    sys.modules.pop("resources.lib.addon_settings", None)
+    assert _import().max_resolution() == ""
+
+
+# --------------------------------------------------------------------------- #
 # show_gender
 # --------------------------------------------------------------------------- #
 

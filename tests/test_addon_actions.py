@@ -452,6 +452,77 @@ def test_tv_play_empty_list_notifies_and_returns(
     assert any("empty" in m.lower() for m in msgs)
 
 
+def test_restart_kodi_runs_quit_builtin(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """LibreELEC respawns Kodi on Quit, so this is the addon equivalent
+    of ``systemctl restart kodi`` (the workaround for stuck audio
+    renderer underruns on LL-HLS streams).
+    """
+    actions = _import()
+    actions.restart_kodi(handle=42)
+    builtins = [c.args[0] for c in
+                kodi_mocks["xbmc"].executebuiltin.call_args_list]
+    assert "Quit" in builtins
+
+
+def test_refresh_artwork_clears_textures_db(
+    tmp_path: Path,
+    kodi_mocks: dict[str, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Should DELETE rows from Textures13.db whose url matches the
+    addon ID, plus unlink the cached files in Thumbnails/."""
+    import sqlite3 as _sqlite
+    db_path = tmp_path / "Textures13.db"
+    thumbs_dir = tmp_path / "thumbnails"
+    thumbs_dir.mkdir()
+    (thumbs_dir / "a.png").write_bytes(b"x")
+    (thumbs_dir / "b.png").write_bytes(b"y")
+
+    conn = _sqlite.connect(str(db_path))
+    conn.execute("CREATE TABLE texture (id INTEGER PRIMARY KEY, url TEXT, cachedurl TEXT)")
+    conn.execute(
+        "INSERT INTO texture (url, cachedurl) VALUES (?, ?)",
+        ("special://home/addons/plugin.video.chaturbatetv/icon.png", "a.png"),
+    )
+    conn.execute(
+        "INSERT INTO texture (url, cachedurl) VALUES (?, ?)",
+        ("special://home/addons/plugin.video.chaturbatetv/fanart.jpg", "b.png"),
+    )
+    conn.execute(
+        "INSERT INTO texture (url, cachedurl) VALUES (?, ?)",
+        ("https://example.com/some-other.jpg", "c.png"),
+    )
+    conn.commit()
+    conn.close()
+
+    # Redirect xbmcvfs.translatePath at the affected paths.
+    fake_xbmcvfs = MagicMock()
+    paths = {
+        "special://database/Textures13.db": str(db_path),
+        "special://thumbnails/": str(thumbs_dir) + "/",
+    }
+    fake_xbmcvfs.translatePath = lambda p: paths.get(p, p)
+    monkeypatch.setitem(sys.modules, "xbmcvfs", fake_xbmcvfs)
+    sys.modules.pop("resources.lib.addon_actions", None)
+
+    actions = _import()
+    actions.refresh_artwork(handle=42)
+
+    # The two addon textures should be gone from the DB; the unrelated
+    # row should remain.
+    conn = _sqlite.connect(str(db_path))
+    rows = conn.execute("SELECT url FROM texture").fetchall()
+    conn.close()
+    urls = [r[0] for r in rows]
+    assert "https://example.com/some-other.jpg" in urls
+    assert all("plugin.video.chaturbatetv" not in u for u in urls)
+    # And the cached files were unlinked.
+    assert not (thumbs_dir / "a.png").exists()
+    assert not (thumbs_dir / "b.png").exists()
+
+
 def test_make_bulk_is_live_func_uses_affiliate_endpoint(
     kodi_mocks: dict[str, MagicMock],
     monkeypatch: pytest.MonkeyPatch,

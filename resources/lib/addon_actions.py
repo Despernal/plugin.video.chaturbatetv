@@ -245,6 +245,105 @@ def tv_play(handle: int, store_path: Path | None = None,
     )
 
 
+def restart_kodi(handle: int, **_params: Any) -> None:
+    """Restart Kodi to clear stuck audio/video engine state.
+
+    LL-HLS streams occasionally drift the audio renderer into a state
+    where ``CDVDAudio::AddPacketsRenderer - timeout`` errors repeat
+    forever - the symptom the user sees is "video plays but audio
+    constantly buffers." A full Kodi restart is the only reliable fix
+    (Lesson from a real  session: 2026-04-27).
+
+    On LibreELEC ``Quit`` causes systemd to respawn Kodi automatically,
+    so this is the addon equivalent of ``systemctl restart kodi``
+    without needing ssh.
+    """
+    from resources.lib import logger
+    logger._log("restart_kodi: user requested restart")
+    _notify("Chaturbate TV", "Restarting Kodi - reloading...")
+    try:
+        import xbmc
+        # 1.5s sleep so the notification is visible BEFORE the restart.
+        xbmc.sleep(1500)
+        xbmc.executebuiltin("Quit")
+    except Exception as exc:
+        logger._log(f"restart_kodi: builtin failed err={exc!r}")
+        _notify("Chaturbate TV", "Restart failed - try ssh")
+
+
+def refresh_artwork(handle: int, **_params: Any) -> None:
+    """Force Kodi to re-fetch the addon's icon + fanart on next render.
+
+    Kodi caches every texture (icon, fanart, room thumbnails) in
+    ``special://database/Textures13.db`` and serves it from
+    ``special://thumbnails/`` for the lifetime of the install. When we
+    ship a new icon or fanart, Kodi's cache stays stale until something
+    invalidates it - users see the old artwork forever.
+
+    This verb walks Textures13.db for any cached texture whose source
+    URL contains ``plugin.video.chaturbatetv`` (covers icon, fanart,
+    and any addon-relative artwork), deletes the cached file from
+    Thumbnails/, and removes the DB row. The next directory render
+    re-caches from disk.
+
+    's ``clean_database`` for chaturbate room thumbs is the
+    reference implementation; we narrow the scope to the addon's own
+    artwork only.
+    """
+    from resources.lib import logger
+    import sqlite3
+    logger._log("refresh_artwork: start")
+    deleted = 0
+    try:
+        import xbmcvfs
+        db_path = xbmcvfs.translatePath(
+            "special://database/Textures13.db",
+        )
+        thumbs_root = Path(xbmcvfs.translatePath("special://thumbnails/"))
+    except Exception as exc:
+        logger._log(f"refresh_artwork: xbmcvfs unavailable err={exc!r}")
+        _notify("Chaturbate TV", "Refresh artwork: Kodi paths unavailable")
+        return
+
+    try:
+        conn = sqlite3.connect(db_path)
+    except sqlite3.Error as exc:
+        logger._log(f"refresh_artwork: db connect FAIL err={exc!r}")
+        _notify("Chaturbate TV", "Refresh artwork: cannot open Textures13.db")
+        return
+
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, cachedurl FROM texture WHERE url LIKE ?",
+            ("%plugin.video.chaturbatetv%",),
+        )
+        rows = cur.fetchall()
+        logger._log(f"refresh_artwork: found {len(rows)} cached textures")
+        for row_id, cached in rows:
+            cached_path = thumbs_root / str(cached)
+            try:
+                cached_path.unlink()
+            except (FileNotFoundError, OSError) as exc:
+                logger._log(
+                    f"refresh_artwork: unlink fail {cached_path} err={exc!r}"
+                )
+            try:
+                conn.execute("DELETE FROM texture WHERE id = ?", (row_id,))
+                deleted += 1
+            except sqlite3.Error as exc:
+                logger._log(f"refresh_artwork: db delete FAIL err={exc!r}")
+        conn.commit()
+    finally:
+        conn.close()
+
+    logger._log(f"refresh_artwork: done deleted={deleted}")
+    _notify("Chaturbate TV", f"Refreshed {deleted} cached art entries")
+    # Refresh the current container so the user sees the new artwork
+    # immediately.
+    _refresh_container()
+
+
 def _make_bulk_is_live_func(poll_minutes: int) -> Any:
     """Build a TV-mode is_live callback backed by a single affiliate-API
     call per poll cycle.

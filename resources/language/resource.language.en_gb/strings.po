@@ -47,6 +47,14 @@ msgctxt "#32041"
 msgid "Color of the bouncing label on the idle screensaver"
 msgstr "Color of the bouncing label on the idle screensaver"
 
+msgctxt "#32050"
+msgid "Max resolution"
+msgstr "Max resolution"
+
+msgctxt "#32051"
+msgid "Cap the HLS variant ISA picks; 720p reduces buffering on slower edges"
+msgstr "Cap the HLS variant ISA picks; 720p reduces buffering on slower edges"
+
 msgctxt "#32100"
 msgid "Genders"
 msgstr "Genders"

@@ -105,6 +105,27 @@ def _build_player_class() -> type:
                 cur = ""
             self.current_playlist_path = cur
             internal = _is_internal_advance(cur, self.queued_paths)
+            if not internal:
+                # Production fallback: playvid RESOLVES the queued
+                # plugin URL into a localhost proxy URL before onAVStarted
+                # fires, so the queued_paths set never contains the
+                # actually-playing path. Detect tier-internal advances
+                # via playlist coherence: if the playlist size equals
+                # what we queued AND position is valid AND the path is
+                # one of our localhost proxies, it's internal. User
+                # direct-play replaces the playlist (size=1), so this
+                # heuristic still fires takeover on real takeovers.
+                try:
+                    pl = xbmc.PlayList(xbmc.PLAYLIST_VIDEO)
+                    pl_size = pl.size()
+                    pl_pos = pl.getposition()
+                except Exception:
+                    pl_size = pl_pos = -1
+                if (cur.startswith("http://127.0.0.1:")
+                        and self.queued_paths
+                        and pl_size == len(self.queued_paths)
+                        and 0 <= pl_pos < pl_size):
+                    internal = True
             if self.tracked_file is None:
                 self.tracked_file = cur
                 _safe_log(

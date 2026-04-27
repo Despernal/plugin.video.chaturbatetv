@@ -76,6 +76,36 @@ def isa_proxy_port() -> int:
     return v
 
 
+_RESOLUTION_CAPS: dict[str, str] = {
+    "auto": "",
+    "1080p": "1920x1080",
+    "720p": "1280x720",
+    "480p": "854x480",
+}
+
+
+def max_resolution() -> str:
+    """Return the ISA ``max_resolution`` value for the current setting.
+
+    Empty string = auto (don't cap; ISA picks the highest variant). Any
+    other value is a ``WIDTHxHEIGHT`` string ISA accepts directly via
+    ``setProperty('inputstream.adaptive.max_resolution', ...)``.
+
+    Capping to 720p is the right call on slower edges or under-powered
+    devices: ISA stops trying to upshift to 1080p, audio cadence stays
+    matched to a buffer the host can keep full, and "buffering pause"
+    events drop sharply.
+
+    Unknown / Kodi-missing -> empty (auto), since silently capping a
+    user's stream is more annoying than letting ISA pick wrong.
+    """
+    try:
+        name = str(_addon().getSettingString("max_resolution"))
+    except Exception:
+        return ""
+    return _RESOLUTION_CAPS.get(name.lower(), "")
+
+
 def show_gender(gender_key: str) -> bool:
     """Whether the main menu should display the named gender entry.
 

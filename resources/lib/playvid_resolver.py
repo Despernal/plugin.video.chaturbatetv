@@ -114,6 +114,15 @@ def _build_listitem(
     li.setProperty("inputstream.adaptive.manifest_type", "hls")
     li.setProperty("inputstream.adaptive.stream_headers", header_str)
     li.setProperty("inputstream.adaptive.manifest_headers", header_str)
+
+    # Optional resolution cap (settings.xml: max_resolution). Empty
+    # string = "auto" (don't set the property; ISA picks). Setting to
+    # 1280x720 reduces buffering on slow edges by stopping ISA from
+    # upshifting to 1080p that the connection / hardware can't sustain.
+    from resources.lib import addon_settings
+    cap = addon_settings.max_resolution()
+    if cap:
+        li.setProperty("inputstream.adaptive.max_resolution", cap)
     return li
 
 

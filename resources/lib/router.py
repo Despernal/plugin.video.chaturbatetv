@@ -118,6 +118,8 @@ class _LazyHandlers(dict[str, _Handler]):
         self["tv_edit"] = addon_actions.tv_edit
         self["fav_add"] = addon_actions.fav_add
         self["fav_remove"] = addon_actions.fav_remove
+        self["refresh_artwork"] = addon_actions.refresh_artwork
+        self["restart_kodi"] = addon_actions.restart_kodi
 
     def get(self, key: str, default: Any = None) -> Any:
         self._fill()
