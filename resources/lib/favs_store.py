@@ -39,30 +39,45 @@ def _row_to_fav(row: Any) -> Favorite | None:
     return Favorite(name=name, url=url, slug=slug, gender=gender)
 
 
+def _safe_log(msg: str) -> None:
+    """Log helper that tolerates a logger import failure (pure-test paths)."""
+    try:
+        from resources.lib import logger
+        logger._log(msg)
+    except Exception:
+        return
+
+
 def load(path: Path) -> list[Favorite]:
     """Read ``path`` and return the favorites list. Returns ``[]`` on any
     failure (missing, malformed, schema mismatch).
     """
     try:
         text = path.read_text(encoding="utf-8")
-    except (FileNotFoundError, IsADirectoryError, PermissionError, OSError):
+    except (FileNotFoundError, IsADirectoryError, PermissionError, OSError) as exc:
+        _safe_log(f"favs_store.load: read fail path={path} err={exc!r}")
         return []
     if not text.strip():
+        _safe_log(f"favs_store.load: empty path={path}")
         return []
     try:
         data = json.loads(text)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        _safe_log(f"favs_store.load: JSON decode fail path={path} err={exc!r}")
         return []
     if not isinstance(data, dict):
+        _safe_log(f"favs_store.load: payload not dict path={path}")
         return []
     rows = data.get("favorites")
     if not isinstance(rows, list):
+        _safe_log(f"favs_store.load: 'favorites' not list path={path}")
         return []
     out: list[Favorite] = []
     for row in rows:
         fav = _row_to_fav(row)
         if fav is not None:
             out.append(fav)
+    _safe_log(f"favs_store.load: path={path} entries={len(out)}")
     return out
 
 
@@ -76,7 +91,8 @@ def save(path: Path, favs: list[Favorite]) -> bool:
     }
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-    except (OSError, NotADirectoryError):
+    except (OSError, NotADirectoryError) as exc:
+        _safe_log(f"favs_store.save: mkdir fail path={path.parent} err={exc!r}")
         return False
     fd: int | None = None
     tmp_path: str | None = None
@@ -89,8 +105,10 @@ def save(path: Path, favs: list[Favorite]) -> bool:
             os.fsync(fh.fileno())
         os.replace(tmp_path, str(path))
         tmp_path = None
+        _safe_log(f"favs_store.save: OK path={path} entries={len(favs)}")
         return True
-    except OSError:
+    except OSError as exc:
+        _safe_log(f"favs_store.save: I/O fail path={path} err={exc!r}")
         return False
     finally:
         if fd is not None:

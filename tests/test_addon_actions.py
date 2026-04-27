@@ -452,6 +452,81 @@ def test_tv_play_empty_list_notifies_and_returns(
     assert any("empty" in m.lower() for m in msgs)
 
 
+def test_make_bulk_is_live_func_uses_affiliate_endpoint(
+    kodi_mocks: dict[str, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TV mode's is_live check should hit the single-call affiliate
+    endpoint ('s pattern), NOT call is_model_live per slug.
+    For a 60-entry TV list this turns 60 sequential AJAX calls per
+    poll cycle into 1 affiliate call.
+    """
+    import json as _json
+    fetch_calls: list[str] = []
+
+    def fake_fetch(url: str, **_kw: Any) -> str:
+        fetch_calls.append(url)
+        return _json.dumps([
+            {"username": "alice", "slug": "alice", "gender": "f",
+             "num_users": 100, "image_url": "", "room_subject": ""},
+            {"username": "bob", "slug": "bob", "gender": "m",
+             "num_users": 50, "image_url": "", "room_subject": ""},
+        ])
+
+    import resources.lib.cb_client as cb_client_mod
+    monkeypatch.setattr(cb_client_mod, "fetch_browse_page",
+                        lambda url, **_kw: fake_fetch(url))
+
+    actions = _import()
+    is_live = actions._make_bulk_is_live_func(poll_minutes=10)
+
+    # Multiple is_live calls within the TTL share ONE affiliate fetch.
+    assert is_live("https://chaturbate.com/alice/") is True
+    assert is_live("https://chaturbate.com/bob/") is True
+    assert is_live("https://chaturbate.com/ghost/") is False
+    assert len(fetch_calls) == 1, (
+        f"expected 1 affiliate fetch, got {len(fetch_calls)}: {fetch_calls!r}"
+    )
+    # And the URL was the affiliate endpoint, not per-slug AJAX.
+    assert "/affiliates/api/onlinerooms/" in fetch_calls[0]
+
+
+def test_make_bulk_is_live_keeps_stale_set_on_network_failure(
+    kodi_mocks: dict[str, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient 5xx must NOT silently mark every model offline. Keep
+    the stale slug set; the next refresh attempt will retry.
+    """
+    import json as _json
+    state = {"call": 0}
+
+    def fake_fetch(url: str, **_kw: Any) -> str:
+        state["call"] += 1
+        if state["call"] == 1:
+            return _json.dumps([
+                {"username": "alice", "slug": "alice", "gender": "f",
+                 "num_users": 1, "image_url": "", "room_subject": ""},
+            ])
+        raise OSError("server hiccup")
+
+    import resources.lib.cb_client as cb_client_mod
+    monkeypatch.setattr(cb_client_mod, "fetch_browse_page",
+                        lambda url, **_kw: fake_fetch(url))
+
+    actions = _import()
+    # poll_minutes=1 -> ttl=30s (clamped floor); first refresh succeeds.
+    is_live = actions._make_bulk_is_live_func(poll_minutes=1)
+    assert is_live("https://chaturbate.com/alice/") is True
+
+    # Force the cache to look stale, then the next call refreshes - which
+    # raises OSError. We should still report alice as live (the stale set).
+    import time as _time
+    _orig_time = _time.time
+    monkeypatch.setattr(_time, "time", lambda: _orig_time() + 10000)
+    assert is_live("https://chaturbate.com/alice/") is True
+
+
 def test_tv_play_reads_poll_minutes_from_settings(
     tmp_path: Path,
     kodi_mocks: dict[str, MagicMock],

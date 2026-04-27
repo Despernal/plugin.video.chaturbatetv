@@ -53,7 +53,10 @@ def fav_add(handle: int, slug: str = "", name: str = "",
             url: str = "", gender: str = "unknown",
             store_path: Path | None = None, **_params: Any) -> None:
     """Add a model to local favorites. Idempotent: existing slug -> no-op."""
+    from resources.lib import logger
+    logger._log(f"fav_add: enter slug={slug!r} name={name!r} gender={gender!r}")
     if not slug:
+        logger._log("fav_add: missing slug, abort")
         _notify("Chaturbate TV", "Add to favorites: missing slug")
         return
     path = store_path if store_path is not None else _favs_path()
@@ -66,25 +69,32 @@ def fav_add(handle: int, slug: str = "", name: str = "",
     )
     new_favs = favs_store.add(favs, fav)
     if len(new_favs) == len(favs):
+        logger._log(f"fav_add: {slug!r} already exists, no-op")
         _notify("Chaturbate TV", f"{slug} is already in favorites")
         return
     favs_store.save(path, new_favs)
+    logger._log(f"fav_add: added {slug!r} ({len(favs)} -> {len(new_favs)})")
     _notify("Chaturbate TV", f"Added {slug} to favorites")
 
 
 def fav_remove(handle: int, slug: str = "",
                store_path: Path | None = None, **_params: Any) -> None:
     """Remove a slug from local favorites."""
+    from resources.lib import logger
+    logger._log(f"fav_remove: enter slug={slug!r}")
     if not slug:
+        logger._log("fav_remove: missing slug, abort")
         _notify("Chaturbate TV", "Remove from favorites: missing slug")
         return
     path = store_path if store_path is not None else _favs_path()
     favs = favs_store.load(path)
     new_favs = favs_store.remove(favs, slug)
     if len(new_favs) == len(favs):
+        logger._log(f"fav_remove: {slug!r} not in list, no-op")
         _notify("Chaturbate TV", f"{slug} was not in favorites")
         return
     favs_store.save(path, new_favs)
+    logger._log(f"fav_remove: removed {slug!r} ({len(favs)} -> {len(new_favs)})")
     _notify("Chaturbate TV", f"Removed {slug} from favorites")
 
 
@@ -226,12 +236,73 @@ def tv_play(handle: int, store_path: Path | None = None,
     _notify("Chaturbate TV", "Starting TV mode...")
     # Real-Kodi path: import tv_loop lazily so unit tests of the
     # verb-shim layer don't need the whole xbmc shim.
-    from resources.lib import cb_client, tv_loop
+    from resources.lib import tv_loop
+    is_live = _make_bulk_is_live_func(pm)
     tv_loop.tv_play(
         entries=entries,
-        is_live_func=lambda url: cb_client.is_model_live(_slug_from_url(url)),
+        is_live_func=is_live,
         poll_minutes=pm,
     )
+
+
+def _make_bulk_is_live_func(poll_minutes: int) -> Any:
+    """Build a TV-mode is_live callback backed by a single affiliate-API
+    call per poll cycle.
+
+    The naive "call ``is_model_live(slug)`` per entry" approach was 60
+    sequential AJAX hits at the start of every poll cycle for a 60-entry
+    TV list - bad for chaturbate AND slow for the user (the loop blocks
+    on every fetch). The affiliate-onlinerooms endpoint returns ALL
+    online slugs in one call, so we cache it with a TTL aligned to the
+    poll interval and answer ``is_live`` from a frozenset lookup.
+
+    A network failure DOES NOT update the timestamp - we keep the stale
+    set so a transient 5xx doesn't suddenly mark every model offline.
+    """
+    import random
+    import time as _time
+    from resources.lib import cb_client, cb_listing, logger
+    from resources.lib.cb_endpoints import online_rooms_affiliate_url
+
+    # TTL slightly LESS than the poll interval so we always have fresh
+    # data at the start of each tier walk. Floor at 30s for testing.
+    ttl_seconds = max(30, int(poll_minutes * 60) - 30)
+    # Affiliate watermarks ('s rotating array - same set
+    # favs_views uses).
+    watermarks = (
+        "C9m5N", "tfZSl", "jQrKO", "5XO2a", "WXomN",
+        "zM6MR", "Lb2aB", "cIbs3", "mnzQo", "N6TZA",
+    )
+    cache: dict[str, Any] = {"slugs": frozenset(), "ts": 0.0}
+
+    def _refresh() -> None:
+        wm = random.choice(watermarks)
+        url = online_rooms_affiliate_url(wm)
+        logger._log(f"addon_actions._bulk_is_live: refresh url={url}")
+        try:
+            body = cb_client.fetch_browse_page(url)
+        except OSError as exc:
+            logger._log(
+                f"addon_actions._bulk_is_live: refresh FAIL err={exc!r} "
+                f"(keeping stale set with {len(cache['slugs'])} slugs)"
+            )
+            return
+        models = cb_listing.parse_affiliate_onlinerooms(body)
+        new_slugs = frozenset(m.slug for m in models)
+        cache["slugs"] = new_slugs
+        cache["ts"] = _time.time()
+        logger._log(
+            f"addon_actions._bulk_is_live: refreshed slugs={len(new_slugs)}"
+        )
+
+    def is_live(url: str) -> bool:
+        nowt = _time.time()
+        if not cache["slugs"] or nowt - cache["ts"] > ttl_seconds:
+            _refresh()
+        slug = _slug_from_url(url)
+        return slug in cache["slugs"]
+
+    return is_live
 
 
 def tv_stop(handle: int, **_params: Any) -> None:

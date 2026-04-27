@@ -45,6 +45,15 @@ def _row_to_entry(row: Any) -> TVEntry | None:
     return TVEntry(name=name, url=url, priority=priority)
 
 
+def _safe_log(msg: str) -> None:
+    """Log helper that tolerates a logger import failure (pure-test paths)."""
+    try:
+        from resources.lib import logger
+        logger._log(msg)
+    except Exception:
+        return
+
+
 def load(path: Path) -> list[TVEntry]:
     """Read ``path`` and return the list of TVEntry rows.
 
@@ -54,24 +63,30 @@ def load(path: Path) -> list[TVEntry]:
     """
     try:
         text = path.read_text(encoding="utf-8")
-    except (FileNotFoundError, IsADirectoryError, PermissionError, OSError):
+    except (FileNotFoundError, IsADirectoryError, PermissionError, OSError) as exc:
+        _safe_log(f"tv_store.load: read fail path={path} err={exc!r}")
         return []
     if not text.strip():
+        _safe_log(f"tv_store.load: empty path={path}")
         return []
     try:
         data = json.loads(text)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        _safe_log(f"tv_store.load: JSON decode fail path={path} err={exc!r}")
         return []
     if not isinstance(data, dict):
+        _safe_log(f"tv_store.load: payload not dict path={path}")
         return []
     rows = data.get("models")
     if not isinstance(rows, list):
+        _safe_log(f"tv_store.load: 'models' not list path={path}")
         return []
     out: list[TVEntry] = []
     for row in rows:
         entry = _row_to_entry(row)
         if entry is not None:
             out.append(entry)
+    _safe_log(f"tv_store.load: path={path} entries={len(out)}")
     return out
 
 
@@ -91,7 +106,8 @@ def save(path: Path, entries: list[TVEntry]) -> bool:
     }
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-    except (OSError, NotADirectoryError):
+    except (OSError, NotADirectoryError) as exc:
+        _safe_log(f"tv_store.save: mkdir fail path={path.parent} err={exc!r}")
         return False
     # Write to a sibling tempfile in the same directory so os.replace is
     # an atomic same-filesystem rename.
@@ -106,8 +122,10 @@ def save(path: Path, entries: list[TVEntry]) -> bool:
             os.fsync(fh.fileno())
         os.replace(tmp_path, str(path))
         tmp_path = None
+        _safe_log(f"tv_store.save: OK path={path} entries={len(entries)}")
         return True
-    except OSError:
+    except OSError as exc:
+        _safe_log(f"tv_store.save: I/O fail path={path} err={exc!r}")
         return False
     finally:
         if fd is not None:

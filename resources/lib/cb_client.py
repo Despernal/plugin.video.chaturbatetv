@@ -6,13 +6,14 @@ Thin wrapper around stdlib urllib that:
   Cloudflare challenge; bot-flavoured UAs get blocked outright).
 - Lets callers inject a ``fetch_func`` so the network is mockable from
   pytest with no hooks into urlopen.
-- Hides the dossier HTML route AND the AJAX status route behind small,
-  named functions so callers don't keep that knowledge.
+- Hides the JSON listing routes (``/api/ts/roomlist/``,
+  ``/affiliates/api/onlinerooms/``) and the AJAX status route
+  (``/get_edge_hls_url_ajax/``) behind small, named functions so callers
+  don't keep that knowledge.
 
-The AJAX endpoint (``get_edge_hls_url_ajax``) is much cheaper than the
-full HTML dossier when all you need is "is this room live?". The HTML
-dossier is still useful when you want gender/viewers/etc, so we keep
-both.
+The AJAX endpoint is the cheap "is this slug live now?" check; the
+listing routes return rich room data (image, plot, viewers) for browse
+and bulk-live-set use.
 """
 from __future__ import annotations
 
@@ -146,7 +147,13 @@ def fetch_room_status_json(slug: str, fetch_func: _FetchFn | None = None) -> dic
 
 
 def fetch_browse_page(url: str, fetch_func: _FetchFn | None = None) -> str:
-    """Fetch a category / search / listing HTML page."""
+    """Fetch a JSON listing page (room-list or affiliate-onlinerooms).
+
+    Despite the name (kept for backwards compat), the response body is
+    JSON, not HTML. Browse views and the bulk live-set fetcher both use
+    this; callers parse via ``cb_listing.parse_roomlist`` or
+    ``cb_listing.parse_affiliate_onlinerooms`` depending on the URL.
+    """
     if not url:
         raise ValueError("fetch_browse_page requires a non-empty url")
     from resources.lib import logger

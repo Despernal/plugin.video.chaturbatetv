@@ -2,8 +2,20 @@
 
 The TV loop and the playvid resolver both need the same answer to
 "is this room live, and if so, what HLS URL?". This module is the
-single place that knows how to ask. The network is injected via a
-``fetch_html_func`` callback so the module stays pure-test-friendly.
+single place that knows how to ask.
+
+Two paths are exposed:
+
+- ``resolve_ajax(slug, fetch_status_func)`` (preferred, since v0.4.3) -
+  hits the JSON status endpoint. Reliable, cheap, returns a clean
+  ``Resolution`` with ``is_live``, ``hls_source``, and the request
+  headers ISA needs.
+- ``resolve(slug, fetch_html_func)`` (legacy) - parses the HTML room
+  page for the ``initialRoomDossier`` blob. Only kept because it's
+  exercised by the cb_dossier tests. Production code uses the AJAX path.
+
+Both fetchers are injected so the module stays pure-test-friendly (no
+urllib, no network, no Kodi).
 """
 from __future__ import annotations
 

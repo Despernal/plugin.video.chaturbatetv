@@ -851,29 +851,33 @@ def start_proxy(stream_url: str, room_url: str,
         daemon_threads = True
         allow_reuse_address = True
 
-    # We need refresh + trigger callbacks bound to a real handle so the
-    # handler can call them; build a placeholder handle, then attach
-    # the real one once the server is up.
-    # _state already has trigger_reconnect via the handle wrapper; we
-    # capture the closures here so the handler doesn't reach back into
-    # the handle directly.
-    refresh_fn: Any = None
-    trigger_fn: Any = None
+    # The handler needs callbacks that ultimately call methods on the
+    # ProxyHandle (refresh_session, trigger_reconnect). The handle
+    # itself can't be built until the server is bound (it carries the
+    # _server attr). Resolve the cycle with a one-element holder list
+    # that is populated BEFORE thread.start() so the closures are
+    # always non-None by the time any request lands.
+    handle_box: list[Any] = [None]
 
-    handler_cls = _make_handler(
-        "127.0.0.1", 0, state,
-        lambda: refresh_fn(),
-        lambda reason: trigger_fn(reason),
-    )
+    def _refresh() -> bool:
+        h = handle_box[0]
+        return bool(h.refresh_session()) if h is not None else False
 
+    def _trigger(reason: str) -> None:
+        h = handle_box[0]
+        if h is not None:
+            h.trigger_reconnect(reason)
+
+    # Step 1: bind the server (with a placeholder handler factory just
+    # to allocate a port - port=0 lets the kernel pick one).
+    handler_cls = _make_handler("127.0.0.1", 0, state, _refresh, _trigger)
     server = _Server(("127.0.0.1", port), handler_cls)
     raw_host = server.server_address[0]
     host = raw_host if isinstance(raw_host, str) else raw_host.decode("ascii")
     port = int(server.server_address[1])
 
-    # With the port now known, rewrite the prefetched master so ISA
-    # gets /chunklist?name=X URLs instead of upstream CDN URLs. If the
-    # prefetch failed, master_body stays empty until a refresh fills it.
+    # Step 2: with the port now known, rewrite the prefetched master so
+    # ISA gets /chunklist?name=X URLs instead of upstream CDN URLs.
     if prefetch_absolutized:
         master_body = _rewrite_master_for_isa(
             prefetch_absolutized, host, port,
@@ -881,22 +885,18 @@ def start_proxy(stream_url: str, room_url: str,
         with state.lock:
             state.master_body = master_body
 
-    # Re-build the handler with the actual port baked in (the URL
-    # rewriting needs the bound port). Replace the server's request
-    # handler class so subsequent requests use the right URL.
+    # Step 3: re-build the handler with the actual port baked in
+    # (the URL rewriting needs the bound port).
     server.RequestHandlerClass = _make_handler(
-        host, port, state,
-        lambda: refresh_fn(),
-        lambda reason: trigger_fn(reason),
+        host, port, state, _refresh, _trigger,
     )
 
+    # Step 4: build the thread (NOT started yet) and the handle.
     thread = threading.Thread(
         target=server.serve_forever,
         name=f"chaturbatetv-hls-proxy-{port}",
         daemon=True,
     )
-    thread.start()
-
     handle = ProxyHandle(
         host=host,
         port=port,
@@ -906,9 +906,10 @@ def start_proxy(stream_url: str, room_url: str,
         _state=state,
     )
 
-    # Now wire the closures that the handler's lambda captured.
-    refresh_fn = handle.refresh_session
-    trigger_fn = handle.trigger_reconnect
+    # Step 5: populate the closure box BEFORE serving, so any incoming
+    # request (including an immediate ISA fetch) sees a valid callback.
+    handle_box[0] = handle
+    thread.start()
 
     _log(f"start_proxy: bound host={host} port={port}")
     return handle
