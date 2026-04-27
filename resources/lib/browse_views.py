@@ -52,19 +52,30 @@ def _color_label(label: str, gender: Gender) -> str:
 
 
 def main_menu(handle: int, **_params: Any) -> None:
-    """Top-level addon entries with HALO color tags per gender."""
-    from resources.lib import logger
+    """Top-level addon entries with HALO color tags per gender.
+
+    Each gender entry can be hidden via ``show_<gender>`` boolean
+    settings (defaulted on); useful if the user only ever browses one
+    or two categories and wants the main menu uncluttered. Favorites
+    and TV mode lists are NOT filtered - those are personal collections
+    where the user picked the model directly.
+    """
+    from resources.lib import addon_settings, logger
     logger._log(f"browse_views.main_menu: handle={handle}")
     kodi_helpers.add_dir(handle, "Top Cams", "top")
     kodi_helpers.add_dir(handle, "New Cams", "new")
-    kodi_helpers.add_dir(handle, _color_label("Female", Gender.FEMALE),
-                         "gender", gender="female")
-    kodi_helpers.add_dir(handle, _color_label("Male", Gender.MALE),
-                         "gender", gender="male")
-    kodi_helpers.add_dir(handle, _color_label("Couple", Gender.COUPLE),
-                         "gender", gender="couple")
-    kodi_helpers.add_dir(handle, _color_label("Trans", Gender.TRANS),
-                         "gender", gender="trans")
+    if addon_settings.show_gender("female"):
+        kodi_helpers.add_dir(handle, _color_label("Female", Gender.FEMALE),
+                             "gender", gender="female")
+    if addon_settings.show_gender("male"):
+        kodi_helpers.add_dir(handle, _color_label("Male", Gender.MALE),
+                             "gender", gender="male")
+    if addon_settings.show_gender("couple"):
+        kodi_helpers.add_dir(handle, _color_label("Couple", Gender.COUPLE),
+                             "gender", gender="couple")
+    if addon_settings.show_gender("trans"):
+        kodi_helpers.add_dir(handle, _color_label("Trans", Gender.TRANS),
+                             "gender", gender="trans")
     kodi_helpers.add_dir(handle, "Search", "search_prompt")
     kodi_helpers.add_dir(handle, "TV Mode", "tv_list")
     kodi_helpers.add_dir(handle, "Favorites", "favs")
@@ -128,6 +139,16 @@ def _fetch_models(url: str, fetch_func: _FetchFn | None) -> list[Model]:
     return cb_listing.parse_roomlist(body).models
 
 
+def _by_viewers_desc(models: list[Model]) -> list[Model]:
+    """Sort models by viewer count descending. The room-list API returns
+    rooms in some internal mixed order (top ~8 high-traffic rooms, then
+    a roughly-random tail). Chaturbate's own website re-sorts by viewers
+    client-side; we do the same so Female / Male / Couple / Trans all
+    show "most-watched on top, walking down" the way users expect.
+    """
+    return sorted(models, key=lambda m: -m.viewers)
+
+
 def top_cams_view(handle: int, page: Any = 1,
                   fetch_func: _FetchFn | None = None,
                   **_params: Any) -> None:
@@ -136,7 +157,7 @@ def top_cams_view(handle: int, page: Any = 1,
     p = _coerce_page(page)
     url = top_cams_url(p)
     logger._log(f"browse_views.top_cams_view: page={p} url={url}")
-    models = _fetch_models(url, fetch_func)
+    models = _by_viewers_desc(_fetch_models(url, fetch_func))
     logger._log(f"browse_views.top_cams_view: page={p} models={len(models)}")
     _render_models(handle, models)
     kodi_helpers.add_dir(handle, "Next page", "top", page=p + 1)
@@ -172,7 +193,7 @@ def gender_view(handle: int, gender: str = "female", page: Any = 1,
         return
     url = gender_filter_url(g, p)
     logger._log(f"browse_views.gender_view: gender={gender!r} url={url}")
-    models = _fetch_models(url, fetch_func)
+    models = _by_viewers_desc(_fetch_models(url, fetch_func))
     logger._log(f"browse_views.gender_view: gender={gender!r} page={p} models={len(models)}")
     _render_models(handle, models)
     kodi_helpers.add_dir(handle, "Next page", "gender",
@@ -195,7 +216,7 @@ def search_view(handle: int, query: str = "", page: Any = 1,
         kodi_helpers.end_directory(handle, succeeded=False, content_type="videos")
         return
     url = search_url(query, p)
-    models = _fetch_models(url, fetch_func)
+    models = _by_viewers_desc(_fetch_models(url, fetch_func))
     logger._log(
         f"browse_views.search_view: query={query!r} page={p} models={len(models)}"
     )

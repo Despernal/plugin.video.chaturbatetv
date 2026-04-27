@@ -46,3 +46,39 @@ msgstr "Screensaver color"
 msgctxt "#32041"
 msgid "Color of the bouncing label on the idle screensaver"
 msgstr "Color of the bouncing label on the idle screensaver"
+
+msgctxt "#32100"
+msgid "Genders"
+msgstr "Genders"
+
+msgctxt "#32110"
+msgid "Show Female"
+msgstr "Show Female"
+
+msgctxt "#32111"
+msgid "Display the Female browse entry on the main menu"
+msgstr "Display the Female browse entry on the main menu"
+
+msgctxt "#32120"
+msgid "Show Male"
+msgstr "Show Male"
+
+msgctxt "#32121"
+msgid "Display the Male browse entry on the main menu"
+msgstr "Display the Male browse entry on the main menu"
+
+msgctxt "#32130"
+msgid "Show Couple"
+msgstr "Show Couple"
+
+msgctxt "#32131"
+msgid "Display the Couple browse entry on the main menu"
+msgstr "Display the Couple browse entry on the main menu"
+
+msgctxt "#32140"
+msgid "Show Trans"
+msgstr "Show Trans"
+
+msgctxt "#32141"
+msgid "Display the Trans browse entry on the main menu"
+msgstr "Display the Trans browse entry on the main menu"

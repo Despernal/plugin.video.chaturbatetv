@@ -76,6 +76,24 @@ def isa_proxy_port() -> int:
     return v
 
 
+def show_gender(gender_key: str) -> bool:
+    """Whether the main menu should display the named gender entry.
+
+    ``gender_key`` is one of ``"female"``, ``"male"``, ``"couple"``,
+    ``"trans"``. Maps to the ``show_<key>`` boolean setting; default
+    True so a fresh install shows everything until the user opts out.
+
+    Any failure (missing setting, no Kodi, malformed value) returns
+    True - we'd rather show too much than mysteriously hide a category
+    if the settings layer has a glitch.
+    """
+    setting_id = f"show_{gender_key.lower()}"
+    try:
+        return bool(_addon().getSettingBool(setting_id))
+    except Exception:
+        return True
+
+
 def screensaver_color() -> str:
     """Map the named option to its 8-char AARRGGBB hex.
 

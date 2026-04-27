@@ -144,3 +144,32 @@ def test_screensaver_color_empty_falls_back_to_cyan(
 ) -> None:
     _install_xbmcaddon(monkeypatch, {"screensaver_color": ""})
     assert _import().screensaver_color() == "FF00d4ff"
+
+
+# --------------------------------------------------------------------------- #
+# show_gender
+# --------------------------------------------------------------------------- #
+
+
+def test_show_gender_reads_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_xbmcaddon(monkeypatch, {
+        "show_female": True, "show_male": True,
+        "show_couple": False, "show_trans": False,
+    })
+    fv = _import()
+    assert fv.show_gender("female") is True
+    assert fv.show_gender("male") is True
+    assert fv.show_gender("couple") is False
+    assert fv.show_gender("trans") is False
+
+
+def test_show_gender_default_true_when_kodi_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """xbmcaddon import explodes -> default True (don't silently hide
+    a category if the settings layer is broken)."""
+    fake = MagicMock()
+    fake.Addon = MagicMock(side_effect=RuntimeError("no Kodi"))
+    monkeypatch.setitem(sys.modules, "xbmcaddon", fake)
+    sys.modules.pop("resources.lib.addon_settings", None)
+    assert _import().show_gender("female") is True

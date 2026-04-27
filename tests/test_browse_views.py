@@ -6,6 +6,7 @@ inspect the addDirectoryItem call shapes.
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -98,6 +99,32 @@ def test_main_menu_adds_gender_filters(kodi_mocks: dict[str, MagicMock]) -> None
         assert any("mode=gender" in u and f"gender={g}" in u for u in urls), g
 
 
+def test_main_menu_hides_gender_when_show_setting_false(
+    kodi_mocks: dict[str, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """User can toggle off any gender they don't want cluttering the
+    main menu (settings.xml: show_female / show_male / show_couple /
+    show_trans). Top Cams + New Cams + Search + TV + Favorites stay."""
+    import resources.lib.addon_settings as addon_settings_mod
+    # Hide trans + male; show female + couple.
+    visible = {"female": True, "male": False, "couple": True, "trans": False}
+    monkeypatch.setattr(
+        addon_settings_mod, "show_gender",
+        lambda key: visible.get(key, True),
+    )
+    bv = _import()
+    bv.main_menu(handle=42)
+    urls = _added_urls(kodi_mocks["xbmcplugin"])
+    assert any("gender=female" in u for u in urls)
+    assert any("gender=couple" in u for u in urls)
+    assert not any("gender=male" in u for u in urls)
+    assert not any("gender=trans" in u for u in urls)
+    # Non-gender entries always present.
+    assert any("mode=search_prompt" in u for u in urls)
+    assert any("mode=tv_list" in u for u in urls)
+
+
 def test_main_menu_adds_search_tv_favs(kodi_mocks: dict[str, MagicMock]) -> None:
     """The main-menu Search entry must route to search_prompt (the input
     dialog opener), NOT the bare search result-renderer. ``search_view``
@@ -185,6 +212,67 @@ def test_top_cams_view_renders_models(kodi_mocks: dict[str, MagicMock]) -> None:
     # 5 models in the fixture + 1 next-page entry
     assert sum(1 for u in urls if "mode=playvid" in u) == 5
     assert any("mode=top" in u and "page=2" in u for u in urls)
+
+
+def test_top_cams_view_sorts_by_viewers_descending(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """Regression: chaturbate's room-list API returns rooms in mixed
+    order (top ~8 high-traffic then a roughly-random tail). Browse views
+    must client-side sort by num_users descending so the user sees
+    most-watched on top - which is what their site does, what 
+    would do if they sorted, and what the user expects for "top cams".
+    """
+    bv = _import()
+    body = json.dumps({
+        "rooms": [
+            {"username": "low", "gender": "f", "num_users": 18,
+             "label": "public"},
+            {"username": "mid", "gender": "f", "num_users": 500,
+             "label": "public"},
+            {"username": "high", "gender": "f", "num_users": 15000,
+             "label": "public"},
+            {"username": "med2", "gender": "f", "num_users": 4000,
+             "label": "public"},
+        ],
+        "total_count": 4, "all_rooms_count": 4,
+    })
+
+    def fetch(*_a: Any, **_kw: Any) -> str:
+        return body
+
+    bv.top_cams_view(handle=42, fetch_func=fetch)
+    urls = _added_urls(kodi_mocks["xbmcplugin"])
+    play_urls = [u for u in urls if "mode=playvid" in u]
+    slugs_in_order = [u.split("slug=")[1].split("&")[0] for u in play_urls]
+    assert slugs_in_order == ["high", "med2", "mid", "low"]
+
+
+def test_gender_view_sorts_by_viewers_descending(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """Same sort applies to ``gender_view`` (Female/Male/Couple/Trans)."""
+    bv = _import()
+    body = json.dumps({
+        "rooms": [
+            {"username": "x", "gender": "f", "num_users": 100,
+             "label": "public"},
+            {"username": "y", "gender": "f", "num_users": 9999,
+             "label": "public"},
+            {"username": "z", "gender": "f", "num_users": 1,
+             "label": "public"},
+        ],
+        "total_count": 3, "all_rooms_count": 3,
+    })
+
+    def fetch(*_a: Any, **_kw: Any) -> str:
+        return body
+
+    bv.gender_view(handle=42, gender="female", fetch_func=fetch)
+    urls = _added_urls(kodi_mocks["xbmcplugin"])
+    play_urls = [u for u in urls if "mode=playvid" in u]
+    slugs_in_order = [u.split("slug=")[1].split("&")[0] for u in play_urls]
+    assert slugs_in_order == ["y", "x", "z"]
 
 
 def test_top_cams_view_passes_page_to_fetch(kodi_mocks: dict[str, MagicMock]) -> None:

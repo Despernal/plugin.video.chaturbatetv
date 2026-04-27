@@ -43,5 +43,29 @@
                 </setting>
             </group>
         </category>
+        <category id="genders" label="32100" help="">
+            <group id="1">
+                <setting id="show_female" type="boolean" label="32110" help="32111">
+                    <level>0</level>
+                    <default>true</default>
+                    <control type="toggle"/>
+                </setting>
+                <setting id="show_male" type="boolean" label="32120" help="32121">
+                    <level>0</level>
+                    <default>true</default>
+                    <control type="toggle"/>
+                </setting>
+                <setting id="show_couple" type="boolean" label="32130" help="32131">
+                    <level>0</level>
+                    <default>true</default>
+                    <control type="toggle"/>
+                </setting>
+                <setting id="show_trans" type="boolean" label="32140" help="32141">
+                    <level>0</level>
+                    <default>true</default>
+                    <control type="toggle"/>
+                </setting>
+            </group>
+        </category>
     </section>
 </settings>
