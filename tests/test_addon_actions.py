@@ -466,41 +466,48 @@ def test_restart_kodi_runs_quit_builtin(
     assert "Quit" in builtins
 
 
+def _make_textures_db(path: Path, rows: list[tuple[str, str]]) -> None:
+    """Create a minimal Textures<N>.db schema with the given (url, cachedurl) rows."""
+    import sqlite3 as _sqlite
+    conn = _sqlite.connect(str(path))
+    conn.execute(
+        "CREATE TABLE texture (id INTEGER PRIMARY KEY, url TEXT, cachedurl TEXT)"
+    )
+    for url, cached in rows:
+        conn.execute(
+            "INSERT INTO texture (url, cachedurl) VALUES (?, ?)",
+            (url, cached),
+        )
+    conn.commit()
+    conn.close()
+
+
 def test_refresh_artwork_clears_textures_db(
     tmp_path: Path,
     kodi_mocks: dict[str, MagicMock],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Should DELETE rows from Textures13.db whose url matches the
-    addon ID, plus unlink the cached files in Thumbnails/."""
+    """Should DELETE rows whose url matches the addon ID across every
+    Textures<N>.db it finds, plus unlink the cached files in Thumbnails/."""
     import sqlite3 as _sqlite
-    db_path = tmp_path / "Textures13.db"
+    db_dir = tmp_path / "Database"
+    db_dir.mkdir()
+    db_path = db_dir / "Textures13.db"
     thumbs_dir = tmp_path / "thumbnails"
     thumbs_dir.mkdir()
     (thumbs_dir / "a.png").write_bytes(b"x")
     (thumbs_dir / "b.png").write_bytes(b"y")
+    (thumbs_dir / "c.png").write_bytes(b"z")
 
-    conn = _sqlite.connect(str(db_path))
-    conn.execute("CREATE TABLE texture (id INTEGER PRIMARY KEY, url TEXT, cachedurl TEXT)")
-    conn.execute(
-        "INSERT INTO texture (url, cachedurl) VALUES (?, ?)",
+    _make_textures_db(db_path, [
         ("special://home/addons/plugin.video.chaturbatetv/icon.png", "a.png"),
-    )
-    conn.execute(
-        "INSERT INTO texture (url, cachedurl) VALUES (?, ?)",
         ("special://home/addons/plugin.video.chaturbatetv/fanart.jpg", "b.png"),
-    )
-    conn.execute(
-        "INSERT INTO texture (url, cachedurl) VALUES (?, ?)",
         ("https://example.com/some-other.jpg", "c.png"),
-    )
-    conn.commit()
-    conn.close()
+    ])
 
-    # Redirect xbmcvfs.translatePath at the affected paths.
     fake_xbmcvfs = MagicMock()
     paths = {
-        "special://database/Textures13.db": str(db_path),
+        "special://database/": str(db_dir) + "/",
         "special://thumbnails/": str(thumbs_dir) + "/",
     }
     fake_xbmcvfs.translatePath = lambda p: paths.get(p, p)
@@ -510,17 +517,100 @@ def test_refresh_artwork_clears_textures_db(
     actions = _import()
     actions.refresh_artwork(handle=42)
 
-    # The two addon textures should be gone from the DB; the unrelated
-    # row should remain.
     conn = _sqlite.connect(str(db_path))
     rows = conn.execute("SELECT url FROM texture").fetchall()
     conn.close()
     urls = [r[0] for r in rows]
     assert "https://example.com/some-other.jpg" in urls
     assert all("plugin.video.chaturbatetv" not in u for u in urls)
-    # And the cached files were unlinked.
     assert not (thumbs_dir / "a.png").exists()
     assert not (thumbs_dir / "b.png").exists()
+    # Unrelated cached file is preserved.
+    assert (thumbs_dir / "c.png").exists()
+
+
+def test_refresh_artwork_walks_textures13_AND_textures14(
+    tmp_path: Path,
+    kodi_mocks: dict[str, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: Kodi 21+ bumped the schema to Textures14.db. The
+    verb must clean BOTH (some installs have both around for legacy
+    reasons; Kodi just reads from the highest version it knows). A
+    user on Kodi 21+ wouldn't see the icon refresh if we only scanned
+    Textures13.db.
+    """
+    import sqlite3 as _sqlite
+    db_dir = tmp_path / "Database"
+    db_dir.mkdir()
+    db13 = db_dir / "Textures13.db"
+    db14 = db_dir / "Textures14.db"
+    thumbs_dir = tmp_path / "thumbnails"
+    thumbs_dir.mkdir()
+    (thumbs_dir / "old13.png").write_bytes(b"x")
+    (thumbs_dir / "new14.png").write_bytes(b"y")
+
+    _make_textures_db(db13, [
+        ("special://home/addons/plugin.video.chaturbatetv/icon.png", "old13.png"),
+    ])
+    _make_textures_db(db14, [
+        ("special://home/addons/plugin.video.chaturbatetv/icon.png", "new14.png"),
+    ])
+
+    fake_xbmcvfs = MagicMock()
+    paths = {
+        "special://database/": str(db_dir) + "/",
+        "special://thumbnails/": str(thumbs_dir) + "/",
+    }
+    fake_xbmcvfs.translatePath = lambda p: paths.get(p, p)
+    monkeypatch.setitem(sys.modules, "xbmcvfs", fake_xbmcvfs)
+    sys.modules.pop("resources.lib.addon_actions", None)
+
+    actions = _import()
+    actions.refresh_artwork(handle=42)
+
+    # Both DBs cleared.
+    conn = _sqlite.connect(str(db13))
+    assert conn.execute("SELECT COUNT(*) FROM texture").fetchone()[0] == 0
+    conn.close()
+    conn = _sqlite.connect(str(db14))
+    assert conn.execute("SELECT COUNT(*) FROM texture").fetchone()[0] == 0
+    conn.close()
+    # Both cached files unlinked.
+    assert not (thumbs_dir / "old13.png").exists()
+    assert not (thumbs_dir / "new14.png").exists()
+
+
+def test_refresh_artwork_tolerates_schema_mismatch_db(
+    tmp_path: Path,
+    kodi_mocks: dict[str, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If a future Kodi version bumps the schema (e.g. column rename,
+    table dropped), the verb must skip that DB instead of crashing."""
+    import sqlite3 as _sqlite
+    db_dir = tmp_path / "Database"
+    db_dir.mkdir()
+    weird = db_dir / "Textures99.db"
+    conn = _sqlite.connect(str(weird))
+    conn.execute("CREATE TABLE unrelated (id INTEGER PRIMARY KEY)")
+    conn.commit()
+    conn.close()
+    thumbs_dir = tmp_path / "thumbnails"
+    thumbs_dir.mkdir()
+
+    fake_xbmcvfs = MagicMock()
+    paths = {
+        "special://database/": str(db_dir) + "/",
+        "special://thumbnails/": str(thumbs_dir) + "/",
+    }
+    fake_xbmcvfs.translatePath = lambda p: paths.get(p, p)
+    monkeypatch.setitem(sys.modules, "xbmcvfs", fake_xbmcvfs)
+    sys.modules.pop("resources.lib.addon_actions", None)
+
+    actions = _import()
+    # Must not raise.
+    actions.refresh_artwork(handle=42)
 
 
 def test_make_bulk_is_live_func_uses_affiliate_endpoint(

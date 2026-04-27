@@ -275,14 +275,16 @@ def refresh_artwork(handle: int, **_params: Any) -> None:
     """Force Kodi to re-fetch the addon's icon + fanart on next render.
 
     Kodi caches every texture (icon, fanart, room thumbnails) in
-    ``special://database/Textures13.db`` and serves it from
-    ``special://thumbnails/`` for the lifetime of the install. When we
-    ship a new icon or fanart, Kodi's cache stays stale until something
-    invalidates it - users see the old artwork forever.
+    ``special://database/Textures<N>.db`` and serves it from
+    ``special://thumbnails/`` for the lifetime of the install. The DB
+    schema version is part of the filename: Kodi 19/20 used
+    ``Textures13.db``, Kodi 21+ uses ``Textures14.db``, and the
+    schema bumps every couple of major releases. We walk EVERY
+    ``Textures*.db`` we find in the Database dir so the verb works
+    forward-compatibly.
 
-    This verb walks Textures13.db for any cached texture whose source
-    URL contains ``plugin.video.chaturbatetv`` (covers icon, fanart,
-    and any addon-relative artwork), deletes the cached file from
+    For each DB, this verb finds rows whose source URL contains
+    ``plugin.video.chaturbatetv``, deletes the cached file from
     Thumbnails/, and removes the DB row. The next directory render
     re-caches from disk.
 
@@ -294,51 +296,71 @@ def refresh_artwork(handle: int, **_params: Any) -> None:
     import sqlite3
     logger._log("refresh_artwork: start")
     deleted = 0
+    db_paths_walked = 0
     try:
         import xbmcvfs
-        db_path = xbmcvfs.translatePath(
-            "special://database/Textures13.db",
-        )
+        db_dir = Path(xbmcvfs.translatePath("special://database/"))
         thumbs_root = Path(xbmcvfs.translatePath("special://thumbnails/"))
     except Exception as exc:
         logger._log(f"refresh_artwork: xbmcvfs unavailable err={exc!r}")
         _notify("Chaturbate TV", "Refresh artwork: Kodi paths unavailable")
         return
 
-    try:
-        conn = sqlite3.connect(db_path)
-    except sqlite3.Error as exc:
-        logger._log(f"refresh_artwork: db connect FAIL err={exc!r}")
-        _notify("Chaturbate TV", "Refresh artwork: cannot open Textures13.db")
-        return
-
-    try:
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT id, cachedurl FROM texture WHERE url LIKE ?",
-            ("%plugin.video.chaturbatetv%",),
-        )
-        rows = cur.fetchall()
-        logger._log(f"refresh_artwork: found {len(rows)} cached textures")
-        for row_id, cached in rows:
-            cached_path = thumbs_root / str(cached)
+    # Walk every Textures<N>.db. Both the legacy and current schema get
+    # cleaned; if a future Kodi release bumps the schema again, our
+    # verb keeps working without a code change.
+    for db_path in sorted(db_dir.glob("Textures*.db")):
+        db_paths_walked += 1
+        logger._log(f"refresh_artwork: scanning {db_path}")
+        try:
+            conn = sqlite3.connect(str(db_path))
+        except sqlite3.Error as exc:
+            logger._log(
+                f"refresh_artwork: db connect FAIL {db_path} err={exc!r}"
+            )
+            continue
+        try:
+            cur = conn.cursor()
             try:
-                cached_path.unlink()
-            except (FileNotFoundError, OSError) as exc:
-                logger._log(
-                    f"refresh_artwork: unlink fail {cached_path} err={exc!r}"
+                cur.execute(
+                    "SELECT id, cachedurl FROM texture WHERE url LIKE ?",
+                    ("%plugin.video.chaturbatetv%",),
                 )
-            try:
-                conn.execute("DELETE FROM texture WHERE id = ?", (row_id,))
-                deleted += 1
+                rows = cur.fetchall()
             except sqlite3.Error as exc:
-                logger._log(f"refresh_artwork: db delete FAIL err={exc!r}")
-        conn.commit()
-    finally:
-        conn.close()
+                # Schema changed (table missing, columns missing) - skip
+                # gracefully. Avoid crashing the verb on unknown DB shapes.
+                logger._log(
+                    f"refresh_artwork: schema mismatch {db_path} err={exc!r}"
+                )
+                continue
+            logger._log(
+                f"refresh_artwork: {db_path.name} found {len(rows)} entries"
+            )
+            for row_id, cached in rows:
+                cached_path = thumbs_root / str(cached)
+                try:
+                    cached_path.unlink()
+                except (FileNotFoundError, OSError) as exc:
+                    logger._log(
+                        f"refresh_artwork: unlink fail {cached_path} err={exc!r}"
+                    )
+                try:
+                    conn.execute("DELETE FROM texture WHERE id = ?", (row_id,))
+                    deleted += 1
+                except sqlite3.Error as exc:
+                    logger._log(f"refresh_artwork: db delete FAIL err={exc!r}")
+            conn.commit()
+        finally:
+            conn.close()
 
-    logger._log(f"refresh_artwork: done deleted={deleted}")
-    _notify("Chaturbate TV", f"Refreshed {deleted} cached art entries")
+    logger._log(
+        f"refresh_artwork: done dbs_walked={db_paths_walked} deleted={deleted}"
+    )
+    if db_paths_walked == 0:
+        _notify("Chaturbate TV", "Refresh artwork: no Textures DB found")
+    else:
+        _notify("Chaturbate TV", f"Refreshed {deleted} cached art entries")
     # Refresh the current container so the user sees the new artwork
     # immediately.
     _refresh_container()
