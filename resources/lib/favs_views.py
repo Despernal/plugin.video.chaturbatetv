@@ -27,17 +27,23 @@ from resources.lib.cb_endpoints import online_rooms_affiliate_url
 from resources.lib.cb_models import Favorite, Gender, Model
 
 
-# In-memory cache TTL: 60 seconds. Going out and back into Online
-# Favorites within a minute reuses the cache (instant); leaving for
-# longer triggers a fresh single-call fetch (which is also fast since
-# the affiliate endpoint hands back ALL online rooms in one GET).
-_BULK_CACHE_TTL = 60.0
-# Disk-cache TTL: 30 minutes. Survives Kodi restarts so re-entering
-# Favorites after a reboot is instant rather than triggering a fresh
-# affiliate-API call.
-_BULK_DISK_TTL = 1800.0
-# Filename for the on-disk cache, lives next to favs.json so it shares
-# the same userdata directory.
+# In-memory cache TTL: 30 seconds. Short enough that re-entering Online
+# Favorites picks up newly-online models; long enough that paging
+# through the result (Next page clicks within the same session) reuses
+# the cache instead of hammering the API. Each fresh fetch is sub-second
+# (single-call affiliate endpoint) so we can afford a short TTL.
+_BULK_CACHE_TTL = 30.0
+
+# NO disk cache: would only carry slugs (Model is heavy to serialize),
+# which means a disk-cache HIT on a Kodi restart would render online
+# favs WITHOUT thumbnails or plot info. The affiliate endpoint fetch
+# is fast enough that doing a fresh call on first entry is the right
+# tradeoff. Kodi-restart re-entry takes ~1s vs instant; thumbnails and
+# plot info are worth that much.
+
+# Filename used by older versions for an on-disk slug cache. We delete
+# it on entry so a leftover from 0.6.0 - 0.6.5 doesn't poison the new
+# slug-only-vs-model-rich semantics.
 _BULK_CACHE_FILE = "bulk_live_cache.json"
 
 # Affiliate watermarks ('s rotating array). The affiliate API
@@ -88,54 +94,26 @@ _bulk_models: dict[str, Model] = {}
 
 
 def _bulk_disk_cache_path() -> Path:
-    """Cache file path, sibling of favs.json under the addon's userdata."""
+    """Path of the legacy on-disk slug cache. Older versions wrote
+    here; we delete any stale file on startup so it doesn't poison the
+    new model-rich semantics."""
     return _favs_path().parent / _BULK_CACHE_FILE
 
 
-def _load_bulk_disk_cache(
-    nowt: float,
-    cache_path: Path | None = None,
-) -> tuple[float, set[str]] | None:
-    """Read the disk cache; return ``(timestamp, slugs)`` if hot.
+def _delete_stale_disk_cache(cache_path: Path | None = None) -> None:
+    """One-time cleanup: remove the legacy slug-only disk cache.
 
-    Hot = file exists, the JSON parses, and the timestamp is within
-    ``_BULK_DISK_TTL`` seconds. Any failure (missing file, bad JSON,
-    OSError) returns None so callers fall back to a fresh fetch.
+    Versions 0.6.3 - 0.6.5 cached the slug set on disk for 30 minutes.
+    The new code populates a sibling ``_bulk_models`` dict for thumbnail
+    rendering, but that dict is in-memory only; a disk-cache hit would
+    therefore render online favs WITHOUT thumbnails until the next
+    fresh fetch. Easier to drop the disk cache entirely now that the
+    affiliate endpoint is sub-second.
     """
-    import json
     path = cache_path if cache_path is not None else _bulk_disk_cache_path()
     try:
-        body = path.read_text(encoding="utf-8")
+        path.unlink()
     except (FileNotFoundError, OSError):
-        return None
-    try:
-        data = json.loads(body)
-        ts = float(data["timestamp"])
-        slugs = set(data["slugs"])
-    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-        return None
-    if nowt - ts > _BULK_DISK_TTL:
-        return None
-    return ts, slugs
-
-
-def _save_bulk_disk_cache(
-    nowt: float,
-    slugs: set[str],
-    cache_path: Path | None = None,
-) -> None:
-    """Persist the live-slugs set so a Kodi restart reuses it. Best-effort."""
-    import json
-    path = cache_path if cache_path is not None else _bulk_disk_cache_path()
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(
-            json.dumps({"timestamp": nowt, "slugs": sorted(slugs)}),
-            encoding="utf-8",
-        )
-        tmp.replace(path)  # atomic on POSIX
-    except OSError:
         return
 
 
@@ -147,16 +125,12 @@ def _bulk_live_slugs(
 ) -> set[str] | None:
     """Return the set of all currently-live model slugs.
 
-    Three-tier cache:
+    Single-call to the affiliate endpoint, in-memory cached for 30s so
+    paginating within an Online Favorites session doesn't refetch on
+    every Next-page click. Re-entering Online Favorites after the TTL
+    expires triggers a fresh fetch (sub-second).
 
-    1. In-memory cache (``_BULK_CACHE_TTL``=5min). Instant hit during
-       the same Kodi session.
-    2. On-disk cache (``_BULK_DISK_TTL``=30min). Survives Kodi restarts;
-       re-entering Favorites after a reboot reuses the warm set.
-    3. Fresh fetch from the public room-list API in pages of 500 with
-       a politeness pacer between pages.
-
-    Returns None on hard failure (no rooms came back at all).
+    Returns None on network failure.
     """
     from resources.lib import logger
     global _bulk_cache
@@ -169,15 +143,9 @@ def _bulk_live_slugs(
                 f"slugs={len(cached)}"
             )
             return cached
-    disk_hit = _load_bulk_disk_cache(nowt, cache_path)
-    if disk_hit is not None:
-        ts, cached = disk_hit
-        _bulk_cache = (ts, cached)
-        logger._log(
-            f"favs_views._bulk_live_slugs: disk-cache HIT ts={ts:.1f} "
-            f"slugs={len(cached)} age={nowt - ts:.1f}s"
-        )
-        return cached
+
+    # Drop any leftover legacy disk cache so it doesn't accumulate.
+    _delete_stale_disk_cache(cache_path)
 
     slugs: set[str] = set()
     models_by_slug: dict[str, Model] = {}
@@ -210,22 +178,19 @@ def _bulk_live_slugs(
     # thumbnails + viewer counts + plot info (mirrors browse_views).
     _bulk_models.clear()
     _bulk_models.update(models_by_slug)
-    _save_bulk_disk_cache(nowt, slugs, cache_path)
     logger._log(
-        f"favs_views._bulk_live_slugs: cached {len(slugs)} live slugs"
+        f"favs_views._bulk_live_slugs: cached {len(slugs)} live slugs "
+        f"(memory only, 30s TTL)"
     )
     return slugs
 
 
 def _bulk_cache_clear(cache_path: Path | None = None) -> None:
-    """Drop both the in-memory and on-disk bulk-fetch caches. Used by tests."""
+    """Drop the in-memory bulk-fetch cache and any legacy on-disk cache."""
     global _bulk_cache
     _bulk_cache = None
-    path = cache_path if cache_path is not None else _bulk_disk_cache_path()
-    try:
-        path.unlink()
-    except (FileNotFoundError, OSError):
-        return
+    _bulk_models.clear()
+    _delete_stale_disk_cache(cache_path)
 
 
 def _favs_path() -> Path:

@@ -435,7 +435,7 @@ def test_bulk_live_slugs_caches_results_for_60s(
     tmp_path: Path,
     kodi_mocks: dict[str, MagicMock],
 ) -> None:
-    """Re-entry within 60s reuses the cache (no re-fetch)."""
+    """Re-entry within 30s reuses the cache (no re-fetch)."""
     fv = _import()
     fv._bulk_cache_clear()
     fetch_calls = {"n": 0}
@@ -450,7 +450,7 @@ def test_bulk_live_slugs_caches_results_for_60s(
         ])
 
     fv._bulk_live_slugs(fetch, now_func=lambda: 100.0)
-    fv._bulk_live_slugs(fetch, now_func=lambda: 130.0)  # within TTL
+    fv._bulk_live_slugs(fetch, now_func=lambda: 120.0)  # within 30s TTL
     assert fetch_calls["n"] == 1  # cached, no re-fetch
 
 
@@ -458,7 +458,7 @@ def test_bulk_live_slugs_cache_expires_after_ttl(
     tmp_path: Path,
     kodi_mocks: dict[str, MagicMock],
 ) -> None:
-    """Cache TTL is 60s - short so re-entering Online Favorites picks
+    """Cache TTL is 30s - short so re-entering Online Favorites picks
     up newly-online models. The single-call affiliate endpoint makes
     each fresh fetch fast, so we don't need a long cache."""
     fv = _import()
@@ -473,8 +473,7 @@ def test_bulk_live_slugs_cache_expires_after_ttl(
         ])
 
     fv._bulk_live_slugs(fetch, now_func=lambda: 100.0)
-    # Past the disk-cache TTL (1800s) AND the memory TTL (60s).
-    fv._bulk_live_slugs(fetch, now_func=lambda: 2100.0)
+    fv._bulk_live_slugs(fetch, now_func=lambda: 200.0)  # past 30s TTL
     assert fetch_calls["n"] == 2
 
 
@@ -547,33 +546,41 @@ def test_online_favs_view_page_param_returns_correct_slice(
     assert next_links == []
 
 
-def test_bulk_live_slugs_disk_cache_survives_in_memory_clear(
+def test_bulk_live_slugs_drops_legacy_disk_cache_on_entry(
     tmp_path: Path,
     kodi_mocks: dict[str, MagicMock],
 ) -> None:
-    """Simulating a Kodi restart: clear the in-memory cache between
-    calls; the disk cache should still serve the second call so
-    re-entering Favorites after a reboot is instant.
+    """Versions 0.6.3 - 0.6.5 wrote a slug-only disk cache to
+    ``addon_data/.../bulk_live_cache.json``. The new code does NOT
+    re-use that cache (model data was never persisted, so a hit would
+    render online favs without thumbnails). Any leftover file should be
+    deleted on first call so it doesn't pile up.
     """
     fv = _import()
     fv._bulk_cache_clear()
-    fetch_calls = {"n": 0}
+    # Plant a stale legacy cache file at the path the test fixture
+    # has redirected the cache helper to.
+    import resources.lib.favs_views as fv_mod
+    cache_path = fv_mod._bulk_disk_cache_path()
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(
+        json.dumps({"timestamp": 9999999999.0,
+                    "slugs": ["zoe", "alice"]}),
+        encoding="utf-8",
+    )
+    assert cache_path.exists()
 
     def fetch(url: str, **_kw: Any) -> str:
-        fetch_calls["n"] += 1
         return json.dumps([
-            {"username": "alice", "slug": "alice", "gender": "f",
+            {"username": "fresh", "slug": "fresh", "gender": "f",
              "num_users": 1, "image_url": "", "room_subject": ""}
         ])
 
-    fv._bulk_live_slugs(fetch, now_func=lambda: 100.0)
-    # Drop in-memory cache only (Kodi restart).
-    import resources.lib.favs_views as fv_mod
-    fv_mod._bulk_cache = None
-    # Within disk TTL (1800s), no fresh fetch.
-    out = fv._bulk_live_slugs(fetch, now_func=lambda: 1500.0)
-    assert out == {"alice"}
-    assert fetch_calls["n"] == 1, "disk-cache hit should skip the network"
+    out = fv._bulk_live_slugs(fetch)
+    # Live set comes from the FRESH fetch, not the stale disk cache.
+    assert out == {"fresh"}
+    # And the legacy cache file got cleaned up.
+    assert not cache_path.exists()
 
 
 def test_online_favs_view_treats_all_as_offline_when_bulk_fails(
