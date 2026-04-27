@@ -104,6 +104,7 @@ class _LazyHandlers(dict[str, _Handler]):
         self["new"] = browse_views.new_cams_view
         self["gender"] = browse_views.gender_view
         self["search"] = browse_views.search_view
+        self["search_prompt"] = addon_actions.search
         self["favs"] = favs_views.favs_menu
         self["favs_online"] = favs_views.online_favs_view
         self["favs_offline"] = favs_views.offline_favs_view

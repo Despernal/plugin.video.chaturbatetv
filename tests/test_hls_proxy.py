@@ -291,6 +291,63 @@ def test_chunklist_passthrough(
         handle.stop()
 
 
+def test_chunklist_rewrites_rendition_report_uri(
+    stub_cdn: tuple[str, _StubState],
+) -> None:
+    """LL-HLS chunklists carry ``#EXT-X-RENDITION-REPORT:URI="..."``
+    pointing at SIBLING quality-level chunklists. ISA reads those URIs
+    to do fast quality switching without a master refetch. If they
+    point straight at chaturbate's edges, ISA fetches them WITHOUT our
+    UA + Referer headers and gets 403'd, breaking quality switch.
+
+    The chunklist rewriter must redirect those URIs through the proxy
+    too, just like the master rewriter already does for the top-level
+    chunklist URIs.
+    """
+    from resources.lib import hls_proxy
+
+    cdn_base, state = stub_cdn
+    state.master_body = (
+        b"#EXTM3U\n"
+        b"#EXT-X-STREAM-INF:BANDWIDTH=2000000\n"
+        b"chunklist_w12345_video.m3u8\n"
+    )
+    state.chunklist_body = (
+        b"#EXTM3U\n"
+        b"#EXT-X-VERSION:6\n"
+        b"#EXT-X-TARGETDURATION:2\n"
+        b"#EXTINF:2.0,\n"
+        b"seg_1.m4s\n"
+        b'#EXT-X-RENDITION-REPORT:URI="chunklist_w99999_video.m3u8",'
+        b'LAST-MSN=42,LAST-PART=2\n'
+        b"#EXT-X-ENDLIST\n"
+    )
+    upstream = f"{cdn_base}/hls/aa/master.m3u8"
+    handle = hls_proxy.start_proxy(
+        stream_url=upstream,
+        room_url="https://chaturbate.com/alice/",
+    )
+    try:
+        with urlopen(handle.master_url, timeout=5) as resp:
+            master_body = resp.read().decode("utf-8")
+        chunklist_url = next(
+            line for line in master_body.splitlines()
+            if line and not line.startswith("#")
+        )
+        with urlopen(chunklist_url, timeout=5) as resp:
+            chunklist = resp.read().decode("utf-8")
+        # The RENDITION-REPORT URI must NOT point at the upstream CDN.
+        assert cdn_base not in chunklist, (
+            f"upstream URL leaked through RENDITION-REPORT: {chunklist!r}"
+        )
+        # And it MUST be rewritten to /chunklist?name=... so ISA's
+        # quality-switch fetch keeps our UA+Referer.
+        prefix = f"http://{handle.host}:{handle.port}/chunklist?name="
+        assert f'URI="{prefix}chunklist_w99999_video"' in chunklist
+    finally:
+        handle.stop()
+
+
 def test_stop_releases_port(
     stub_cdn: tuple[str, _StubState],
 ) -> None:

@@ -142,13 +142,43 @@ def playvid(handle: int, slug: str = "", name: str = "",
         return
 
     if not result.success:
-        # Tell Kodi the resolve failed; UI returns to the caller cleanly.
+        # Lesson v6.1: when TV mode is active, fire Action(Next) so the
+        # playlist advances past the offline slot instead of leaving Kodi
+        # on a black screen. Outside TV mode, hand back the failed resolve
+        # so the user's own click is acknowledged cleanly.
+        if _tv_mode_active():
+            logger._log(
+                f"playvid: TV active + offline -> Action(Next) for slug={slug!r}"
+            )
+            try:
+                import xbmc
+                xbmc.executebuiltin("Action(Next)")
+            except Exception:  # noqa: S110 - best-effort: builtin missing means no Kodi
+                pass
+            return
         xbmcplugin.setResolvedUrl(handle, False, _empty_listitem())
         _notify("Chaturbate TV", f"{slug} is offline or unreachable")
         return
 
     xbmcplugin.setResolvedUrl(handle, True, result.listitem)
     logger._log(f"playvid: setResolvedUrl success slug={slug!r}")
+
+
+def _tv_mode_active() -> bool:
+    """True when the TV-mode playlist loop is the one driving playback.
+
+    Window(10000) is the persistent ``Home`` window — its props live for
+    the whole Kodi process, which is how the loop signals across slug
+    boundaries. Any failure to read the window (no xbmcgui, no Window)
+    means we treat it as inactive and fall back to the regular failure
+    path.
+    """
+    try:
+        import xbmcgui
+        from resources.lib import tv_state
+        return xbmcgui.Window(10000).getProperty(tv_state.ACTIVE_KEY) == "1"
+    except Exception:
+        return False
 
 
 def _empty_listitem() -> Any:
@@ -164,17 +194,22 @@ def _empty_listitem() -> Any:
 
 
 def tv_play(handle: int, store_path: Path | None = None,
-            poll_minutes: int = 10,
+            poll_minutes: int | None = None,
             **_params: Any) -> None:
     """Run the TV loop. Loads tv.json, hands off to tv_loop.tv_play.
 
     Loading is done at this layer so a missing/empty file does NOT
-    silently no-op the loop.
+    silently no-op the loop. ``poll_minutes`` is read from settings.xml
+    when not passed explicitly (tests pass it directly).
     """
-    from resources.lib import logger
+    from resources.lib import addon_settings, logger
     path = store_path if store_path is not None else _tv_path()
     entries = tv_store.load(path)
-    logger._log(f"addon_actions.tv_play: entries={len(entries)} path={path}")
+    pm = poll_minutes if poll_minutes is not None else addon_settings.poll_minutes()
+    logger._log(
+        f"addon_actions.tv_play: entries={len(entries)} path={path} "
+        f"poll_minutes={pm}"
+    )
     if not entries:
         _notify("Chaturbate TV", "TV list is empty - use 'Add to TV' on a model")
         return
@@ -184,7 +219,7 @@ def tv_play(handle: int, store_path: Path | None = None,
     tv_loop.tv_play(
         entries=entries,
         is_live_func=lambda url: cb_client.is_model_live(_slug_from_url(url)),
-        poll_minutes=poll_minutes,
+        poll_minutes=pm,
     )
 
 
@@ -194,12 +229,12 @@ def tv_stop(handle: int, **_params: Any) -> None:
     Equivalent to 's ResetTVMode - if the loop self-locked
     due to a glitch, this is the user-facing recovery path.
     """
-    from resources.lib import logger
+    from resources.lib import logger, tv_state
     try:
         import xbmcgui
         win = xbmcgui.Window(10000)
-        prior = win.getProperty("chaturbatetv_active")
-        win.setProperty("chaturbatetv_active", "0")
+        prior = win.getProperty(tv_state.ACTIVE_KEY)
+        win.setProperty(tv_state.ACTIVE_KEY, "0")
         logger._log(f"addon_actions.tv_stop: prior={prior!r} cleared")
         if prior == "1":
             _notify("Chaturbate TV", "TV mode flag cleared")

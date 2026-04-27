@@ -138,8 +138,13 @@ def _default_resolve(slug: str) -> Resolution:
 
 
 def _default_start_proxy(stream_url: str, room_url: str) -> Any:
+    from resources.lib import addon_settings
     from resources.lib.hls_proxy import start_proxy
-    return start_proxy(stream_url=stream_url, room_url=room_url)
+    return start_proxy(
+        stream_url=stream_url,
+        room_url=room_url,
+        port=addon_settings.isa_proxy_port(),
+    )
 
 
 # --------------------------------------------------------------------------- #

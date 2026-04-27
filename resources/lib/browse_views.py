@@ -65,7 +65,7 @@ def main_menu(handle: int, **_params: Any) -> None:
                          "gender", gender="couple")
     kodi_helpers.add_dir(handle, _color_label("Trans", Gender.TRANS),
                          "gender", gender="trans")
-    kodi_helpers.add_dir(handle, "Search", "search")
+    kodi_helpers.add_dir(handle, "Search", "search_prompt")
     kodi_helpers.add_dir(handle, "TV Mode", "tv_list")
     kodi_helpers.add_dir(handle, "Favorites", "favs")
     kodi_helpers.end_directory(handle, content_type="videos")

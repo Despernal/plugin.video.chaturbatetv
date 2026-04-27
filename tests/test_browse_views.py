@@ -99,10 +99,17 @@ def test_main_menu_adds_gender_filters(kodi_mocks: dict[str, MagicMock]) -> None
 
 
 def test_main_menu_adds_search_tv_favs(kodi_mocks: dict[str, MagicMock]) -> None:
+    """The main-menu Search entry must route to search_prompt (the input
+    dialog opener), NOT the bare search result-renderer. ``search_view``
+    closes the directory on empty query, so a click would silently show
+    a blank page if we routed to mode=search.
+    """
     bv = _import()
     bv.main_menu(handle=42)
     urls = _added_urls(kodi_mocks["xbmcplugin"])
-    assert any("mode=search" in u for u in urls)
+    assert any("mode=search_prompt" in u for u in urls), (
+        f"main-menu Search must route to search_prompt; urls={urls}"
+    )
     assert any("mode=tv_list" in u for u in urls)
     assert any("mode=favs" in u for u in urls)
 

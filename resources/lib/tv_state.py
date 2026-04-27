@@ -14,7 +14,9 @@ from __future__ import annotations
 from collections.abc import Callable
 
 
-_KEY = "chaturbatetv_active"
+ACTIVE_KEY = "chaturbatetv_active"
+# Backwards-compat alias for the old private name within this module.
+_KEY = ACTIVE_KEY
 
 
 _Getter = Callable[[str], str]

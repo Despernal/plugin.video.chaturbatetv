@@ -187,6 +187,50 @@ def test_build_playlist_url_round_trips_slug_and_name(
     assert "Alice" in url or "Alice%20" in url or "Alice+" in url
 
 
+def test_inner_loop_queues_urls_with_slug_not_name(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """Regression: a TV row whose ``name`` is a fancy display string
+    (``Alice the Cam Star``) but whose ``url`` resolves to slug ``alice``
+    must be queued with ``slug=alice`` in the plugin URL. Earlier code
+    accidentally passed ``m.name`` for both slug and name, which broke
+    playback for any user-customized TV-row name (and any spaces in the
+    name corrupted the URL).
+    """
+    tl = _import()
+    rt = MockKodiRuntime()
+    # Display name diverges from the URL slug:
+    fancy = TVEntry(
+        name="Alice the Cam Star",
+        url="https://chaturbate.com/alice/",
+        priority=10,
+    )
+
+    def play_call(_pl: Any) -> None:
+        rt.player.simulate_av_started(
+            tl._build_playlist_url("alice", "Alice the Cam Star"),
+        )
+        rt.player.simulate_stopped()
+
+    tl.run_once_for_test(
+        runtime=rt,
+        entries=[fancy],
+        is_live_func=lambda u: True,
+        play_func=play_call,
+        idle_func=lambda: 30,
+        max_iterations=1,
+    )
+
+    queued = rt.playlist.paths()
+    assert queued, "loop did not queue any URL"
+    assert any("slug=alice" in q for q in queued), (
+        f"queued URLs lack slug=alice: {queued!r}"
+    )
+    assert not any("slug=Alice" in q for q in queued), (
+        f"queued URLs treated name as slug: {queued!r}"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Outer loop integration via injected runtime
 # --------------------------------------------------------------------------- #

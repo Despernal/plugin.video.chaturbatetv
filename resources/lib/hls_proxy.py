@@ -363,6 +363,12 @@ def _rewrite_chunklist_for_isa(absolutized: str, host: str, port: int) -> str:
     """Replace every absolute segment URL in a chunklist body with a
     /segment?url=Y hop. Same shape as the master rewrite but for .m4s
     URIs.
+
+    Also rewrites ``EXT-X-RENDITION-REPORT:URI="..."`` references to
+    sibling chunklists (LL-HLS quality-switch hint) so ISA's fast-switch
+    fetch goes through the proxy and keeps our UA+Referer. Without this,
+    ISA sees the absolutized upstream URL, fetches it directly, and gets
+    403'd by the chaturbate edge.
     """
     def _repl(m: re.Match[str]) -> str:
         seg = m.group(1)
@@ -375,6 +381,17 @@ def _rewrite_chunklist_for_isa(absolutized: str, host: str, port: int) -> str:
         return f'URI="http://{host}:{port}/segment?url={quote(seg, safe="")}"'
 
     out = _ABS_SEG_URI_RE.sub(_uri_repl, out)
+
+    # RENDITION-REPORT URI rewrite: keep ISA quality-switch fetches
+    # going through the proxy.
+    def _chunk_uri_repl(m: re.Match[str]) -> str:
+        url = m.group(1)
+        nm = _CHUNKLIST_NAME_RE.search(url)
+        if not nm:
+            return f'URI="{url}"'
+        return f'URI="http://{host}:{port}/chunklist?name={nm.group(1)}"'
+
+    out = _ABS_CHUNKLIST_URI_RE.sub(_chunk_uri_repl, out)
     return out
 
 
@@ -784,7 +801,8 @@ def _build_master_for_isa(host: str, port: int, state: _State) -> bytes:
 # --------------------------------------------------------------------------- #
 
 
-def start_proxy(stream_url: str, room_url: str) -> ProxyHandle:
+def start_proxy(stream_url: str, room_url: str,
+                port: int = 0) -> ProxyHandle:
     """Bind a localhost HTTP server and start serving the rewritten master.
 
     Args:
@@ -793,6 +811,9 @@ def start_proxy(stream_url: str, room_url: str) -> ProxyHandle:
             ~60-90s.
         room_url: ``https://chaturbate.com/<slug>/`` - used as the
             ``Referer`` upstream. Chaturbate edges 403 without it.
+        port: Localhost port to bind. ``0`` (default) lets the kernel
+            assign one. Settings.xml exposes ``isa_proxy_port`` for
+            users on locked-down LAN firewalls who need a fixed port.
 
     Returns:
         A ``ProxyHandle`` whose ``master_url`` is the URL to hand to
@@ -847,7 +868,7 @@ def start_proxy(stream_url: str, room_url: str) -> ProxyHandle:
         lambda reason: trigger_fn(reason),
     )
 
-    server = _Server(("127.0.0.1", 0), handler_cls)
+    server = _Server(("127.0.0.1", port), handler_cls)
     raw_host = server.server_address[0]
     host = raw_host if isinstance(raw_host, str) else raw_host.decode("ascii")
     port = int(server.server_address[1])

@@ -39,12 +39,13 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlencode
 
-from resources.lib import tv_classify, tv_select
+from resources.lib import tv_classify, tv_select, tv_state
 from resources.lib.cb_models import TVEntry
 
 
 _PLUGIN_PREFIX = "plugin://plugin.video.chaturbatetv/"
-_ACTIVE_KEY = "chaturbatetv_active"
+# Single source of truth: the literal lives in tv_state.ACTIVE_KEY.
+_ACTIVE_KEY = tv_state.ACTIVE_KEY
 
 
 def _safe_log(msg: str) -> None:
@@ -178,6 +179,17 @@ def _build_playlist_url(slug: str, name: str) -> str:
     return f"{_PLUGIN_PREFIX}?{qs}"
 
 
+def _slug_from_url(url: str) -> str:
+    """``https://chaturbate.com/alice/`` -> ``alice``.
+
+    TVEntry stores ``url`` and ``name`` (display label) but no slug -
+    so playback URL building must derive the slug from the URL, never
+    from the name (display names are user-customizable and may contain
+    spaces, capitals, or full sentences).
+    """
+    return url.rstrip("/").rsplit("/", 1)[-1]
+
+
 # --------------------------------------------------------------------------- #
 # Test-injected loop
 # --------------------------------------------------------------------------- #
@@ -308,7 +320,7 @@ def run_once_for_test(
             runtime.playlist.clear()
             queued_paths: set[str] = set()
             for m in tier:
-                pu = _build_playlist_url(m.name, m.name)
+                pu = _build_playlist_url(_slug_from_url(m.url), m.name)
                 runtime.playlist.add(pu)
                 queued_paths.add(pu)
 
@@ -475,7 +487,7 @@ def tv_play(
                 )
                 if target is None:
                     _safe_log("tv_loop.tv_play: no live target, screensaver")
-                    from resources.lib import screensaver
+                    from resources.lib import addon_settings, screensaver
                     _entries_iter = sorted_entries
 
                     def _re_walk(
@@ -486,10 +498,13 @@ def tv_play(
                             _e, _il, should_continue=_should_continue,
                         )
 
+                    color = addon_settings.screensaver_color()
+                    _safe_log(f"tv_loop.tv_play: screensaver color={color}")
                     resumed = screensaver.run(
                         re_walk_func=_re_walk,
                         is_active_func=_is_active,
                         wait_for_abort=monitor.waitForAbort,
+                        color=color,
                     )
                     if resumed is None:
                         return "screensaver_dismissed"
@@ -504,7 +519,7 @@ def tv_play(
                 playlist.clear()
                 queued: set[str] = set()
                 for m in tier:
-                    pu = _build_playlist_url(m.name, m.name)
+                    pu = _build_playlist_url(_slug_from_url(m.url), m.name)
                     li = xbmcgui.ListItem(label=m.name)
                     playlist.add(pu, li)
                     queued.add(pu)

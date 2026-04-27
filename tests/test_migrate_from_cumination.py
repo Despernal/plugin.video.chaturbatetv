@@ -229,6 +229,43 @@ def test_migrate_favorites_db_missing_source_returns_zero(tmp_path: Path) -> Non
     assert not favs_path.exists()
 
 
+def test_migrate_favorites_db_missing_table_returns_zero(tmp_path: Path) -> None:
+    """A real sqlite file that lacks the ``favorites`` table - e.g. a
+    fresh install or a corrupt db - must return 0, not crash. Some users
+    have ``favorites.db`` files left behind by uninstalled plugins; those
+    files are valid sqlite but have no rows we recognize.
+    """
+    mod = _import()
+    db_path = tmp_path / "favorites.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute("CREATE TABLE unrelated_thing (id INTEGER PRIMARY KEY)")
+        conn.commit()
+    finally:
+        conn.close()
+    favs_path = tmp_path / "dst" / "favs.json"
+    assert mod.migrate_favorites_db(db_path, favs_path) == 0
+    assert not favs_path.exists()
+
+
+def test_migrate_favorites_db_wrong_columns_returns_zero(tmp_path: Path) -> None:
+    """``favorites`` table exists but lacks ``name``/``url``/``mode`` columns
+    ( schema drift, third-party plugin reusing the name) -
+    fall back to 0, not raise.
+    """
+    mod = _import()
+    db_path = tmp_path / "favorites.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute("CREATE TABLE favorites (id INTEGER PRIMARY KEY, blob TEXT)")
+        conn.commit()
+    finally:
+        conn.close()
+    favs_path = tmp_path / "dst" / "favs.json"
+    assert mod.migrate_favorites_db(db_path, favs_path) == 0
+    assert not favs_path.exists()
+
+
 def test_migrate_favorites_db_idempotent_merge(tmp_path: Path) -> None:
     mod = _import()
     db_path = tmp_path / "favorites.db"

@@ -102,11 +102,17 @@ def migrate_favorites_db(src: Path, dst: Path, dry_run: bool = False) -> int:
         return 0
     try:
         cur = conn.cursor()
-        cur.execute(
-            "SELECT name, url FROM favorites WHERE mode = ?",
-            ("chaturbate.Playvid",),
-        )
-        rows = cur.fetchall()
+        try:
+            cur.execute(
+                "SELECT name, url FROM favorites WHERE mode = ?",
+                ("chaturbate.Playvid",),
+            )
+            rows = cur.fetchall()
+        except sqlite3.Error:
+            # Table missing, columns missing, db corrupt - skip gracefully
+            # rather than crashing the whole migration. Other steps (tv.json,
+            # cookies) may still be salvageable.
+            return 0
     finally:
         conn.close()
 

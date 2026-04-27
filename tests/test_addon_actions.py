@@ -236,6 +236,77 @@ def test_playvid_calls_setResolvedUrl_with_failure_when_offline(
     assert succeeded is False
 
 
+def test_playvid_offline_during_tv_mode_fires_action_next(
+    kodi_mocks: dict[str, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lesson v6.1: when TV mode is active and a slot in the playlist
+    resolves offline, ``playvid`` must fire ``Action(Next)`` so the
+    player advances. Sitting on ``setResolvedUrl(False)`` mid-playlist
+    leaves Kodi on a black screen until the user mashes Next themselves.
+    """
+    state: dict[str, str] = {"chaturbatetv_active": "1"}
+
+    class _Win:
+        def __init__(self, _id: int = 0) -> None:
+            pass
+
+        def getProperty(self, k: str) -> str:
+            return state.get(k, "")
+
+        def setProperty(self, k: str, v: str) -> None:
+            state[k] = v
+
+    kodi_mocks["xbmcgui"].Window = _Win
+
+    cap = _patch_resolver_and_xbmcplugin(monkeypatch, success=False)
+    actions = _import()
+
+    actions.playvid(handle=42, slug="ghost", name="ghost")
+
+    # Action(Next) was fired - player advances to next TV slot.
+    builtins_called = [c.args[0] for c in
+                       kodi_mocks["xbmc"].executebuiltin.call_args_list]
+    assert "Action(Next)" in builtins_called
+    # And setResolvedUrl was NOT called (we early-returned).
+    assert cap["resolved"] == []
+
+
+def test_playvid_offline_without_tv_mode_still_fails_cleanly(
+    kodi_mocks: dict[str, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Outside TV mode, offline rooms must still hand back
+    ``setResolvedUrl(False)`` rather than firing Action(Next) (which
+    would skip past the user's own click).
+    """
+    state: dict[str, str] = {"chaturbatetv_active": "0"}
+
+    class _Win:
+        def __init__(self, _id: int = 0) -> None:
+            pass
+
+        def getProperty(self, k: str) -> str:
+            return state.get(k, "")
+
+        def setProperty(self, k: str, v: str) -> None:
+            state[k] = v
+
+    kodi_mocks["xbmcgui"].Window = _Win
+
+    cap = _patch_resolver_and_xbmcplugin(monkeypatch, success=False)
+    actions = _import()
+
+    actions.playvid(handle=42, slug="ghost", name="ghost")
+
+    builtins_called = [c.args[0] for c in
+                       kodi_mocks["xbmc"].executebuiltin.call_args_list]
+    assert "Action(Next)" not in builtins_called
+    assert len(cap["resolved"]) == 1
+    _h, succeeded, _li = cap["resolved"][0]
+    assert succeeded is False
+
+
 def test_playvid_with_no_slug_does_not_call_resolver(
     kodi_mocks: dict[str, MagicMock],
     monkeypatch: pytest.MonkeyPatch,
@@ -379,6 +450,39 @@ def test_tv_play_empty_list_notifies_and_returns(
     actions.tv_play(handle=42, store_path=tmp_path / "tv.json")
     msgs = [m for _h, m in kodi_mocks["notifications"]]
     assert any("empty" in m.lower() for m in msgs)
+
+
+def test_tv_play_reads_poll_minutes_from_settings(
+    tmp_path: Path,
+    kodi_mocks: dict[str, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: when tv_play is called without an explicit poll_minutes,
+    it must read from addon_settings.poll_minutes() rather than hardcode 10.
+    """
+    from resources.lib import tv_store
+    from resources.lib.cb_models import TVEntry
+
+    tv_path = tmp_path / "tv.json"
+    tv_store.save(tv_path, [
+        TVEntry(name="alice", url="https://chaturbate.com/alice/", priority=10),
+    ])
+
+    captured: dict[str, Any] = {}
+
+    def fake_tv_play(*, entries: Any, is_live_func: Any,
+                     poll_minutes: int = 10) -> str:
+        captured["poll_minutes"] = poll_minutes
+        return "user_stopped"
+
+    import resources.lib.addon_settings as addon_settings_mod
+    import resources.lib.tv_loop as tv_loop_mod
+    monkeypatch.setattr(tv_loop_mod, "tv_play", fake_tv_play)
+    monkeypatch.setattr(addon_settings_mod, "poll_minutes", lambda: 7)
+
+    actions = _import()
+    actions.tv_play(handle=42, store_path=tv_path)
+    assert captured["poll_minutes"] == 7
 
 
 def test_tv_stop_clears_active_flag(kodi_mocks: dict[str, MagicMock],

@@ -138,7 +138,8 @@ def test_dispatch_handler_can_raise_and_router_propagates() -> None:
 def test_default_handlers_registry_has_expected_modes() -> None:
     """The shipped registry must cover every URL the addon emits."""
     needed = {
-        "main", "top", "new", "gender", "search", "favs",
+        "main", "top", "new", "gender", "search", "search_prompt",
+        "favs", "favs_online", "favs_offline",
         "playvid", "tv_play", "tv_stop", "tv_list",
         "tv_add", "tv_remove", "tv_edit",
         "fav_add", "fav_remove",
