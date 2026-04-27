@@ -82,13 +82,19 @@ def _build_player_class() -> type:
             self.playlist_ended_naturally: bool = False
             self.last_natural_end_time: float = 0.0
             self.queued_paths: set[str] = set()
+            # Timestamp of the previous user-input stop event (idle<3s).
+            # Used by ``_classify_after_stop`` for the double-stop
+            # within-5s force-exit override (Lesson 29). Persists across
+            # iterations on purpose so a stop late in iter N + a stop
+            # early in iter N+1 within 5s also exits.
+            self.previous_user_stop_time: float = 0.0
 
         def reset_for_iteration(self) -> None:
             """Clear all per-iteration event state.
 
-            ``last_natural_end_time`` is INTENTIONALLY preserved across
-            iterations - it's the timestamp the double-tap-stop detector
-            compares against.
+            ``last_natural_end_time`` AND ``previous_user_stop_time``
+            are INTENTIONALLY preserved across iterations - both are
+            timestamps the double-tap detectors compare against.
             """
             self.user_stopped = False
             self.tracked_file = None
@@ -224,6 +230,9 @@ class _LoopOutcome:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+_DOUBLE_STOP_WINDOW_S = 5.0
+
+
 def _classify_after_stop(
     player_state: Any,
     is_live_func: Callable[[str], bool],
@@ -234,6 +243,11 @@ def _classify_after_stop(
 
     Decision order:
 
+    - **Double-stop force-exit (Lesson 29):** if this is the SECOND
+      user-input stop (idle<3s) within ``_DOUBLE_STOP_WINDOW_S`` of
+      the previous one, return ``user_stopped`` regardless of the
+      Lesson 17 disambiguator. The first stop showed a user-visible
+      hint; the second stop is "I meant it."
     - If ``playlist_ended_naturally`` is True (first at-end stop, or
       at-end stop more than 5s after the previous natural end):
       ``natural_end`` - rebuild the playlist, no idle/live check.
@@ -241,7 +255,10 @@ def _classify_after_stop(
       says exit (idle<3s + model still live): ``user_stopped``. This
       catches the natural_end double-tap (``classify_stop`` returns
       False the second time and the standard idle check kicks in).
-    - Else: ``fall_through`` (ISA misfire / Kodi internal stop).
+    - Else: ``fall_through`` (ISA misfire / Kodi internal stop). When
+      the input WAS user-driven (idle<3s) we ALSO show the double-stop
+      hint and remember the timestamp so a follow-up stop within
+      ``_DOUBLE_STOP_WINDOW_S`` triggers the force-exit branch.
     """
     cur_url = ""
     cur_path = getattr(player_state, "current_playlist_path", "") or ""
@@ -258,10 +275,47 @@ def _classify_after_stop(
     natural = bool(getattr(player_state, "playlist_ended_naturally", False))
     user_stopped = bool(getattr(player_state, "user_stopped", False))
     idle = int(getattr(player_state, "idle_at_stop", 0))
+    is_user_input_stop = user_stopped and idle < 3
+    now = time.time()
+    prev_stop = float(getattr(player_state, "previous_user_stop_time", 0.0))
+
+    # Double-stop override: bypass the disambiguator if the user is
+    # confirming "I really want out" via two stops within 5s.
+    if (is_user_input_stop and prev_stop > 0
+            and now - prev_stop < _DOUBLE_STOP_WINDOW_S):
+        try:
+            player_state.previous_user_stop_time = 0.0
+        except Exception:  # noqa: S110 - best-effort attr write
+            pass
+        _safe_log(
+            f"_classify_after_stop: double-stop within "
+            f"{_DOUBLE_STOP_WINDOW_S}s -> force exit"
+        )
+        return "user_stopped"
+
     if natural:
         return "natural_end"
     if not tv_classify.decide_after_stop(user_stopped, model_live, idle):
         return "user_stopped"
+
+    # We're going to continue (ISA misfire / model offline / idle stop).
+    # If the user JUST hit Stop, hint at the double-stop exit gesture
+    # and remember the timestamp so the next stop within 5s exits.
+    if is_user_input_stop:
+        try:
+            player_state.previous_user_stop_time = now
+        except Exception:  # noqa: S110 - best-effort attr write
+            pass
+        try:
+            import xbmcgui
+            xbmcgui.Dialog().notification(
+                "Chaturbate TV",
+                "Hit Stop again within 5s to exit TV mode",
+                xbmcgui.NOTIFICATION_INFO, 5000,
+            )
+        except Exception:  # noqa: S110 - notification is best-effort
+            pass
+
     return "fall_through"
 
 

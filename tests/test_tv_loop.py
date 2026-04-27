@@ -415,6 +415,111 @@ def test_tv_play_resumes_when_screensaver_finds_live(
 # --------------------------------------------------------------------------- #
 
 
+def test_classify_double_stop_within_5s_forces_exit(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """Lesson 29 (added 2026-04-27): two user-input stops within 5s
+    override the Lesson-17 disambiguator and force-exit TV mode.
+    Useful when the user wants out but the standard exit logic keeps
+    treating their stops as ISA misfires (model offline, idle high,
+    etc.). First stop shows a hint; second stop within 5s = exit.
+    """
+    tl = _import()
+
+    class _State:
+        def __init__(self) -> None:
+            self.user_stopped = True
+            self.idle_at_stop = 1  # recent input -> user-driven stop
+            self.current_playlist_path = ""
+            self.playlist_ended_naturally = False
+            self.previous_user_stop_time = 0.0
+
+    s = _State()
+    # First stop: model offline so standard logic continues; record time.
+    decision = tl._classify_after_stop(s, lambda url: False)
+    assert decision == "fall_through"
+    assert s.previous_user_stop_time > 0
+
+    # Second stop ~2s later: force-exit override fires.
+    import time as _time
+    s.previous_user_stop_time = _time.time() - 2.0
+    decision = tl._classify_after_stop(s, lambda url: False)
+    assert decision == "user_stopped"
+
+
+def test_classify_double_stop_outside_5s_does_not_force_exit(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """Stops more than 5s apart reset to "first stop" behavior - the
+    user wandered away and came back; not a confirmation gesture.
+    """
+    tl = _import()
+
+    class _State:
+        user_stopped = True
+        idle_at_stop = 1
+        current_playlist_path = ""
+        playlist_ended_naturally = False
+        previous_user_stop_time = 0.0
+
+    s = _State()
+    s.previous_user_stop_time = 0.0  # init
+
+    import time as _time
+    # Pretend the previous stop was 30s ago.
+    s.previous_user_stop_time = _time.time() - 30.0
+    decision = tl._classify_after_stop(s, lambda url: False)
+    # Outside the 5s window -> no force-exit, falls through to hint logic.
+    assert decision == "fall_through"
+
+
+def test_classify_first_user_stop_records_timestamp_when_continuing(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """When the standard logic decides to continue but the input WAS
+    user-driven (idle<3s), we remember the timestamp so a follow-up
+    stop within 5s triggers the force-exit branch.
+    """
+    tl = _import()
+
+    class _State:
+        user_stopped = True
+        idle_at_stop = 1
+        current_playlist_path = ""
+        playlist_ended_naturally = False
+        previous_user_stop_time = 0.0
+
+    s = _State()
+    decision = tl._classify_after_stop(s, lambda url: False)  # offline -> continue
+    assert decision == "fall_through"
+    assert s.previous_user_stop_time > 0, (
+        "first user-input stop must record timestamp for double-stop override"
+    )
+
+
+def test_classify_idle_stop_does_not_record_timestamp(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """An idle stop (no recent input) is treated as ISA misfire, not a
+    user-driven exit attempt. We don't record its timestamp - otherwise
+    a casual mid-stream input + a real stop later could combine into a
+    spurious force-exit.
+    """
+    tl = _import()
+
+    class _State:
+        user_stopped = True
+        idle_at_stop = 30  # high idle -> ISA misfire territory
+        current_playlist_path = ""
+        playlist_ended_naturally = False
+        previous_user_stop_time = 0.0
+
+    s = _State()
+    decision = tl._classify_after_stop(s, lambda url: False)
+    assert decision == "fall_through"
+    assert s.previous_user_stop_time == 0.0
+
+
 def test_user_stop_with_low_idle_exits(kodi_mods: dict[str, Any]) -> None:
     """Stop fired AND idle < 3s AND model still live -> real user stop,
     exit cleanly."""
