@@ -325,3 +325,68 @@ def test_search_view_empty_query_closes_directory(
     bv = _import()
     bv.search_view(handle=42, query="", fetch_func=lambda *a, **k: "")
     kodi_mocks["xbmcplugin"].endOfDirectory.assert_called_once()
+
+
+# --------------------------------------------------------------------------- #
+# Content-type declaration: every browse view must mark the directory as
+# 'videos' so Kodi exposes the InfoWall / MediaList / Wide view modes
+# (thumb-on-right, plot-on-left layout). Without this the directory is
+# treated as generic 'files' and the view-selector only shows file-shaped
+# layouts that cut off the room plot.
+# --------------------------------------------------------------------------- #
+
+
+def _empty_fetch(*_a: Any, **_kw: Any) -> str:
+    return EMPTY_JSON
+
+
+def test_main_menu_sets_content_videos(kodi_mocks: dict[str, MagicMock]) -> None:
+    bv = _import()
+    bv.main_menu(handle=42)
+    kodi_mocks["xbmcplugin"].setContent.assert_called_once_with(42, "videos")
+
+
+def test_top_cams_view_sets_content_videos(kodi_mocks: dict[str, MagicMock]) -> None:
+    bv = _import()
+    bv.top_cams_view(handle=42, fetch_func=_empty_fetch)
+    kodi_mocks["xbmcplugin"].setContent.assert_called_once_with(42, "videos")
+
+
+def test_new_cams_view_sets_content_videos(kodi_mocks: dict[str, MagicMock]) -> None:
+    bv = _import()
+    bv.new_cams_view(handle=42, fetch_func=_empty_fetch)
+    kodi_mocks["xbmcplugin"].setContent.assert_called_once_with(42, "videos")
+
+
+def test_gender_view_sets_content_videos(kodi_mocks: dict[str, MagicMock]) -> None:
+    bv = _import()
+    bv.gender_view(handle=42, gender="female", fetch_func=_empty_fetch)
+    kodi_mocks["xbmcplugin"].setContent.assert_called_once_with(42, "videos")
+
+
+def test_gender_view_unknown_still_sets_content_videos(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """Even on the bogus-gender error path the directory is closed as
+    'videos' so the user's view-mode preference doesn't reset to 'files'
+    on a stray click.
+    """
+    bv = _import()
+    bv.gender_view(handle=42, gender="bogus", fetch_func=_empty_fetch)
+    kodi_mocks["xbmcplugin"].setContent.assert_called_once_with(42, "videos")
+
+
+def test_search_view_with_query_sets_content_videos(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    bv = _import()
+    bv.search_view(handle=42, query="alice", fetch_func=_empty_fetch)
+    kodi_mocks["xbmcplugin"].setContent.assert_called_once_with(42, "videos")
+
+
+def test_search_view_empty_query_still_sets_content_videos(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    bv = _import()
+    bv.search_view(handle=42, query="", fetch_func=_empty_fetch)
+    kodi_mocks["xbmcplugin"].setContent.assert_called_once_with(42, "videos")

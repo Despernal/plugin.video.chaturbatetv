@@ -63,7 +63,7 @@ def favs_menu(handle: int, store_path: Path | None = None,
             offline.append(f)
     kodi_helpers.add_dir(handle, f"Online ({len(online)})", "favs_online")
     kodi_helpers.add_dir(handle, f"Offline ({len(offline)})", "favs_offline")
-    kodi_helpers.end_directory(handle)
+    kodi_helpers.end_directory(handle, content_type="videos")
 
 
 def _render_favs(handle: int, favs: list[Favorite]) -> None:
@@ -80,7 +80,7 @@ def online_favs_view(handle: int, store_path: Path | None = None,
     favs = favs_store.load(path)
     live = [f for f in favs if cb_client.is_model_live(f.slug, fetch_func=fetch_func)]
     _render_favs(handle, live)
-    kodi_helpers.end_directory(handle)
+    kodi_helpers.end_directory(handle, content_type="videos")
 
 
 def offline_favs_view(handle: int, store_path: Path | None = None,
@@ -94,4 +94,4 @@ def offline_favs_view(handle: int, store_path: Path | None = None,
         if not cb_client.is_model_live(f.slug, fetch_func=fetch_func)
     ]
     _render_favs(handle, offline)
-    kodi_helpers.end_directory(handle)
+    kodi_helpers.end_directory(handle, content_type="videos")

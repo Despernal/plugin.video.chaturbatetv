@@ -33,3 +33,9 @@ MYPYPATH=tests/stubs .venv/bin/python -m mypy --strict resources/lib/
 ```
 
 The `.git/hooks/pre-commit` hook runs all three on every commit.
+
+## View modes
+
+For best UX, set the view mode to InfoWall or MediaList in Kodi's
+view-selector when browsing - puts thumbnails on the right and the
+room info on the left, like .

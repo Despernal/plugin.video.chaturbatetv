@@ -68,7 +68,23 @@ def add_play_item(handle: int, label: str, slug: str, image: str | None = None,
     xbmcplugin.addDirectoryItem(handle=handle, url=url, listitem=li, isFolder=False)
 
 
-def end_directory(handle: int, succeeded: bool = True) -> None:
-    """Close the current directory listing."""
+def end_directory(handle: int, succeeded: bool = True,
+                  content_type: str | None = None) -> None:
+    """Close the current directory listing.
+
+    ``content_type``, when non-empty, declares the directory's content
+    flavour to Kodi via ``xbmcplugin.setContent`` BEFORE the directory
+    is finalised. The common value is ``"videos"``, which unlocks
+    Kodi's video-specific view modes (InfoWall, MediaList, Wide) that
+    put the thumbnail on the right and the plot on the left - the
+    layout that fits Chaturbate's verbose room descriptions far better
+    than the default 'files' view mode (thumb-on-left, plot truncated).
+
+    Order matters: setContent must run BEFORE endOfDirectory or Kodi
+    has already locked the listing as 'files' content and the hint is
+    ignored.
+    """
     import xbmcplugin
+    if content_type:
+        xbmcplugin.setContent(handle, content_type)
     xbmcplugin.endOfDirectory(handle, succeeded=succeeded)

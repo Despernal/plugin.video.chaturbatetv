@@ -206,3 +206,51 @@ def test_offline_favs_view_renders_only_offline(
     play_urls = [u for u in urls if "mode=playvid" in u]
     assert len(play_urls) == 1
     assert "slug=bob" in play_urls[0]
+
+
+# --------------------------------------------------------------------------- #
+# Content-type declaration: favs views must declare the directory as
+# 'videos' so Kodi shows InfoWall / MediaList / Wide view modes (thumb on
+# right, plot on left).
+# --------------------------------------------------------------------------- #
+
+
+def test_favs_menu_sets_content_videos(
+    tmp_path: Path,
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    fv = _import()
+    favs_path = tmp_path / "favs.json"
+    fv.favs_menu(handle=42, store_path=favs_path,
+                 fetch_func=_live_fetch(set()))
+    kodi_mocks["xbmcplugin"].setContent.assert_called_once_with(42, "videos")
+
+
+def test_online_favs_view_sets_content_videos(
+    tmp_path: Path,
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    fv = _import()
+    favs_path = tmp_path / "favs.json"
+    _write_favs(favs_path, [
+        Favorite(name="alice", slug="alice", url="https://chaturbate.com/alice/",
+                 gender=Gender.FEMALE),
+    ])
+    fv.online_favs_view(handle=42, store_path=favs_path,
+                        fetch_func=_live_fetch({"alice"}))
+    kodi_mocks["xbmcplugin"].setContent.assert_called_once_with(42, "videos")
+
+
+def test_offline_favs_view_sets_content_videos(
+    tmp_path: Path,
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    fv = _import()
+    favs_path = tmp_path / "favs.json"
+    _write_favs(favs_path, [
+        Favorite(name="bob", slug="bob", url="https://chaturbate.com/bob/",
+                 gender=Gender.MALE),
+    ])
+    fv.offline_favs_view(handle=42, store_path=favs_path,
+                         fetch_func=_live_fetch(set()))
+    kodi_mocks["xbmcplugin"].setContent.assert_called_once_with(42, "videos")

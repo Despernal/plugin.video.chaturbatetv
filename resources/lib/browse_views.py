@@ -57,7 +57,7 @@ def main_menu(handle: int, **_params: Any) -> None:
     kodi_helpers.add_dir(handle, "Search", "search")
     kodi_helpers.add_dir(handle, "TV Mode", "tv_list")
     kodi_helpers.add_dir(handle, "Favorites", "favs")
-    kodi_helpers.end_directory(handle)
+    kodi_helpers.end_directory(handle, content_type="videos")
 
 
 def _render_models(handle: int, models: list[Model]) -> None:
@@ -98,7 +98,7 @@ def top_cams_view(handle: int, page: Any = 1,
     url = top_cams_url(_coerce_page(page))
     _render_models(handle, _fetch_models(url, fetch_func))
     kodi_helpers.add_dir(handle, "Next page", "top", page=_coerce_page(page) + 1)
-    kodi_helpers.end_directory(handle)
+    kodi_helpers.end_directory(handle, content_type="videos")
 
 
 def new_cams_view(handle: int, page: Any = 1,
@@ -108,7 +108,7 @@ def new_cams_view(handle: int, page: Any = 1,
     url = new_cams_url(_coerce_page(page))
     _render_models(handle, _fetch_models(url, fetch_func))
     kodi_helpers.add_dir(handle, "Next page", "new", page=_coerce_page(page) + 1)
-    kodi_helpers.end_directory(handle)
+    kodi_helpers.end_directory(handle, content_type="videos")
 
 
 def gender_view(handle: int, gender: str = "female", page: Any = 1,
@@ -117,13 +117,13 @@ def gender_view(handle: int, gender: str = "female", page: Any = 1,
     """Single-gender listing. Filter is server-side via the JSON API."""
     g = Gender.from_str(gender)
     if g is Gender.UNKNOWN:
-        kodi_helpers.end_directory(handle, succeeded=False)
+        kodi_helpers.end_directory(handle, succeeded=False, content_type="videos")
         return
     url = gender_filter_url(g, _coerce_page(page))
     _render_models(handle, _fetch_models(url, fetch_func))
     kodi_helpers.add_dir(handle, "Next page", "gender",
                          gender=gender, page=_coerce_page(page) + 1)
-    kodi_helpers.end_directory(handle)
+    kodi_helpers.end_directory(handle, content_type="videos")
 
 
 def search_view(handle: int, query: str = "", page: Any = 1,
@@ -134,10 +134,10 @@ def search_view(handle: int, query: str = "", page: Any = 1,
     a populated query).
     """
     if not query:
-        kodi_helpers.end_directory(handle, succeeded=False)
+        kodi_helpers.end_directory(handle, succeeded=False, content_type="videos")
         return
     url = search_url(query, _coerce_page(page))
     _render_models(handle, _fetch_models(url, fetch_func))
     kodi_helpers.add_dir(handle, "Next page", "search",
                          query=query, page=_coerce_page(page) + 1)
-    kodi_helpers.end_directory(handle)
+    kodi_helpers.end_directory(handle, content_type="videos")

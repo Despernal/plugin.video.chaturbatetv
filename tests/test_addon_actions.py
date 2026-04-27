@@ -133,15 +133,207 @@ def test_fav_remove_unknown_slug_is_no_op(tmp_path: Path,
 
 
 # --------------------------------------------------------------------------- #
-# Phase 4-5 stubs
+# Phase 4b: playvid wired to playvid_resolver + setResolvedUrl
 # --------------------------------------------------------------------------- #
 
 
-def test_playvid_stub_runs_without_crashing(kodi_mocks: dict[str, MagicMock]) -> None:
+def _patch_resolver_and_xbmcplugin(monkeypatch: pytest.MonkeyPatch,
+                                    success: bool = True) -> dict[str, Any]:
+    """Patch playvid_resolver.resolve_to_listitem and xbmcplugin.setResolvedUrl
+    so a playvid call is testable without Kodi or hls_proxy.
+
+    Returns a dict carrying the captured calls.
+    """
+    import resources.lib.playvid_resolver as pvr
+
+    captured_resolved_url: list[tuple[int, bool, Any]] = []
+    captured_resolve_calls: list[dict[str, Any]] = []
+
+    class _FakeListItem:
+        def __init__(self, label: str = "") -> None:
+            self.label = label
+            self._props: dict[str, str] = {}
+
+        def setProperty(self, k: str, v: str) -> None:
+            self._props[k] = v
+
+        def getProperty(self, k: str) -> str:
+            return self._props.get(k, "")
+
+    fake_li = _FakeListItem(label="alice") if success else None
+
+    class _FakeProxy:
+        def stop(self) -> None: ...
+
+    def fake_resolve(slug: str = "", name: str = "",
+                     **_kw: Any) -> pvr.PlayvidResult:
+        captured_resolve_calls.append({"slug": slug, "name": name})
+        if success:
+            return pvr.PlayvidResult(success=True, listitem=fake_li,
+                                     proxy=_FakeProxy())
+        return pvr.PlayvidResult(success=False, listitem=None, proxy=None)
+
+    monkeypatch.setattr(pvr, "resolve_to_listitem", fake_resolve)
+
+    fake_xbmcplugin = MagicMock()
+
+    def set_resolved(handle: int, succeeded: bool, listitem: Any) -> None:
+        captured_resolved_url.append((handle, succeeded, listitem))
+
+    fake_xbmcplugin.setResolvedUrl = set_resolved
+    monkeypatch.setitem(sys.modules, "xbmcplugin", fake_xbmcplugin)
+
+    return {
+        "resolved": captured_resolved_url,
+        "resolve_calls": captured_resolve_calls,
+        "fake_li": fake_li,
+    }
+
+
+def test_playvid_calls_setResolvedUrl_with_listitem_on_success(
+    kodi_mocks: dict[str, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cap = _patch_resolver_and_xbmcplugin(monkeypatch, success=True)
     actions = _import()
-    actions.playvid(handle=42, slug="alice")
-    # Stub should call notification but not crash.
-    assert kodi_mocks["notifications"]
+
+    actions.playvid(handle=42, slug="alice", name="alice")
+
+    assert len(cap["resolved"]) == 1
+    handle, succeeded, listitem = cap["resolved"][0]
+    assert handle == 42
+    assert succeeded is True
+    assert listitem is cap["fake_li"]
+
+
+def test_playvid_passes_slug_and_name_to_resolver(
+    kodi_mocks: dict[str, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cap = _patch_resolver_and_xbmcplugin(monkeypatch, success=True)
+    actions = _import()
+
+    actions.playvid(handle=42, slug="alice", name="Alice the Cam Star")
+
+    assert cap["resolve_calls"] == [{"slug": "alice", "name": "Alice the Cam Star"}]
+
+
+def test_playvid_calls_setResolvedUrl_with_failure_when_offline(
+    kodi_mocks: dict[str, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Offline room -> setResolvedUrl(handle, False, ...) so Kodi
+    cleans up cleanly instead of hanging on a missing item.
+    """
+    cap = _patch_resolver_and_xbmcplugin(monkeypatch, success=False)
+    actions = _import()
+
+    actions.playvid(handle=42, slug="ghost", name="ghost")
+
+    assert len(cap["resolved"]) == 1
+    handle, succeeded, _li = cap["resolved"][0]
+    assert handle == 42
+    assert succeeded is False
+
+
+def test_playvid_with_no_slug_does_not_call_resolver(
+    kodi_mocks: dict[str, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cap = _patch_resolver_and_xbmcplugin(monkeypatch, success=True)
+    actions = _import()
+
+    actions.playvid(handle=42)  # no slug
+
+    assert cap["resolve_calls"] == []
+    assert cap["resolved"] == []
+    assert kodi_mocks["notifications"]  # told the user
+
+
+def test_playvid_notifies_user_when_offline(
+    kodi_mocks: dict[str, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Offline -> setResolvedUrl(False, ...) AND a user-visible toast.
+    The toast is what tells the user 'they're offline', not silence.
+    """
+    _patch_resolver_and_xbmcplugin(monkeypatch, success=False)
+    actions = _import()
+
+    actions.playvid(handle=42, slug="ghost", name="ghost")
+
+    msgs = [m for _h, m in kodi_mocks["notifications"]]
+    assert any("ghost" in m for m in msgs)
+
+
+def test_playvid_falls_back_to_slug_when_name_missing(
+    kodi_mocks: dict[str, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Some browse rows pass slug only (no separate display name); we
+    should still hand a non-empty name through to the resolver."""
+    cap = _patch_resolver_and_xbmcplugin(monkeypatch, success=True)
+    actions = _import()
+
+    actions.playvid(handle=42, slug="alice")  # no name
+
+    assert cap["resolve_calls"] == [{"slug": "alice", "name": "alice"}]
+
+
+def test_playvid_does_not_set_legacy_inputstreamaddon_key(
+    kodi_mocks: dict[str, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression guard: addon_actions.playvid must not somehow fall
+    through to a legacy code path that sets the old 'inputstreamaddon'
+    key. We assert the resolver-built ListItem reaches setResolvedUrl
+    with the Matrix+ key, never the legacy one.
+
+    This is the single most expensive bug to chase on  (Kodi
+    silently fails to invoke ISA), so we pin it at the action layer
+    too, not just at the resolver layer.
+    """
+    import resources.lib.playvid_resolver as pvr
+
+    captured_resolved: list[tuple[int, bool, Any]] = []
+
+    class _RealishLI:
+        def __init__(self) -> None:
+            self._props: dict[str, str] = {}
+
+        def setProperty(self, k: str, v: str) -> None:
+            self._props[k] = v
+
+        def getProperty(self, k: str) -> str:
+            return self._props.get(k, "")
+
+    li = _RealishLI()
+    li.setProperty("inputstream", "inputstream.adaptive")  # what resolver sets
+
+    def fake_resolve(**_kw: Any) -> pvr.PlayvidResult:
+        return pvr.PlayvidResult(success=True, listitem=li, proxy=object())
+
+    monkeypatch.setattr(pvr, "resolve_to_listitem", fake_resolve)
+
+    fake_xbmcplugin = MagicMock()
+    fake_xbmcplugin.setResolvedUrl = lambda h, ok, lit: captured_resolved.append(
+        (h, ok, lit))
+    monkeypatch.setitem(sys.modules, "xbmcplugin", fake_xbmcplugin)
+
+    actions = _import()
+    actions.playvid(handle=42, slug="alice", name="alice")
+
+    assert len(captured_resolved) == 1
+    _h, ok, passed_li = captured_resolved[0]
+    assert ok is True
+    assert passed_li.getProperty("inputstream") == "inputstream.adaptive"
+    # The legacy key MUST NOT have been silently set on the way through.
+    assert passed_li.getProperty("inputstreamaddon") == ""
+
+
+# --------------------------------------------------------------------------- #
+# Phase 5 stubs - TV verbs still placeholders
+# --------------------------------------------------------------------------- #
 
 
 def test_tv_play_stub_runs_without_crashing(kodi_mocks: dict[str, MagicMock]) -> None:

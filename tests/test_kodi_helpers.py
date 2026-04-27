@@ -230,3 +230,72 @@ def test_end_directory_calls_endOfDirectory(kodi_mocks: dict[str, MagicMock]) ->
     helpers.end_directory(42)
     plugin = kodi_mocks["xbmcplugin"]
     plugin.endOfDirectory.assert_called_once()
+
+
+def test_end_directory_without_content_type_skips_setContent(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """No content_type kwarg -> we never call setContent (preserves the
+    pre-0.4.2 behaviour for any caller that hasn't opted in yet)."""
+    helpers = _import()
+    helpers.end_directory(42)
+    plugin = kodi_mocks["xbmcplugin"]
+    plugin.setContent.assert_not_called()
+
+
+def test_end_directory_with_content_type_videos_calls_setContent(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """Passing content_type='videos' -> setContent(handle, 'videos').
+
+    Declares the directory as video content so Kodi exposes its
+    video-specific view modes (InfoWall, MediaList, Wide) which put the
+    thumbnail on the right and the plot on the left - the layout the
+    user prefers for verbose Chaturbate room descriptions.
+    """
+    helpers = _import()
+    helpers.end_directory(42, content_type="videos")
+    plugin = kodi_mocks["xbmcplugin"]
+    plugin.setContent.assert_called_once_with(42, "videos")
+
+
+def test_end_directory_setContent_called_before_endOfDirectory(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """Order matters: setContent must land BEFORE endOfDirectory or Kodi
+    finalises the listing as 'files' content and ignores the late hint.
+    """
+    helpers = _import()
+    plugin = kodi_mocks["xbmcplugin"]
+    # Track call order across both methods on the same mock parent.
+    order: list[str] = []
+    plugin.setContent.side_effect = lambda *_a, **_kw: order.append("setContent")
+    plugin.endOfDirectory.side_effect = lambda *_a, **_kw: order.append("end")
+
+    helpers.end_directory(42, content_type="videos")
+
+    assert order == ["setContent", "end"]
+
+
+def test_end_directory_with_empty_content_type_skips_setContent(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """An empty string content_type is treated the same as None - no call."""
+    helpers = _import()
+    helpers.end_directory(42, content_type="")
+    plugin = kodi_mocks["xbmcplugin"]
+    plugin.setContent.assert_not_called()
+
+
+def test_end_directory_failure_still_sets_content_type(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """Even when succeeded=False (empty / error-state listing), declaring
+    the directory as 'videos' is harmless and keeps view-mode persistent
+    across error redraws.
+    """
+    helpers = _import()
+    helpers.end_directory(42, succeeded=False, content_type="videos")
+    plugin = kodi_mocks["xbmcplugin"]
+    plugin.setContent.assert_called_once_with(42, "videos")
+    plugin.endOfDirectory.assert_called_once()

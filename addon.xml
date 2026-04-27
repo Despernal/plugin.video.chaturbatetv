@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <addon id="plugin.video.chaturbatetv"
        name="Chaturbate TV"
-       version="0.4.1"
+       version="0.4.2"
        provider-name="flux">
     <requires>
         <import addon="xbmc.python" version="3.0.0"/>
@@ -20,7 +20,8 @@
             <icon>icon.png</icon>
             <fanart>fanart.jpg</fanart>
         </assets>
-        <news>0.4.1 - QA-driven polish: model thumbnails (real img URL not hardcoded), hover plot info (Age / Location / Watching / Followers / Tags), favs labels render (8-char hex), favs Online/Offline drill-down works (was a router gap).
+        <news>0.4.2 - Phase 4b: playvid resolver + ISA props (Matrix+ inputstream key, manifest_type=hls, stream/manifest headers urlencoded, MIME hint, contentLookup=False); addon_actions.playvid wired through setResolvedUrl with offline notification. Browse + favs views now declare content-type=videos so InfoWall / MediaList view modes are available (thumbnail on the right, plot on the left).
+0.4.1 - QA-driven polish: model thumbnails (real img URL not hardcoded), hover plot info (Age / Location / Watching / Followers / Tags), favs labels render (8-char hex), favs Online/Offline drill-down works (was a router gap).
 0.4.0 - Phase 4a: localhost HLS rewriting proxy (MVP). Master playlist absolutize+rewrite, iPad UA + Referer header injection, dynamic 127.0.0.1 port. Stream playback hookup lands in 0.4.1.
 0.3.1 - Fix [COLOR] tags: Kodi requires 8-char AARRGGBB hex; bare 6-char rendered Female/Male/Couple/Trans labels and model names blank.
 0.3.0 - Switch browse to Chaturbates JSON API (room-list endpoint). Drops HTML scraping entirely.

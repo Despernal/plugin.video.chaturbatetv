@@ -107,10 +107,47 @@ def search(handle: int, **_params: Any) -> None:  # pragma: no cover - thin Kodi
 # --------------------------------------------------------------------------- #
 
 
-def playvid(handle: int, slug: str = "", **_params: Any) -> None:
-    """Stub. Phase 4b lights up real ISA playback. Phase 2 just notifies."""
-    _notify("Chaturbate TV",
-            f"Playback for {slug or 'unknown'} arrives in Phase 4")
+def playvid(handle: int, slug: str = "", name: str = "",
+            **_params: Any) -> None:
+    """Resolve a slug, start the localhost proxy, set ISA props, return
+    the ListItem to Kodi via ``setResolvedUrl``.
+
+    Phase 4b: this is the real playback entry point. Offline rooms
+    (or any resolve failure) hand back ``setResolvedUrl(handle, False)``
+    so Kodi tears the playback attempt down cleanly instead of hanging
+    on a missing item.
+    """
+    if not slug:
+        _notify("Chaturbate TV", "Play: missing slug")
+        return
+
+    from resources.lib import playvid_resolver
+    result = playvid_resolver.resolve_to_listitem(slug=slug, name=name or slug)
+
+    try:
+        import xbmcplugin
+    except ImportError:  # pragma: no cover - only happens outside Kodi
+        return
+
+    if not result.success:
+        # Tell Kodi the resolve failed; UI returns to the caller cleanly.
+        xbmcplugin.setResolvedUrl(handle, False, _empty_listitem())
+        _notify("Chaturbate TV", f"{slug} is offline or unreachable")
+        return
+
+    xbmcplugin.setResolvedUrl(handle, True, result.listitem)
+
+
+def _empty_listitem() -> Any:
+    """Minimal placeholder ListItem for failed-resolve setResolvedUrl
+    calls (Kodi's setResolvedUrl with succeeded=False still wants a
+    ListItem instance).
+    """
+    try:
+        import xbmcgui
+        return xbmcgui.ListItem()
+    except ImportError:  # pragma: no cover - outside Kodi
+        return None
 
 
 def tv_play(handle: int, **_params: Any) -> None:
