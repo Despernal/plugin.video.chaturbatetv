@@ -558,7 +558,10 @@ def _run_reconnect(state: _State) -> None:
                     gap2 = time.time() - state.last_request
                     _log(f"reconnect: watchdog recheck gap={gap2:.1f}s")
                     if gap2 > 6:
-                        _log("reconnect: ISA silent after recheck, going terminal")
+                        _log(
+                            "reconnect: ISA silent after recheck, "
+                            "going terminal + PlayerControl(Stop)"
+                        )
                         needs_terminal = True
                         return
                     _log("reconnect: watchdog OK on recheck")
@@ -578,9 +581,16 @@ def _run_reconnect(state: _State) -> None:
             )
             state.reconnecting = False
         if needs_terminal and not state.stopping and not state.terminal:
-            _log("reconnect: flipping terminal=True")
+            _log("reconnect: flipping terminal=True + PlayerControl(Stop)")
             with state.lock:
                 state.terminal = True
+            # Fire the hammer from the bg thread too. Without this, if
+            # ISA stops requesting after we go terminal (e.g. it gave
+            # up on its own), the chunklist handler's PlayerControl(Stop)
+            # never fires and Kodi's player stays stuck on the last frame
+            # showing a buffer wheel forever. 's _force_stop
+            # fires here for exactly that case.
+            _force_player_stop(state)
 
 
 def _sleep_or_stop(state: _State, seconds: float) -> None:
@@ -618,9 +628,37 @@ _ENDLIST_BODY = (
 )
 
 # Minimum gap between PlayerControl(Stop) commands fired from the
-# terminal-flag handler. Rate-limited to avoid flooding Kodi's event
-# queue when ISA is hammering us at 30+ req/sec.
+# terminal-flag handler OR the background reconnect thread. Rate-limited
+# to avoid flooding Kodi's event queue when ISA is hammering us at 30+
+# req/sec or when both handler and bg thread fire near-simultaneously.
 _FORCE_STOP_THROTTLE_S = 1.0
+
+
+def _force_player_stop(state: _State) -> None:
+    """Fire ``xbmc.executebuiltin('PlayerControl(Stop)')`` to tear down
+    the player. Module-level so both the handler thread (when ISA
+    hammers us with terminal-state requests) AND the background
+    reconnect thread (when retries exhaust or the watchdog detects ISA
+    silence) can call it. Rate-limited via ``state.last_force_stop`` -
+    only fires if at least ``_FORCE_STOP_THROTTLE_S`` has elapsed since
+    the previous call.
+
+    Drawback (Lesson 30): ``xbmc.executebuiltin`` from a non-Kodi thread
+    isn't documented as thread-safe. Works on every Kodi we've tested
+    but isn't guaranteed - if a future Kodi tightens that, this becomes
+    flaky.
+    """
+    nowt = time.time()
+    with state.lock:
+        if nowt - state.last_force_stop < _FORCE_STOP_THROTTLE_S:
+            return
+        state.last_force_stop = nowt
+    _log("force_player_stop: PlayerControl(Stop) fired")
+    try:
+        import xbmc
+        xbmc.executebuiltin("PlayerControl(Stop)")
+    except Exception as exc:
+        _log(f"force_player_stop: failed err={exc!r}")
 
 
 def _make_handler(host: str, port: int, state: _State,
@@ -639,23 +677,11 @@ def _make_handler(host: str, port: int, state: _State,
     """
 
     def _force_player_stop_throttled() -> None:
-        """Fire ``xbmc.executebuiltin('PlayerControl(Stop)')`` to tear
-        down the player when ISA is stuck in a retry loop on terminal
-        chunklists. Rate-limited to once per ``_FORCE_STOP_THROTTLE_S``
-        so we don't flood Kodi's event queue if 30+ retries hit us in
-        a single second.
+        """Closure that defers to the module-level helper. Kept as a
+        zero-arg name so existing handler call sites don't need to
+        thread state through.
         """
-        nowt = time.time()
-        with state.lock:
-            if nowt - state.last_force_stop < _FORCE_STOP_THROTTLE_S:
-                return
-            state.last_force_stop = nowt
-        _log("handler: PlayerControl(Stop) - tearing down stuck ISA")
-        try:
-            import xbmc
-            xbmc.executebuiltin("PlayerControl(Stop)")
-        except Exception as exc:
-            _log(f"handler: PlayerControl(Stop) failed err={exc!r}")
+        _force_player_stop(state)
 
     class _H(BaseHTTPRequestHandler):
         # Silence stdlib stderr access log; we have our own _log.
