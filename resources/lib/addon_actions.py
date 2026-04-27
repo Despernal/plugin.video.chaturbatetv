@@ -174,6 +174,14 @@ def playvid(handle: int, slug: str = "", name: str = "",
                 xbmc.executebuiltin("PlayerControl(Next)")
             except Exception:  # noqa: S110 - best-effort: no Kodi outside addon
                 pass
+            # MUST resolve to Kodi before returning, even with succeeded=False.
+            # Without this, Kodi waits 30s for the resolve that never comes,
+            # then shows "one or more items failed to play" with a sad-face
+            # dialog. The user sees this stack up as the loop iterates a
+            # solo-slug tier whose only model went offline. The intentional
+            # exit dialog still lives in tv_loop._classify_after_stop and
+            # is unaffected.
+            xbmcplugin.setResolvedUrl(handle, False, _empty_listitem())
             return
         xbmcplugin.setResolvedUrl(handle, False, _empty_listitem())
         _notify("Chaturbate TV", f"{slug} is offline or unreachable")

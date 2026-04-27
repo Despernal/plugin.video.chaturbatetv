@@ -240,10 +240,16 @@ def test_playvid_offline_during_tv_mode_fires_action_next(
     kodi_mocks: dict[str, MagicMock],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Lesson v6.1: when TV mode is active and a slot in the playlist
-    resolves offline, ``playvid`` must fire ``PlayerControl(Next)`` so the
-    player advances. Sitting on ``setResolvedUrl(False)`` mid-playlist
-    leaves Kodi on a black screen until the user mashes Next themselves.
+    """Lesson v6.1 + v0.7.14 dialog-spam fix: when TV mode is active and
+    a slot in the playlist resolves offline, ``playvid`` must (1) fire
+    ``PlayerControl(Next)`` so the player advances, AND (2) call
+    ``setResolvedUrl(handle, False, ...)`` so Kodi doesn't sit waiting
+    30s for a resolve that never comes and then show "one or more items
+    failed to play" with a sad-face dialog. Earlier code returned
+    without resolving, which caused that dialog to spam every iteration
+    when the loop kept rebuilding a solo-slug tier whose model went
+    offline. The intentional Yes/No exit dialog lives in
+    tv_loop._classify_after_stop and is unaffected.
     """
     state: dict[str, str] = {"chaturbatetv_active": "1"}
 
@@ -268,8 +274,17 @@ def test_playvid_offline_during_tv_mode_fires_action_next(
     builtins_called = [c.args[0] for c in
                        kodi_mocks["xbmc"].executebuiltin.call_args_list]
     assert "PlayerControl(Next)" in builtins_called
-    # And setResolvedUrl was NOT called (we early-returned).
-    assert cap["resolved"] == []
+    # AND setResolvedUrl was called with succeeded=False so Kodi tears
+    # the resolve down cleanly instead of waiting 30s and showing the
+    # "one or more items failed to play" dialog.
+    assert len(cap["resolved"]) == 1, (
+        f"playvid must call setResolvedUrl exactly once "
+        f"(got {len(cap['resolved'])} calls; missing call lets Kodi "
+        f"hang and show the failure dialog)"
+    )
+    handle, succeeded, _li = cap["resolved"][0]
+    assert handle == 42
+    assert succeeded is False
 
 
 def test_playvid_offline_without_tv_mode_still_fails_cleanly(
