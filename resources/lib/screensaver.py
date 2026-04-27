@@ -136,43 +136,10 @@ def _make_screensaver_class() -> type:
     return _IdleScreensaver
 
 
-# Build lazily so importing this module from a pure test (without
-# xbmcgui mocked into sys.modules yet) doesn't blow up. ``IdleScreensaver``
-# resolves to the class on first access.
-class _LazyClass:
-    _cls: type | None = None
-
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        if self._cls is None:
-            self._cls = _make_screensaver_class()
-        return self._cls(*args, **kwargs)
-
-    def __instancecheck__(self, obj: object) -> bool:  # pragma: no cover
-        if self._cls is None:
-            self._cls = _make_screensaver_class()
-        return isinstance(obj, self._cls)
-
-    def __subclasscheck__(self, sub: type) -> bool:
-        if self._cls is None:
-            self._cls = _make_screensaver_class()
-        return issubclass(sub, self._cls)
-
-    def __mro_entries__(self, bases: tuple[type, ...]) -> tuple[type, ...]:
-        if self._cls is None:
-            self._cls = _make_screensaver_class()
-        return (self._cls,)
-
-    @property
-    def cls(self) -> type:
-        if self._cls is None:
-            self._cls = _make_screensaver_class()
-        return self._cls
-
-
 # Per-test imports rebuild xbmcgui.Window with a fresh stub class, so
 # we cannot cache the class globally - issubclass(IdleScreensaver,
 # xbmcgui.Window) checks the live xbmcgui at the moment of the
-# assertion. Build fresh on every access.
+# assertion. Build fresh on every access via the module __getattr__ hook.
 def __getattr__(name: str) -> Any:
     if name == "IdleScreensaver":
         return _make_screensaver_class()

@@ -16,6 +16,20 @@ import pytest
 from resources.lib.cb_models import Favorite, Gender
 
 
+@pytest.fixture(autouse=True)
+def _isolate_disk_cache(tmp_path: Path,
+                        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each test gets its own disk-cache path so the bulk-fetch cache
+    doesn't leak from one test into the next. Without this, the first
+    test that runs ``_bulk_live_slugs`` writes the live-slugs set to a
+    real path on the developer's filesystem and every subsequent test
+    sees a 'disk-cache HIT' before its fetch_func ever fires.
+    """
+    import resources.lib.favs_views as fv
+    cache_path = tmp_path / "test_bulk_live_cache.json"
+    monkeypatch.setattr(fv, "_bulk_disk_cache_path", lambda: cache_path)
+
+
 @pytest.fixture
 def kodi_mocks(monkeypatch: pytest.MonkeyPatch) -> dict[str, MagicMock]:
     fake_xbmc = MagicMock()
@@ -113,10 +127,13 @@ def _live_fetch(live_slugs: set[str]) -> Any:
 # --------------------------------------------------------------------------- #
 
 
-def test_favs_menu_shows_online_offline_split(
+def test_favs_menu_shows_online_offline_drilldowns(
     tmp_path: Path,
     kodi_mocks: dict[str, MagicMock],
 ) -> None:
+    """Top-level shows Online/Offline drill-downs WITHOUT a remote fetch
+    (large favorites lists were locking up the UI on ).
+    """
     fv = _import()
     favs_path = tmp_path / "favs.json"
     _write_favs(favs_path, [
@@ -127,7 +144,12 @@ def test_favs_menu_shows_online_offline_split(
         Favorite(name="cara", slug="cara", url="https://chaturbate.com/cara/",
                  gender=Gender.FEMALE),
     ])
-    fetch = _live_fetch({"alice", "cara"})
+
+    fetch_calls: list[str] = []
+
+    def fetch(url: str, **_kw: Any) -> str:
+        fetch_calls.append(url)
+        return ""
 
     fv.favs_menu(handle=42, store_path=favs_path, fetch_func=fetch)
 
@@ -136,8 +158,10 @@ def test_favs_menu_shows_online_offline_split(
         call.kwargs.get("label") or (call.args[0] if call.args else "")
         for call in gui.ListItem.call_args_list
     ]
-    assert any("Online (2)" in lab for lab in labels)
-    assert any("Offline (1)" in lab for lab in labels)
+    assert any("Online" in lab for lab in labels)
+    assert any("Offline" in lab for lab in labels)
+    # Critical: NO network call on the top-level menu open.
+    assert fetch_calls == [], f"favs_menu must not network: {fetch_calls!r}"
 
 
 def test_favs_menu_empty_when_no_favs(
@@ -155,8 +179,9 @@ def test_favs_menu_empty_when_no_favs(
         call.kwargs.get("label") or (call.args[0] if call.args else "")
         for call in gui.ListItem.call_args_list
     ]
-    assert any("Online (0)" in lab for lab in labels)
-    assert any("Offline (0)" in lab for lab in labels)
+    # Drill-downs still appear; user just sees "0 total".
+    assert any("Online" in lab for lab in labels)
+    assert any("Offline" in lab for lab in labels)
 
 
 # --------------------------------------------------------------------------- #
@@ -169,6 +194,7 @@ def test_online_favs_view_renders_only_live(
     kodi_mocks: dict[str, MagicMock],
 ) -> None:
     fv = _import()
+    fv._bulk_cache_clear()
     favs_path = tmp_path / "favs.json"
     _write_favs(favs_path, [
         Favorite(name="alice", slug="alice", url="https://chaturbate.com/alice/",
@@ -176,7 +202,7 @@ def test_online_favs_view_renders_only_live(
         Favorite(name="bob", slug="bob", url="https://chaturbate.com/bob/",
                  gender=Gender.MALE),
     ])
-    fetch = _live_fetch({"alice"})
+    fetch = _bulk_fetch([["alice"]])
 
     fv.online_favs_view(handle=42, store_path=favs_path, fetch_func=fetch)
 
@@ -191,6 +217,7 @@ def test_offline_favs_view_renders_only_offline(
     kodi_mocks: dict[str, MagicMock],
 ) -> None:
     fv = _import()
+    fv._bulk_cache_clear()
     favs_path = tmp_path / "favs.json"
     _write_favs(favs_path, [
         Favorite(name="alice", slug="alice", url="https://chaturbate.com/alice/",
@@ -198,7 +225,7 @@ def test_offline_favs_view_renders_only_offline(
         Favorite(name="bob", slug="bob", url="https://chaturbate.com/bob/",
                  gender=Gender.MALE),
     ])
-    fetch = _live_fetch({"alice"})
+    fetch = _bulk_fetch([["alice"]])
 
     fv.offline_favs_view(handle=42, store_path=favs_path, fetch_func=fetch)
 
@@ -297,12 +324,13 @@ def _bulk_fetch(live_slugs_per_page: list[list[str]]) -> Any:
     return fetch
 
 
-def test_favs_menu_uses_bulk_path_when_room_list_available(
+def test_online_favs_view_uses_bulk_path_for_live_intersection(
     tmp_path: Path,
     kodi_mocks: dict[str, MagicMock],
 ) -> None:
-    """Bulk path returns a set of live slugs from the room-list API;
-    we intersect locally instead of polling each fav."""
+    """The bulk-fetch happens on Online/Offline drill-down (NOT on the
+    top-level menu). Verifies the room-list intersection still works.
+    """
     fv = _import()
     fv._bulk_cache_clear()
     favs_path = tmp_path / "favs.json"
@@ -314,16 +342,13 @@ def test_favs_menu_uses_bulk_path_when_room_list_available(
         Favorite(name="cara", slug="cara", url="https://chaturbate.com/cara/",
                  gender=Gender.FEMALE),
     ])
-    # Bulk reports alice + cara live (one page, short).
     fetch = _bulk_fetch([["alice", "cara"]])
-    fv.favs_menu(handle=42, store_path=favs_path, fetch_func=fetch)
-    gui = kodi_mocks["xbmcgui"]
-    labels = [
-        call.kwargs.get("label") or (call.args[0] if call.args else "")
-        for call in gui.ListItem.call_args_list
-    ]
-    assert any("Online (2)" in lab for lab in labels)
-    assert any("Offline (1)" in lab for lab in labels)
+    fv.online_favs_view(handle=42, store_path=favs_path, fetch_func=fetch)
+
+    urls = _added_urls(kodi_mocks["xbmcplugin"])
+    play_urls = [u for u in urls if "mode=playvid" in u]
+    play_slugs = {u.split("slug=")[1].split("&")[0] for u in play_urls}
+    assert play_slugs == {"alice", "cara"}
 
 
 def test_bulk_live_slugs_paginates_until_short_page(
@@ -382,10 +407,13 @@ def test_bulk_live_slugs_caches_results_for_60s(
     assert fetch_calls["n"] == 1  # cached, no re-fetch
 
 
-def test_bulk_live_slugs_cache_expires_after_60s(
+def test_bulk_live_slugs_cache_expires_after_ttl(
     tmp_path: Path,
     kodi_mocks: dict[str, MagicMock],
 ) -> None:
+    """Cache TTL is 5 minutes (300s) - long enough that paginating
+    through 1000+ favs doesn't re-walk the room list, short enough that
+    leaving the menu open across a category change refreshes."""
     fv = _import()
     fv._bulk_cache_clear()
     fetch_calls = {"n": 0}
@@ -399,16 +427,118 @@ def test_bulk_live_slugs_cache_expires_after_60s(
         })
 
     fv._bulk_live_slugs(fetch, now_func=lambda: 100.0)
-    fv._bulk_live_slugs(fetch, now_func=lambda: 200.0)  # past TTL
+    # Past the disk-cache TTL (1800s) AND the memory TTL (300s).
+    fv._bulk_live_slugs(fetch, now_func=lambda: 2100.0)
     assert fetch_calls["n"] == 2
 
 
-def test_bulk_live_slugs_falls_through_to_perslug_when_bulk_empty(
+def test_online_favs_view_paginates_at_50_per_page(
     tmp_path: Path,
     kodi_mocks: dict[str, MagicMock],
 ) -> None:
-    """If bulk returns None, favs_menu falls back to per-slug AJAX
-    (using cb_client.is_model_live). Same final answer, just slower.
+    """A 1224-favorite library renders 50 entries per page with a Next
+    page link. Without this, the directory render blocks the UI for many
+    seconds on Pi-class hardware ( freeze).
+    """
+    fv = _import()
+    fv._bulk_cache_clear()
+    favs_path = tmp_path / "favs.json"
+    favs = [
+        Favorite(
+            name=f"user{i:04d}",
+            slug=f"user{i:04d}",
+            url=f"https://chaturbate.com/user{i:04d}/",
+            gender=Gender.FEMALE,
+        )
+        for i in range(120)
+    ]
+    _write_favs(favs_path, favs)
+    # All 120 are reported live by the bulk fetch.
+    fetch = _bulk_fetch([[f"user{i:04d}" for i in range(120)]])
+
+    fv.online_favs_view(handle=42, store_path=favs_path, fetch_func=fetch)
+
+    urls = _added_urls(kodi_mocks["xbmcplugin"])
+    play_urls = [u for u in urls if "mode=playvid" in u]
+    assert len(play_urls) == 50, (
+        f"page 1 should show 50 entries, got {len(play_urls)}"
+    )
+    # And a next-page link.
+    next_links = [u for u in urls if "mode=favs_online" in u and "page=2" in u]
+    assert len(next_links) == 1
+
+
+def test_online_favs_view_page_param_returns_correct_slice(
+    tmp_path: Path,
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """Page=2 returns favs 50-99; page=3 returns favs 100-119 (no next)."""
+    fv = _import()
+    fv._bulk_cache_clear()
+    favs_path = tmp_path / "favs.json"
+    favs = [
+        Favorite(
+            name=f"user{i:04d}",
+            slug=f"user{i:04d}",
+            url=f"https://chaturbate.com/user{i:04d}/",
+            gender=Gender.FEMALE,
+        )
+        for i in range(120)
+    ]
+    _write_favs(favs_path, favs)
+    fetch = _bulk_fetch([[f"user{i:04d}" for i in range(120)]])
+
+    fv.online_favs_view(handle=42, store_path=favs_path, fetch_func=fetch,
+                        page=3)
+
+    urls = _added_urls(kodi_mocks["xbmcplugin"])
+    play_urls = [u for u in urls if "mode=playvid" in u]
+    assert len(play_urls) == 20, (
+        f"page 3 should show 20 entries (100..119), got {len(play_urls)}"
+    )
+    # Last page -> no next-page link.
+    next_links = [u for u in urls if "mode=favs_online" in u and "page=" in u]
+    assert next_links == []
+
+
+def test_bulk_live_slugs_disk_cache_survives_in_memory_clear(
+    tmp_path: Path,
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """Simulating a Kodi restart: clear the in-memory cache between
+    calls; the disk cache should still serve the second call so
+    re-entering Favorites after a reboot is instant.
+    """
+    fv = _import()
+    fv._bulk_cache_clear()
+    fetch_calls = {"n": 0}
+
+    def fetch(url: str, **_kw: Any) -> str:
+        fetch_calls["n"] += 1
+        return json.dumps({
+            "rooms": [{"username": "alice", "gender": "f",
+                       "num_users": 1, "label": "public"}],
+            "total_count": 1, "all_rooms_count": 1,
+        })
+
+    fv._bulk_live_slugs(fetch, now_func=lambda: 100.0)
+    # Drop in-memory cache only (Kodi restart).
+    import resources.lib.favs_views as fv_mod
+    fv_mod._bulk_cache = None
+    # Within disk TTL (1800s), no fresh fetch.
+    out = fv._bulk_live_slugs(fetch, now_func=lambda: 1500.0)
+    assert out == {"alice"}
+    assert fetch_calls["n"] == 1, "disk-cache hit should skip the network"
+
+
+def test_online_favs_view_treats_all_as_offline_when_bulk_fails(
+    tmp_path: Path,
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """If the bulk room-list fetch fails (site outage / rate limit),
+    show NOTHING in Online and EVERYTHING in Offline rather than blocking
+    the UI on per-slug AJAX. The user can still edit/remove offline favs
+    and the next time they re-enter (5min cache window) we retry bulk.
     """
     fv = _import()
     fv._bulk_cache_clear()
@@ -417,14 +547,12 @@ def test_bulk_live_slugs_falls_through_to_perslug_when_bulk_empty(
         Favorite(name="alice", slug="alice", url="https://chaturbate.com/alice/",
                  gender=Gender.FEMALE),
     ])
-    # _live_fetch responds with AJAX format - room-list calls also go
-    # through it but get back JSON with no "rooms" key, so the bulk
-    # path returns None.
+    # _live_fetch returns AJAX-shaped JSON which has no "rooms" key, so
+    # parse_roomlist returns empty and the bulk path returns None.
     fetch = _live_fetch({"alice"})
-    fv.favs_menu(handle=42, store_path=favs_path, fetch_func=fetch)
-    gui = kodi_mocks["xbmcgui"]
-    labels = [
-        call.kwargs.get("label") or (call.args[0] if call.args else "")
-        for call in gui.ListItem.call_args_list
-    ]
-    assert any("Online (1)" in lab for lab in labels)
+    fv.online_favs_view(handle=42, store_path=favs_path, fetch_func=fetch)
+
+    urls = _added_urls(kodi_mocks["xbmcplugin"])
+    play_urls = [u for u in urls if "mode=playvid" in u]
+    # Nothing is reported as online when bulk fails.
+    assert play_urls == []

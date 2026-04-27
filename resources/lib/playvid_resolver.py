@@ -94,8 +94,7 @@ def _build_listitem(
 
     li = xbmcgui.ListItem(label=name)
     # Path is the proxy URL; ISA reads it via getPlayingFile() too,
-    # which the proxy's monitor thread will use later (Phase 4c) to
-    # detect rapid clicks.
+    # which the proxy's monitor thread uses to detect rapid clicks.
     li.setPath(master_url)
     li.setProperty("IsPlayable", "true")
 
@@ -171,7 +170,7 @@ def resolve_to_listitem(
     Returns:
         PlayvidResult. Success when the model is live and the proxy
         started cleanly; failure when offline, when the resolve call
-        throws, or (TBD Phase 4c) when proxy startup races.
+        throws, or when proxy startup races.
     """
     rf = resolve_func or _default_resolve
     sp = start_proxy_func or _default_start_proxy

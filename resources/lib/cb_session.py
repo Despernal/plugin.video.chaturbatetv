@@ -23,10 +23,11 @@ _NowFn = Callable[[], float]
 class Session:
     """A bag of cookies + helpers tailored for Chaturbate.
 
-    >>> s = Session()
-    >>> s.load_from(Path("cookies.lwp"))   # tolerant of missing file
-    >>> s.cookies_for_url("https://chaturbate.com/")
-    {'sessionid': '...'}
+    Typical usage::
+
+        s = Session()
+        s.load_from(Path("cookies.lwp"))   # tolerant of missing file
+        cookies = s.cookies_for_url("https://chaturbate.com/")
     """
 
     def __init__(self, now: _NowFn | None = None) -> None:

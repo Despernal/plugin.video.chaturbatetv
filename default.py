@@ -1,10 +1,9 @@
 """plugin.video.chaturbatetv entry point.
 
-Phase 2 wires the router. Top-level click renders the main browse menu;
-mode-specific URLs dispatch to their handler in
-``resources.lib.router.DEFAULT_HANDLERS``.
-
-Phase 4-5 will fill in playvid + TV-mode under the same dispatch.
+Top-level click renders the main browse menu; mode-specific URLs
+dispatch to their handler in ``resources.lib.router.DEFAULT_HANDLERS``.
+Browse, search, favorites, playvid, and TV mode all flow through this
+single dispatch.
 """
 from __future__ import annotations
 

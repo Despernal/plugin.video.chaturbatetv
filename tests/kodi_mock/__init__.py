@@ -1,8 +1,8 @@
 """Lightweight mocks of Kodi runtime objects for offline TV-loop tests.
 
-Phases 4-5 wire these into the TV loop tests so we don't have to 
-round-trip every iteration. Phase 1 only ships the harness with its
-own self-tests so it's ready when the loop arrives.
+The TV loop tests use these so we don't have to  round-trip every
+iteration. Self-tests in ``test_kodi_mock_harness.py`` keep the mocks
+honest.
 
 Quick map:
 

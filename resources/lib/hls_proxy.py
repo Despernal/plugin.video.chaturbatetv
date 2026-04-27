@@ -701,9 +701,8 @@ def _make_handler(host: str, port: int, state: _State,
             payload = rewritten.encode("utf-8")
             with state.lock:
                 state.chunklist_cache[name] = payload
-            _log(
-                f"handler: chunklist OK name={name!r} bytes={len(payload)}"
-            )
+            # Per-chunklist OK is too chatty during steady-state playback
+            # (1-2 lines/sec from disk I/O). Errors / reconnects still log.
             self._send_body(payload, "application/vnd.apple.mpegurl")
 
         def _serve_segment(self) -> None:
@@ -720,10 +719,9 @@ def _make_handler(host: str, port: int, state: _State,
             # Tier 1: try the URL ISA asked for.
             try:
                 raw, ct = _fetch(seg_url, state.headers)
-                _log(
-                    f"handler: segment OK name={seg_name!r} bytes={len(raw)} "
-                    f"ct={ct!r}"
-                )
+                # Per-segment OK on tier 1 is the steady-state hot path
+                # (1+ line/sec). Skip the log; tier-2/3 fallbacks DO log
+                # since they signal something interesting.
                 self._send_body(raw, ct or "video/mp4")
                 return
             except Exception as exc:

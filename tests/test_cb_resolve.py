@@ -103,7 +103,7 @@ def test_resolve_handles_invalid_slug() -> None:
         resolve("", lambda url: "")
 
 
-# resolve_ajax — preferred path, uses the JSON status endpoint -------------- #
+# resolve_ajax - preferred path, uses the JSON status endpoint -------------- #
 # Switched to in 0.4.3 because HTML scrape of initialRoomDossier is fragile
 # (Chaturbate is JS-rendered now; the blob is sometimes absent and we got
 # is_live=False for live rooms, then "Cannot download manifest" from ISA).

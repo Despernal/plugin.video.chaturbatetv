@@ -1,8 +1,8 @@
 """Tests for resources.lib.addon_actions - side-effect verbs.
 
-Phase 2 ships fav_add / fav_remove for real, plus stubs for the
-TV-mode and playvid verbs (those land in Phase 4-5). The stubs only
-need to not crash and to acknowledge they were called.
+Covers the four verb families: favorites add/remove, playvid resolver
+hookup (incl. TV-mode offline auto-skip), and the TV mgmt verbs
+(tv_play / tv_stop / tv_list / tv_add / tv_remove / tv_edit).
 """
 from __future__ import annotations
 

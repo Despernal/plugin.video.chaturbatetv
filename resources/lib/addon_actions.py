@@ -4,8 +4,8 @@ These are the verbs the addon performs in response to a ctxmenu /
 runplugin (not just listing renders). Each takes the same shape:
 ``(handle: int, **params: Any) -> None``.
 
-Phase 5 wired the TV verbs to ``tv_loop`` and ``tv_store`` for real.
-Phase 7 (login) is still deferred.
+Login (Phase 7) is still deferred - everything here works against the
+public Chaturbate endpoints without authentication.
 """
 from __future__ import annotations
 
@@ -111,7 +111,7 @@ def search(handle: int, **_params: Any) -> None:  # pragma: no cover - thin Kodi
 
 
 # --------------------------------------------------------------------------- #
-# Playvid + TV verbs (Phase 4-5 stubs)
+# Playvid + TV verbs
 # --------------------------------------------------------------------------- #
 
 

@@ -1,9 +1,8 @@
 """Self-tests for the kodi_mock harness.
 
 These tests do NOT exercise resources.lib.* code; they just verify the
-mocks behave the way TV-loop tests will expect. If these go red, the
-TV-loop tests in Phase 4-5 will be debugging the mocks instead of the
-production code.
+mocks behave the way the TV-loop tests expect. If these go red, the
+TV-loop tests will be debugging the mocks instead of the production code.
 """
 from __future__ import annotations
 

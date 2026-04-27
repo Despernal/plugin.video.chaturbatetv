@@ -18,3 +18,7 @@ htmlcov/
 # stray test artifacts when xbmcvfs.translatePath leaks through
 special:/
 *.log
+
+# Pre-public-release: never ship CB-derivative artwork
+tools/icon-design/seeds/*.png
+tools/icon-design/candidates/cb_*.png
