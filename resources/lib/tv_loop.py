@@ -299,8 +299,18 @@ def _classify_after_stop(
         return "user_stopped"
 
     # We're going to continue (ISA misfire / model offline / idle stop).
-    # If the user JUST hit Stop, hint at the double-stop exit gesture
-    # and remember the timestamp so the next stop within 5s exits.
+    # If the user JUST hit Stop, ask them directly via a Yes/No dialog
+    # whether they want to exit. The dialog is always reachable from
+    # the remote regardless of player state - replaces the old
+    # double-tap-Stop pattern (Lesson 33) which was fundamentally broken
+    # when "nothing is playing" because Stop becomes unavailable
+    # mid-iteration. User report: "i don't know where to even find stop
+    # a second time love even with a minute".
+    #
+    # Default focus = "Keep playing" so accidental Enter/OK preserves
+    # the sticky-playback default. Auto-closes after 30s with default
+    # No, so a user who walks away mid-prompt doesn't accidentally
+    # exit TV mode.
     if is_user_input_stop:
         try:
             player_state.previous_user_stop_time = now
@@ -308,12 +318,22 @@ def _classify_after_stop(
             pass
         try:
             import xbmcgui
-            xbmcgui.Dialog().notification(
+            choice = xbmcgui.Dialog().yesno(
                 "Chaturbate TV",
-                "Hit Stop again within 5s to exit TV mode",
-                xbmcgui.NOTIFICATION_INFO, 5000,
+                "Exit TV mode?",
+                nolabel="Keep playing",
+                yeslabel="Exit",
+                autoclose=30000,
             )
-        except Exception:  # noqa: S110 - notification is best-effort
+            if choice:
+                _safe_log(
+                    "_classify_after_stop: yesno=Exit -> user_stopped"
+                )
+                return "user_stopped"
+            _safe_log(
+                "_classify_after_stop: yesno=Keep playing (or autoclose)"
+            )
+        except Exception:  # noqa: S110 - dialog best-effort
             pass
 
     return "fall_through"

@@ -415,45 +415,36 @@ def test_tv_play_resumes_when_screensaver_finds_live(
 # --------------------------------------------------------------------------- #
 
 
-def test_classify_double_stop_within_5s_forces_exit(
+def _patch_yesno(kodi_mods: dict[str, Any], answer: bool) -> list[Any]:
+    """Stub xbmcgui.Dialog().yesno() to return ``answer`` and capture calls."""
+    captured: list[Any] = []
+
+    class _Dialog:
+        def yesno(self, *args: Any, **kwargs: Any) -> bool:
+            captured.append({"args": args, "kwargs": kwargs})
+            return answer
+
+        def notification(self, *_a: Any, **_kw: Any) -> None:
+            return
+
+    kodi_mods["xbmcgui"].Dialog = _Dialog
+    return captured
+
+
+def test_classify_user_stop_picks_exit_in_dialog(
     kodi_mods: dict[str, Any],
 ) -> None:
-    """Lesson 29 (added 2026-04-27): two user-input stops within 5s
-    override the Lesson-17 disambiguator and force-exit TV mode.
-    Useful when the user wants out but the standard exit logic keeps
-    treating their stops as ISA misfires (model offline, idle high,
-    etc.). First stop shows a hint; second stop within 5s = exit.
+    """Lesson 33 (replaces double-stop pattern, 2026-04-27): on a
+    user-input stop where standard logic would continue, fire a
+    Yes/No dialog. If user picks Exit -> classify as user_stopped.
+
+    The double-tap pattern was fundamentally broken because Stop is
+    unavailable when no playback is happening (between iterations,
+    during screensaver). User report: "i don't know where to even
+    find stop a second time love even with a minute".
     """
     tl = _import()
-
-    class _State:
-        def __init__(self) -> None:
-            self.user_stopped = True
-            self.idle_at_stop = 1  # recent input -> user-driven stop
-            self.current_playlist_path = ""
-            self.playlist_ended_naturally = False
-            self.previous_user_stop_time = 0.0
-
-    s = _State()
-    # First stop: model offline so standard logic continues; record time.
-    decision = tl._classify_after_stop(s, lambda url: False)
-    assert decision == "fall_through"
-    assert s.previous_user_stop_time > 0
-
-    # Second stop ~2s later: force-exit override fires.
-    import time as _time
-    s.previous_user_stop_time = _time.time() - 2.0
-    decision = tl._classify_after_stop(s, lambda url: False)
-    assert decision == "user_stopped"
-
-
-def test_classify_double_stop_outside_5s_does_not_force_exit(
-    kodi_mods: dict[str, Any],
-) -> None:
-    """Stops more than 5s apart reset to "first stop" behavior - the
-    user wandered away and came back; not a confirmation gesture.
-    """
-    tl = _import()
+    captured = _patch_yesno(kodi_mods, answer=True)  # user picks Exit
 
     class _State:
         user_stopped = True
@@ -463,13 +454,80 @@ def test_classify_double_stop_outside_5s_does_not_force_exit(
         previous_user_stop_time = 0.0
 
     s = _State()
-    s.previous_user_stop_time = 0.0  # init
+    decision = tl._classify_after_stop(s, lambda url: False)
+    assert decision == "user_stopped"
+    assert captured, "yesno dialog should have fired"
 
+
+def test_classify_user_stop_picks_keep_playing_in_dialog(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """User picks "Keep playing" or autoclose fires -> fall through,
+    TV mode continues. The default sticky-playback behavior wins on
+    accidental dismiss."""
+    tl = _import()
+    _patch_yesno(kodi_mods, answer=False)  # user picks Keep playing
+
+    class _State:
+        user_stopped = True
+        idle_at_stop = 1
+        current_playlist_path = ""
+        playlist_ended_naturally = False
+        previous_user_stop_time = 0.0
+
+    s = _State()
+    decision = tl._classify_after_stop(s, lambda url: False)
+    assert decision == "fall_through"
+
+
+def test_classify_double_stop_within_5s_still_force_exits(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """The double-stop override still works as a fallback: two
+    user-input stops within ``_DOUBLE_STOP_WINDOW_S`` (=5s) bypass
+    the dialog entirely and force exit. Useful for power users who
+    spam Stop twice on remote without waiting for the dialog.
+    """
+    tl = _import()
+    _patch_yesno(kodi_mods, answer=False)  # dialog would say "Keep playing"
+
+    class _State:
+        def __init__(self) -> None:
+            self.user_stopped = True
+            self.idle_at_stop = 1
+            self.current_playlist_path = ""
+            self.playlist_ended_naturally = False
+            self.previous_user_stop_time = 0.0
+
+    s = _State()
+    # Simulate a stop ~2s ago.
     import time as _time
-    # Pretend the previous stop was 30s ago.
+    s.previous_user_stop_time = _time.time() - 2.0
+    decision = tl._classify_after_stop(s, lambda url: False)
+    # Force-exit branch fires BEFORE the dialog even shows.
+    assert decision == "user_stopped"
+
+
+def test_classify_double_stop_outside_window_falls_through_to_dialog(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """Stops more than 5s apart aren't a confirmation gesture - the
+    user wandered away. Logic falls through to the dialog instead of
+    auto-exit."""
+    tl = _import()
+    _patch_yesno(kodi_mods, answer=False)  # dialog says "Keep playing"
+
+    class _State:
+        user_stopped = True
+        idle_at_stop = 1
+        current_playlist_path = ""
+        playlist_ended_naturally = False
+        previous_user_stop_time = 0.0
+
+    s = _State()
+    import time as _time
     s.previous_user_stop_time = _time.time() - 30.0
     decision = tl._classify_after_stop(s, lambda url: False)
-    # Outside the 5s window -> no force-exit, falls through to hint logic.
     assert decision == "fall_through"
 
 
@@ -478,9 +536,11 @@ def test_classify_first_user_stop_records_timestamp_when_continuing(
 ) -> None:
     """When the standard logic decides to continue but the input WAS
     user-driven (idle<3s), we remember the timestamp so a follow-up
-    stop within 5s triggers the force-exit branch.
+    stop within 5s triggers the force-exit branch (even if the user
+    is too fast for the dialog).
     """
     tl = _import()
+    _patch_yesno(kodi_mods, answer=False)  # dialog says "Keep playing"
 
     class _State:
         user_stopped = True
@@ -490,7 +550,7 @@ def test_classify_first_user_stop_records_timestamp_when_continuing(
         previous_user_stop_time = 0.0
 
     s = _State()
-    decision = tl._classify_after_stop(s, lambda url: False)  # offline -> continue
+    decision = tl._classify_after_stop(s, lambda url: False)
     assert decision == "fall_through"
     assert s.previous_user_stop_time > 0, (
         "first user-input stop must record timestamp for double-stop override"
