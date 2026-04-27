@@ -6,7 +6,7 @@
 
 **A standalone Kodi addon for Chaturbate, with first-class TV mode.**
 
-[![Tests](https://img.shields.io/badge/tests-524%20passing-00d4ff?style=flat-square)]()
+[![Tests](https://img.shields.io/badge/tests-538%20passing-00d4ff?style=flat-square)]()
 [![Type Safety](https://img.shields.io/badge/mypy-strict-00d4ff?style=flat-square)]()
 [![Lint](https://img.shields.io/badge/ruff-clean-00d4ff?style=flat-square)]()
 [![Kodi](https://img.shields.io/badge/Kodi-Matrix%2B-00d4ff?style=flat-square)]()
@@ -46,6 +46,15 @@ plays it, and promotes to a higher tier when one comes online.
 - **State-reset between iterations** — Lesson 10: every long-lived
   player property is reset between tier-rebuilds so a stop event in
   iter N doesn't poison iter N+1
+- **Tier-Next button keeps TV mode running** — Lesson 25: clicking
+  Next in the player to switch between live tier members continues TV
+  mode (was firing TAKEOVER because queued plugin URLs got resolved
+  to localhost proxy URLs before onAVStarted saw them; fixed via
+  playlist-coherence fallback)
+- **Bulk live-set** — TV mode uses the single-call affiliate-onlinerooms
+  endpoint (1 fetch per poll cycle, ~7MB body, ~5000 live slugs)
+  instead of one AJAX-per-slug. Network failure preserves the stale
+  set so a transient 5xx doesn't mark every model offline
 
 ### 🌐 Browse + Search + Favorites
 
@@ -75,6 +84,23 @@ plays it, and promotes to a higher tier when one comes online.
   `inputstreamaddon` (silently broken on Nexus+, would just look like
   playback was off)
 - **Gzip-aware fetcher** + magic-byte fallback for misconfigured edges
+- **Max resolution cap** — opt-in setting (auto / 1080p / 720p / 480p)
+  caps ISA's variant pick. Auto by default; set to 720p on
+  buffer-prone hosts to stop ISA upshifting past what the connection
+  can sustain
+
+### 🛠 Maintenance
+
+- **Refresh artwork** — main-menu entry that walks every
+  `Textures*.db` (Kodi 19/20: v13, Kodi 21+: v14) and clears any
+  cached row whose URL contains the addon ID, plus unlinks the
+  cached file in `Thumbnails/`. Fixes the "icon never updates after
+  a new install" Kodi quirk
+- **Restart Kodi** — main-menu entry that runs
+  `xbmc.executebuiltin('Quit')`. On LibreELEC systemd respawns Kodi
+  automatically, so this is the addon equivalent of
+  `systemctl restart kodi` without ssh access. Clears stuck
+  audio-renderer state from LL-HLS cadence drift
 
 ### ⚙️ Settings
 
@@ -83,17 +109,18 @@ plays it, and promotes to a higher tier when one comes online.
 - **TV poll interval** (1–60 minutes)
 - **ISA proxy port** (0 = kernel-assigned; useful for locked-down LANs)
 - **Screensaver color** (cyan / green / hotpink, all 8-char AARRGGBB)
+- **Max resolution** (auto / 1080p / 720p / 480p — caps ISA's variant pick)
 - **Per-gender main-menu visibility** (Female / Male / Couple / Trans)
 
 ## Quality bar
 
-- **524 tests** all passing (`pytest`, no Kodi required)
+- **538 tests** all passing (`pytest`, no Kodi required)
 - **mypy --strict** clean across `resources/lib/`
 - **ruff** clean
 - **Pre-commit hook** runs all three on every commit
 - Every regression has a **pinned test** before the fix lands
 - Every non-obvious bug pays for itself once via
-  [`docs/LESSONS-LEARNED.md`](docs/LESSONS-LEARNED.md) — 24 lessons and
+  [`docs/LESSONS-LEARNED.md`](docs/LESSONS-LEARNED.md) — 28 lessons and
   counting
 
 ## Design pillars
@@ -197,9 +224,11 @@ DBs, and orphaned cookies all fall through gracefully.
 
 ## Status
 
-✅ **v0.6.9 deployed and stable on  (LibreELEC).**
+✅ **v0.7.1 deployed and stable on  (LibreELEC).**
 
-All phases through 5 are shipped and battle-tested:
+All phases through 5 are shipped and battle-tested. v0.6.x focused on
+QA + favorites correctness; v0.7.x is the polish pass for tier-Next
+behavior, ISA resolution capping, and user-facing maintenance verbs.
 
 | Phase | Status |
 |---|---|
@@ -211,9 +240,26 @@ All phases through 5 are shipped and battle-tested:
 | 4c — proxy hardening (11  lessons) | ✅ shipped |
 | 5 — TV mode + screensaver + ctxmenus | ✅ shipped |
 | 5.5 — gitea + nginx kodi-repo | ✅ shipped |
-| QA pass — CRITICAL/HIGH/MEDIUM/LOW | ✅ shipped (24 lessons captured) |
+| QA pass — CRITICAL/HIGH/MEDIUM/LOW | ✅ shipped (28 lessons captured) |
 | 6 — polish +  cutover | ⏳ in progress |
 | 7 — login + followed-cams | ⏸ conditional |
+
+### Recent ship list
+
+| Version | Headline |
+|---|---|
+| 0.7.1 | `refresh_artwork` walks Textures14.db too (Kodi 21+) |
+| 0.7.0 | Tier-Next button fix · `max_resolution` setting · Refresh artwork + Restart Kodi menu items |
+| 0.6.9 | TV mode bulk affiliate endpoint · hls_proxy race fix · MEDIUM/LOW QA bundle |
+| 0.6.8 | Client-side viewer sort · per-gender toggles |
+| 0.6.7 | Drop disk cache · fix online favs missing thumbnails |
+| 0.6.6 | Single-call affiliate-onlinerooms endpoint |
+| 0.6.5 | Online favs render with thumbnails + plot |
+| 0.6.4 | URGENT: API limit drift fix (`limit=100` cap) |
+| 0.6.3 | Favs pagination · busy-dialog dismiss · log spam reduction |
+| 0.6.2 | HIGH bundle: RENDITION-REPORT URI rewrite · slug-from-URL · migration tolerance |
+| 0.6.1 | CRITICAL bundle: Search wiring · TV-mode offline auto-skip · settings actually read |
+| 0.6.0 | Phase 5 ships: TV mode + screensaver + state-aware ctxmenus |
 
 See [`PLANNING.md`](PLANNING.md) for phase details and
 [`docs/LESSONS-LEARNED.md`](docs/LESSONS-LEARNED.md) for the full
