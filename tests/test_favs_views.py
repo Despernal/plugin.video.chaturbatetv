@@ -289,16 +289,28 @@ def test_offline_favs_view_sets_content_videos(
 
 
 def _bulk_fetch(live_slugs_per_page: list[list[str]]) -> Any:
-    """fetch_func that responds to room-list URLs with the given slug pages.
+    """fetch_func that responds to BOTH the affiliate-onlinerooms URL
+    AND the legacy paginated room-list URL.
 
-    Each invocation returns the next page; the last page is short
-    (< limit) so the caller knows to stop.
+    Tests pass a list-of-lists for the legacy paginated path (one inner
+    list per page). The affiliate endpoint flattens them all into a
+    single response since it's a one-call API.
     """
     state = {"page": 0}
 
     def fetch(url: str, body: bytes | None = None,
               headers: dict[str, str] | None = None,
               method: str = "GET") -> str:
+        if "/affiliates/api/onlinerooms/" in url:
+            # Single-call affiliate endpoint: flatten all pages into
+            # one JSON array.
+            all_slugs = [s for page in live_slugs_per_page for s in page]
+            return json.dumps([
+                {"username": s, "slug": s, "gender": "f",
+                 "num_users": 100, "image_url": f"https://thumb/{s}.jpg",
+                 "room_subject": f"hi from {s}"}
+                for s in all_slugs
+            ])
         if "/api/ts/roomlist/" not in url:
             # AJAX status endpoint - default to "offline" so the
             # fallback path doesn't accidentally pick a slug as live.
@@ -430,11 +442,12 @@ def test_bulk_live_slugs_caches_results_for_60s(
 
     def fetch(url: str, **_kw: Any) -> str:
         fetch_calls["n"] += 1
-        return json.dumps({
-            "rooms": [{"username": "alice", "gender": "f",
-                       "num_users": 1, "label": "public"}],
-            "total_count": 1, "all_rooms_count": 1,
-        })
+        # Affiliate endpoint shape: flat JSON array.
+        return json.dumps([
+            {"username": "alice", "slug": "alice", "gender": "f",
+             "num_users": 1, "image_url": "https://thumb/alice.jpg",
+             "room_subject": "hi"}
+        ])
 
     fv._bulk_live_slugs(fetch, now_func=lambda: 100.0)
     fv._bulk_live_slugs(fetch, now_func=lambda: 130.0)  # within TTL
@@ -445,23 +458,22 @@ def test_bulk_live_slugs_cache_expires_after_ttl(
     tmp_path: Path,
     kodi_mocks: dict[str, MagicMock],
 ) -> None:
-    """Cache TTL is 5 minutes (300s) - long enough that paginating
-    through 1000+ favs doesn't re-walk the room list, short enough that
-    leaving the menu open across a category change refreshes."""
+    """Cache TTL is 60s - short so re-entering Online Favorites picks
+    up newly-online models. The single-call affiliate endpoint makes
+    each fresh fetch fast, so we don't need a long cache."""
     fv = _import()
     fv._bulk_cache_clear()
     fetch_calls = {"n": 0}
 
     def fetch(url: str, **_kw: Any) -> str:
         fetch_calls["n"] += 1
-        return json.dumps({
-            "rooms": [{"username": "alice", "gender": "f",
-                       "num_users": 1, "label": "public"}],
-            "total_count": 1, "all_rooms_count": 1,
-        })
+        return json.dumps([
+            {"username": "alice", "slug": "alice", "gender": "f",
+             "num_users": 1, "image_url": "", "room_subject": ""}
+        ])
 
     fv._bulk_live_slugs(fetch, now_func=lambda: 100.0)
-    # Past the disk-cache TTL (1800s) AND the memory TTL (300s).
+    # Past the disk-cache TTL (1800s) AND the memory TTL (60s).
     fv._bulk_live_slugs(fetch, now_func=lambda: 2100.0)
     assert fetch_calls["n"] == 2
 
@@ -549,11 +561,10 @@ def test_bulk_live_slugs_disk_cache_survives_in_memory_clear(
 
     def fetch(url: str, **_kw: Any) -> str:
         fetch_calls["n"] += 1
-        return json.dumps({
-            "rooms": [{"username": "alice", "gender": "f",
-                       "num_users": 1, "label": "public"}],
-            "total_count": 1, "all_rooms_count": 1,
-        })
+        return json.dumps([
+            {"username": "alice", "slug": "alice", "gender": "f",
+             "num_users": 1, "image_url": "", "room_subject": ""}
+        ])
 
     fv._bulk_live_slugs(fetch, now_func=lambda: 100.0)
     # Drop in-memory cache only (Kodi restart).

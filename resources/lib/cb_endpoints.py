@@ -19,6 +19,7 @@ from resources.lib.cb_models import Gender
 
 BASE_URL = "https://chaturbate.com"
 ROOMLIST_API = f"{BASE_URL}/api/ts/roomlist/room-list/"
+ONLINEROOMS_AFFILIATE_API = f"{BASE_URL}/affiliates/api/onlinerooms/"
 DOSSIER_AJAX = f"{BASE_URL}/get_edge_hls_url_ajax/"
 DEFAULT_LIMIT = 100
 
@@ -81,6 +82,32 @@ def search_url(query: str, page: int = 1, limit: int = DEFAULT_LIMIT) -> str:
         "keywords": query,
     })
     return f"{ROOMLIST_API}?{qs}"
+
+
+def online_rooms_affiliate_url(wm: str) -> str:
+    """The single-call online-rooms endpoint.
+
+    Returns ALL currently-online models in a flat JSON array - typically
+    ~5-10 MB of body, fetched in one HTTP call. The room-list paginated
+    endpoint caps at 100/page and required a 50-page walk to cover the
+    same ground (with politeness pacers and 30-min disk caching to make
+    it tolerable). This single-call path is what  uses for its
+    Online Favorites view; intersecting locally is sub-second even with
+    1000+ favs.
+
+    The ``wm`` (watermark) param is required - the endpoint returns
+    ``[]`` without it. It's the affiliate-tracking ID.  ships
+    a rotating array of established watermarks so any single tracker
+    doesn't get all the credit; we copy that pattern.
+
+    Field shape differs from the room-list endpoint - field names
+    ``username`` / ``image_url`` / ``room_subject`` / ``num_users`` map
+    to ``slug`` / ``image`` / ``plot`` / ``viewers`` in our Model.
+    """
+    if not wm:
+        raise ValueError("online_rooms_affiliate_url requires a watermark")
+    qs = urlencode({"format": "json", "wm": wm})
+    return f"{ONLINEROOMS_AFFILIATE_API}?{qs}"
 
 
 def room_url(slug: str) -> str:

@@ -76,6 +76,72 @@ def _model_from_room(room: dict[str, Any]) -> Model | None:
     )
 
 
+def _model_from_affiliate_room(room: dict[str, Any]) -> Model | None:
+    """Convert one affiliate-API room dict to a Model.
+
+    Field shape differs from the room-list endpoint: ``image_url`` not
+    ``img``, ``room_subject`` not ``subject``, no ``current_show`` flag
+    on the public payload (every entry IS by definition online here),
+    ``num_users`` is the same.
+    """
+    slug = (room.get("username") or room.get("slug") or "").strip()
+    if not slug:
+        return None
+    return Model(
+        name=slug,
+        slug=slug,
+        url=f"{BASE_URL}/{slug}/",
+        is_live=True,  # affiliate-onlinerooms endpoint only returns live rooms
+        viewers=_to_int(room.get("num_users"), 0),
+        gender=Gender.from_str(room.get("gender")),
+        image=str(room.get("image_url") or ""),
+        plot=plot_for(room),
+    )
+
+
+def parse_affiliate_onlinerooms(
+    payload: list[Any] | str | bytes,
+) -> list[Model]:
+    """Parse the affiliate ``/affiliates/api/onlinerooms/?format=json&wm=XXX``
+    response into our Model list.
+
+    Unlike room-list (which is a paginated dict), this endpoint returns
+    a flat JSON array of every currently-online model in a single call.
+    Single-call = no pagination = the live-favs view becomes instant
+    ('s pattern, ported wholesale).
+
+    Tolerant: garbage input collapses to an empty list rather than
+    raising; one malformed entry gets skipped, not propagated.
+    """
+    try:
+        from resources.lib import logger
+        _log: Any = logger._log
+    except Exception:  # pragma: no cover - never raises
+        def _log(_msg: object) -> None: ...
+    if isinstance(payload, (str, bytes)):
+        try:
+            payload = json.loads(payload)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            _log(
+                "cb_listing.parse_affiliate_onlinerooms: JSON decode failed"
+            )
+            return []
+    if not isinstance(payload, list):
+        _log(
+            "cb_listing.parse_affiliate_onlinerooms: payload not list"
+        )
+        return []
+    out: list[Model] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        m = _model_from_affiliate_room(item)
+        if m is not None:
+            out.append(m)
+    _log(f"cb_listing.parse_affiliate_onlinerooms: rooms={len(out)}")
+    return out
+
+
 def parse_roomlist(payload: dict[str, Any] | str | bytes) -> RoomListPage:
     """Parse a room-list JSON payload.
 

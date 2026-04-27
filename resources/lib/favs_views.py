@@ -23,31 +23,34 @@ from resources.lib import (
     kodi_helpers,
     tv_store,
 )
-from resources.lib.cb_endpoints import top_cams_url
+from resources.lib.cb_endpoints import online_rooms_affiliate_url
 from resources.lib.cb_models import Favorite, Gender, Model
 
 
-# In-memory cache TTL: 5 minutes. Long enough that paginating through
-# a 1000+ favorite library doesn't re-walk the room list, short enough
-# that a category change picks up the latest live status.
-_BULK_CACHE_TTL = 300.0
+# In-memory cache TTL: 60 seconds. Going out and back into Online
+# Favorites within a minute reuses the cache (instant); leaving for
+# longer triggers a fresh single-call fetch (which is also fast since
+# the affiliate endpoint hands back ALL online rooms in one GET).
+_BULK_CACHE_TTL = 60.0
 # Disk-cache TTL: 30 minutes. Survives Kodi restarts so re-entering
 # Favorites after a reboot is instant rather than triggering a fresh
-# 20-page scan against chaturbate.
+# affiliate-API call.
 _BULK_DISK_TTL = 1800.0
 # Filename for the on-disk cache, lives next to favs.json so it shares
 # the same userdata directory.
 _BULK_CACHE_FILE = "bulk_live_cache.json"
-# Paginate chaturbate's room-list. The API caps limit at 100 - sending
-# anything higher returns 400 Bad Request with an "Ensure this value is
-# less than or equal to 100" body.
-_BULK_PAGE_LIMIT = 100
-# Hard ceiling on pages so we don't spin if the API misbehaves. With
-# limit=100 this gives us a 5000-room coverage envelope.
-_BULK_MAX_PAGES = 50
-# Politeness delay between page fetches so we don't thunder-herd the
-# room-list endpoint.
-_BULK_PAGE_DELAY_S = 0.2
+
+# Affiliate watermarks ('s rotating array). The affiliate API
+# requires a wm= param to return data; without one it hands back []. The
+# watermark is the affiliate's tracking ID.  ships a rotating
+# array so any single tracker doesn't get all the credit; we copy that
+# pattern verbatim. This was already the user's de-facto behavior under
+#  - swapping addons doesn't change the affiliate distribution.
+_AFFILIATE_WATERMARKS = (
+    "C9m5N", "tfZSl", "jQrKO", "5XO2a", "WXomN",
+    "zM6MR", "Lb2aB", "cIbs3", "mnzQo", "N6TZA",
+)
+
 
 # How many favorites to render per directory page. Kodi's directory
 # scroll is fine with thousands of entries, but rendering 1000+ rows
@@ -178,38 +181,27 @@ def _bulk_live_slugs(
 
     slugs: set[str] = set()
     models_by_slug: dict[str, Model] = {}
-    for page in range(1, _BULK_MAX_PAGES + 1):
-        url = top_cams_url(page=page, limit=_BULK_PAGE_LIMIT)
+    # Single-call affiliate endpoint: returns ALL online rooms in one
+    # GET (~5-10MB body). This is 's pattern - way faster than
+    # walking 50 pages of the room-list endpoint.
+    import random
+    wm = random.choice(_AFFILIATE_WATERMARKS)
+    url = online_rooms_affiliate_url(wm)
+    logger._log(f"favs_views._bulk_live_slugs: single-call url={url}")
+    try:
+        body = cb_client.fetch_browse_page(url, fetch_func=fetch_func)
+    except OSError as exc:
         logger._log(
-            f"favs_views._bulk_live_slugs: page={page} url={url}"
+            f"favs_views._bulk_live_slugs: NETWORK FAIL err={exc!r}"
         )
-        try:
-            body = cb_client.fetch_browse_page(url, fetch_func=fetch_func)
-        except OSError as exc:
-            logger._log(
-                f"favs_views._bulk_live_slugs: NETWORK FAIL page={page} err={exc!r}"
-            )
-            break
-        parsed = cb_listing.parse_roomlist(body)
-        if not parsed.models:
-            logger._log(
-                f"favs_views._bulk_live_slugs: empty page={page}, stop"
-            )
-            break
-        for m in parsed.models:
-            slugs.add(m.slug)
-            models_by_slug[m.slug] = m
-        logger._log(
-            f"favs_views._bulk_live_slugs: page={page} got={len(parsed.models)} "
-            f"running_total={len(slugs)}"
-        )
-        if len(parsed.models) < _BULK_PAGE_LIMIT:
-            break
-        # Politeness pacer between page fetches; chaturbate's API doesn't
-        # advertise a rate limit but a short sleep keeps us off any
-        # heuristic that flags rapid-fire scans.
-        if _BULK_PAGE_DELAY_S > 0:
-            time.sleep(_BULK_PAGE_DELAY_S)
+        return None
+    models = cb_listing.parse_affiliate_onlinerooms(body)
+    for m in models:
+        slugs.add(m.slug)
+        models_by_slug[m.slug] = m
+    logger._log(
+        f"favs_views._bulk_live_slugs: single-call got={len(slugs)}"
+    )
     if not slugs:
         logger._log("favs_views._bulk_live_slugs: bulk returned 0 slugs")
         return None
