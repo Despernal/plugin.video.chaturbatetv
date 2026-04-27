@@ -3,10 +3,23 @@
 Standalone Kodi addon for Chaturbate with first-class TV mode.
 
 See [PLANNING.md](PLANNING.md) for the full design and phase breakdown.
+See [docs/LESSONS-LEARNED.md](docs/LESSONS-LEARNED.md) for every non-obvious
+bug we've paid for and how to avoid paying for it twice.
 
 ## Status
 
-Phase 1: scaffolding + pure modules.
+**v0.6.4 (2026-04-27)** - deployed and stable on . All phases through
+5 are shipped: pure modules, browse views with JSON API, local favorites
+with paginated Online/Offline split + 30-min disk cache, HLS proxy
+(master + chunklist + segment + RENDITION-REPORT URI rewriting), playvid
+resolver with Matrix+ ISA props, TV mode with priority list / random
+tier pick / state-aware ctxmenus / idle-time disambiguator / offline
+auto-skip / idle screensaver. 513 tests passing, ruff clean,
+mypy --strict clean.
+
+Login (Phase 7) is conditionally deferred. TV mode as a Kodi service
+addon (instead of a plugin invocation) is a Phase 6 candidate for
+suppressing the "addon busy" spinner during long-running playback.
 
 ## Layout
 

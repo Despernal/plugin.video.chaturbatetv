@@ -24,7 +24,7 @@ from resources.lib import (
     tv_store,
 )
 from resources.lib.cb_endpoints import top_cams_url
-from resources.lib.cb_models import Favorite, Gender
+from resources.lib.cb_models import Favorite, Gender, Model
 
 
 # In-memory cache TTL: 5 minutes. Long enough that paginating through
@@ -75,6 +75,13 @@ def _color_label(label: str, gender: Gender) -> str:
 
 # In-memory bulk-fetch cache. Tuple is (timestamp, set_of_slugs).
 _bulk_cache: tuple[float, set[str]] | None = None
+# In-memory per-slug Model cache, populated alongside the slug set when
+# we do a full network bulk-fetch. Used to enrich Online Favorites rows
+# with thumbnails / viewer counts / plot info. NOT persisted to disk
+# (Model carries enough fields that JSON-serializing it would bloat the
+# cache file; on a Kodi restart we get the slug set but lose the thumbs
+# until the next live bulk-refresh).
+_bulk_models: dict[str, Model] = {}
 
 
 def _bulk_disk_cache_path() -> Path:
@@ -170,6 +177,7 @@ def _bulk_live_slugs(
         return cached
 
     slugs: set[str] = set()
+    models_by_slug: dict[str, Model] = {}
     for page in range(1, _BULK_MAX_PAGES + 1):
         url = top_cams_url(page=page, limit=_BULK_PAGE_LIMIT)
         logger._log(
@@ -190,6 +198,7 @@ def _bulk_live_slugs(
             break
         for m in parsed.models:
             slugs.add(m.slug)
+            models_by_slug[m.slug] = m
         logger._log(
             f"favs_views._bulk_live_slugs: page={page} got={len(parsed.models)} "
             f"running_total={len(slugs)}"
@@ -205,6 +214,10 @@ def _bulk_live_slugs(
         logger._log("favs_views._bulk_live_slugs: bulk returned 0 slugs")
         return None
     _bulk_cache = (nowt, slugs)
+    # Stash the rich per-slug model data so online favs render with
+    # thumbnails + viewer counts + plot info (mirrors browse_views).
+    _bulk_models.clear()
+    _bulk_models.update(models_by_slug)
     _save_bulk_disk_cache(nowt, slugs, cache_path)
     logger._log(
         f"favs_views._bulk_live_slugs: cached {len(slugs)} live slugs"
@@ -278,19 +291,36 @@ def favs_menu(handle: int, store_path: Path | None = None,
     kodi_helpers.end_directory(handle, content_type="videos")
 
 
-def _render_favs(handle: int, favs: list[Favorite]) -> None:
-    """Add favorite entries with state-aware context menus."""
+def _render_favs(handle: int, favs: list[Favorite],
+                 enrich_with_models: bool = False) -> None:
+    """Add favorite entries with state-aware context menus.
+
+    When ``enrich_with_models`` is True (online favs only - we have
+    live data for them), we look up each slug in ``_bulk_models``
+    and pass the room thumbnail + viewer count + plot info through
+    to the ListItem just like browse_views does. Offline favs render
+    as bare entries (no thumbnail or plot is available; we deliberately
+    do NOT scan 1000+ slugs to fish out stale metadata).
+    """
     data_dir = _favs_path().parent
     tv_entries = tv_store.load(data_dir / "tv.json")
     for f in favs:
+        # Decorate the label with viewer count when we have the
+        # live model data (matches browse_views.add_play_item shape).
+        live_model = _bulk_models.get(f.slug) if enrich_with_models else None
         label = _color_label(f.name, f.gender)
+        if live_model and live_model.viewers:
+            label = f"{label} [{live_model.viewers}]"
         ctx = ctxmenu.build_ctxmenu(
             {"slug": f.slug, "name": f.name, "url": f.url},
             tv_entries=tv_entries,
             favs=favs,
         )
         kodi_helpers.add_play_item(
-            handle, label, f.slug, ctx_items=ctx,
+            handle, label, f.slug,
+            image=(live_model.image if live_model else None) or None,
+            plot=(live_model.plot if live_model else None) or None,
+            ctx_items=ctx,
         )
 
 
@@ -338,7 +368,7 @@ def online_favs_view(handle: int, store_path: Path | None = None,
         f"favs_views.online_favs_view: total={len(favs)} live={len(online)} "
         f"page={p} showing={len(page_items)}"
     )
-    _render_favs(handle, page_items)
+    _render_favs(handle, page_items, enrich_with_models=True)
     if (p * _FAVS_PER_PAGE) < len(online):
         kodi_helpers.add_dir(handle, f"Next page ({p + 1})",
                              "favs_online", page=p + 1)
