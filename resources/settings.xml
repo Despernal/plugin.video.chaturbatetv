@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<settings version="2">
+    <section id="plugin.video.chaturbatetv">
+        <category id="general" label="32001" help="">
+            <group id="1">
+                <setting id="enh_debug" type="boolean" label="32010" help="32011">
+                    <level>0</level>
+                    <default>false</default>
+                    <control type="toggle"/>
+                </setting>
+                <setting id="poll_minutes" type="integer" label="32020" help="32021">
+                    <level>0</level>
+                    <default>10</default>
+                    <constraints>
+                        <minimum>1</minimum>
+                        <maximum>60</maximum>
+                    </constraints>
+                    <control type="slider" format="integer">
+                        <popup>true</popup>
+                    </control>
+                </setting>
+                <setting id="isa_proxy_port" type="integer" label="32030" help="32031">
+                    <level>0</level>
+                    <default>0</default>
+                    <constraints>
+                        <minimum>0</minimum>
+                        <maximum>65535</maximum>
+                    </constraints>
+                    <control type="edit" format="integer"/>
+                </setting>
+                <setting id="screensaver_color" type="string" label="32040" help="32041">
+                    <level>0</level>
+                    <default>cyan</default>
+                    <constraints>
+                        <allowempty>false</allowempty>
+                        <options>
+                            <option>cyan</option>
+                            <option>green</option>
+                            <option>hotpink</option>
+                        </options>
+                    </constraints>
+                    <control type="list" format="string"/>
+                </setting>
+            </group>
+        </category>
+    </section>
+</settings>
