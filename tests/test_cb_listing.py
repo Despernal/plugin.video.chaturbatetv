@@ -207,7 +207,20 @@ def test_plot_for_renders_tags_in_green() -> None:
                      "num_users": 1, "num_followers": 0})
     assert "#blonde" in plot
     assert "#teen" in plot
-    assert "00ff88" in plot
+    # Must be 8-char hex with alpha; bare 6-char gets rendered blank by Kodi.
+    assert "FF00ff88" in plot
+
+
+def test_plot_for_color_tags_have_alpha_prefix() -> None:
+    """Regression guard: every [COLOR <hex>] in the plot must be 8-char hex."""
+    import re
+    plot = plot_for({"username": "alice", "display_age": 22,
+                     "location": "Berlin", "tags": ["blonde"],
+                     "num_users": 1, "num_followers": 2})
+    for hex_str in re.findall(r"\[COLOR ([0-9A-Fa-f]+)\]", plot):
+        assert len(hex_str) == 8, (
+            f"Color {hex_str!r} in plot is {len(hex_str)} chars; need 8 (AARRGGBB)"
+        )
 
 
 def test_plot_for_includes_viewers_and_followers() -> None:

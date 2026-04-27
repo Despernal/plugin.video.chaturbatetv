@@ -124,13 +124,13 @@ def plot_for(room: dict[str, Any]) -> str:
     parts: list[str] = []
     if subject:
         parts.append(subject)
-    parts.append(f"[COLOR 00d4ff]Age:[/COLOR] {age}")
+    parts.append(f"[COLOR FF00d4ff]Age:[/COLOR] {age}")
     if location:
-        parts.append(f"[COLOR 00d4ff]Location:[/COLOR] {location}")
-    parts.append(f"[COLOR 00d4ff]Watching:[/COLOR] {viewers}")
-    parts.append(f"[COLOR 00d4ff]Followers:[/COLOR] {followers}")
+        parts.append(f"[COLOR FF00d4ff]Location:[/COLOR] {location}")
+    parts.append(f"[COLOR FF00d4ff]Watching:[/COLOR] {viewers}")
+    parts.append(f"[COLOR FF00d4ff]Followers:[/COLOR] {followers}")
     tags = room.get("tags") or []
     if isinstance(tags, list) and tags:
         tag_str = ", ".join(f"#{t}" for t in tags)
-        parts.append(f"[COLOR 00ff88]{tag_str}[/COLOR]")
+        parts.append(f"[COLOR FF00ff88]{tag_str}[/COLOR]")
     return "\n".join(parts)

@@ -114,6 +114,10 @@ def test_main_menu_calls_endOfDirectory(kodi_mocks: dict[str, MagicMock]) -> Non
 
 
 def test_main_menu_color_tags_female_label(kodi_mocks: dict[str, MagicMock]) -> None:
+    """Color tags must include the 8-char hex with FF alpha prefix; Kodi
+    silently drops [COLOR <hex>] when the hex is 6 chars (no alpha) and
+    renders the wrapped label as blank.
+    """
     bv = _import()
     bv.main_menu(handle=42)
     gui = kodi_mocks["xbmcgui"]
@@ -123,7 +127,28 @@ def test_main_menu_color_tags_female_label(kodi_mocks: dict[str, MagicMock]) -> 
     ]
     female_labels = [label for label in labels if "Female" in label]
     assert female_labels
-    assert any("00d4ff" in lab for lab in female_labels)
+    assert any("FF00d4ff" in lab for lab in female_labels), (
+        "Color tags must use 8-char hex (FF<RRGGBB>); 6-char hex makes Kodi render blank"
+    )
+
+
+def test_main_menu_all_color_tags_have_alpha_prefix(kodi_mocks: dict[str, MagicMock]) -> None:
+    """Regression guard: every [COLOR <hex>] in main menu must be 8-char hex."""
+    import re
+    bv = _import()
+    bv.main_menu(handle=42)
+    gui = kodi_mocks["xbmcgui"]
+    labels = [
+        call.kwargs.get("label", call.args[0] if call.args else "")
+        for call in gui.ListItem.call_args_list
+    ]
+    color_tag = re.compile(r"\[COLOR ([0-9A-Fa-f]+)\]")
+    for label in labels:
+        for hex_str in color_tag.findall(label):
+            assert len(hex_str) == 8, (
+                f"Color {hex_str!r} in {label!r} is {len(hex_str)} chars; "
+                "Kodi requires 8-char AARRGGBB"
+            )
 
 
 # --------------------------------------------------------------------------- #

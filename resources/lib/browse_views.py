@@ -25,18 +25,20 @@ _FetchFn = Callable[..., str]
 
 
 # HALO palette per PLANNING.md.
+# Kodi's [COLOR <hex>] requires 8-char AARRGGBB (or named colors).
+# 6-char hex (RRGGBB) silently renders blank.
 GENDER_COLORS: dict[Gender, str] = {
-    Gender.FEMALE: "00d4ff",
-    Gender.MALE: "66e3ff",
-    Gender.COUPLE: "00ff88",
-    Gender.TRANS: "ff0080",
-    Gender.UNKNOWN: "c8e8f8",
+    Gender.FEMALE: "FF00d4ff",
+    Gender.MALE: "FF66e3ff",
+    Gender.COUPLE: "FF00ff88",
+    Gender.TRANS: "FFff0080",
+    Gender.UNKNOWN: "FFc8e8f8",
 }
 
 
 def _color_label(label: str, gender: Gender) -> str:
-    """Wrap a label in Kodi's [COLOR ABCDEF]...[/COLOR] tag for the gender."""
-    color = GENDER_COLORS.get(gender, "c8e8f8")
+    """Wrap a label in Kodi's [COLOR AARRGGBB]...[/COLOR] tag for the gender."""
+    color = GENDER_COLORS.get(gender, "FFc8e8f8")
     return f"[COLOR {color}]{label}[/COLOR]"
 
 
