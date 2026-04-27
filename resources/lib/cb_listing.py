@@ -32,6 +32,12 @@ from resources.lib.cb_models import Gender, Model
 # returned in ``subject``.
 _ANCHOR_RE = re.compile(r"<a [^>]*>([^<]*)</a>", re.IGNORECASE)
 
+# Strip inline #word hashtags from a room subject so they don't show up
+# twice (the tag-line at the bottom of the plot already lists them in
+# green). We only strip ASCII-word hashtag tokens; subject prose with a
+# stray '#' that isn't a tag stays put.
+_HASHTAG_RE = re.compile(r"#\w+")
+
 
 @dataclass(frozen=True)
 class RoomListPage:
@@ -105,10 +111,18 @@ def parse_roomlist(payload: dict[str, Any] | str | bytes) -> RoomListPage:
 
 
 def clean_subject(subject: str | None) -> str:
-    """Strip <a> tag markup from ``subject``; return clean inner text."""
+    """Strip <a> tag markup AND inline #word hashtags from ``subject``.
+
+    The hashtags are removed because we render the room's tag list as a
+    separate green line at the bottom of the plot; leaving them in the
+    subject would show every tag twice.
+    """
     if not subject:
         return ""
-    return _ANCHOR_RE.sub(r"\1", subject).strip()
+    no_anchors = _ANCHOR_RE.sub(r"\1", subject)
+    no_tags = _HASHTAG_RE.sub("", no_anchors)
+    # Collapse whitespace introduced by the strip.
+    return re.sub(r"\s+", " ", no_tags).strip()
 
 
 def plot_for(room: dict[str, Any]) -> str:

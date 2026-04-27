@@ -405,32 +405,33 @@ def test_listitem_label_falls_back_to_slug_when_name_empty(
     assert li.label == "alice"
 
 
-def test_default_resolve_plumbs_cb_client_into_cb_resolve(
+def test_default_resolve_plumbs_cb_client_ajax_into_cb_resolve(
     mock_xbmcgui: MagicMock,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Smoke-test the default-resolve glue: it must hand cb_resolve a
-    fetcher that calls cb_client.fetch_room_dossier(slug). This is the
-    only branch that exercises the production wiring at unit-test level.
+    """Default-resolve uses the AJAX endpoint (Lesson 3): it hands
+    cb_resolve.resolve_ajax a callback that calls
+    cb_client.fetch_room_status_json under the hood.
     """
-    captured: dict[str, str] = {}
+    captured: dict[str, object] = {}
 
     import resources.lib.cb_client as cb_client
     import resources.lib.cb_resolve as cb_resolve
 
-    def fake_fetch_room_dossier(slug: str, fetch_func: Any = None) -> str:
+    def fake_fetch_status(slug: str, fetch_func: Any = None) -> dict[str, object]:
         captured["slug"] = slug
-        return "<html>recorded</html>"
+        return {
+            "success": True,
+            "url": "https://edge99-fake.live.mmcdn.com/hls/abc/llhls.m3u8",
+            "room_status": "public",
+        }
 
-    def fake_resolve(slug: str, fetch_html_func: Any) -> Resolution:
-        # Verify the resolver gave cb_resolve a callable that, when
-        # invoked, hits cb_client.fetch_room_dossier under the hood.
-        body = fetch_html_func(f"https://chaturbate.com/{slug}/")
-        captured["body"] = body
+    def fake_resolve_ajax(slug: str, fetch_status_func: Any) -> Resolution:
+        captured["status"] = fetch_status_func(slug)
         return _live_resolution(slug)
 
-    monkeypatch.setattr(cb_client, "fetch_room_dossier", fake_fetch_room_dossier)
-    monkeypatch.setattr(cb_resolve, "resolve", fake_resolve)
+    monkeypatch.setattr(cb_client, "fetch_room_status_json", fake_fetch_status)
+    monkeypatch.setattr(cb_resolve, "resolve_ajax", fake_resolve_ajax)
 
     resolver = _import_resolver()
     result = resolver.resolve_to_listitem(
@@ -441,4 +442,5 @@ def test_default_resolve_plumbs_cb_client_into_cb_resolve(
     )
     assert result.success is True
     assert captured["slug"] == "alice"
-    assert captured["body"] == "<html>recorded</html>"
+    assert isinstance(captured["status"], dict)
+    assert captured["status"]["room_status"] == "public"

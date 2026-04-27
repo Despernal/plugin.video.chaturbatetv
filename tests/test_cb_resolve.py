@@ -101,3 +101,88 @@ def test_resolve_handles_invalid_slug() -> None:
     """Empty slug -> ValueError from room_url, propagated up."""
     with pytest.raises(ValueError):
         resolve("", lambda url: "")
+
+
+# resolve_ajax — preferred path, uses the JSON status endpoint -------------- #
+# Switched to in 0.4.3 because HTML scrape of initialRoomDossier is fragile
+# (Chaturbate is JS-rendered now; the blob is sometimes absent and we got
+# is_live=False for live rooms, then "Cannot download manifest" from ISA).
+
+def test_resolve_ajax_live_room() -> None:
+    """AJAX returns success+url+room_status=public -> is_live=True with that hls."""
+    from resources.lib.cb_resolve import resolve_ajax
+    fake_status = {
+        "success": True,
+        "url": "https://edge99-foo.live.mmcdn.com/hls/abc/llhls.m3u8?token=xyz",
+        "room_status": "public",
+        "hidden_message": "",
+        "cmaf_edge": False,
+    }
+    r = resolve_ajax("alice", lambda slug: fake_status)
+    assert r.is_live is True
+    assert r.hls_source == fake_status["url"]
+
+
+def test_resolve_ajax_offline_room() -> None:
+    from resources.lib.cb_resolve import resolve_ajax
+    r = resolve_ajax("ghost", lambda slug: {
+        "success": True, "url": "", "room_status": "offline",
+        "hidden_message": "", "cmaf_edge": False,
+    })
+    assert r.is_live is False
+    assert r.hls_source is None
+
+
+def test_resolve_ajax_treats_empty_url_as_offline() -> None:
+    """Even if room_status=public, no URL means we cannot play."""
+    from resources.lib.cb_resolve import resolve_ajax
+    r = resolve_ajax("alice", lambda slug: {
+        "success": True, "url": "", "room_status": "public",
+    })
+    assert r.is_live is False
+    assert r.hls_source is None
+
+
+def test_resolve_ajax_passes_slug_to_fetch() -> None:
+    from resources.lib.cb_resolve import resolve_ajax
+    seen: list[str] = []
+
+    def fetch(slug: str) -> dict:
+        seen.append(slug)
+        return {"success": False, "url": "", "room_status": "offline"}
+
+    resolve_ajax("alice", fetch)
+    assert seen == ["alice"]
+
+
+def test_resolve_ajax_includes_referer_and_user_agent() -> None:
+    from resources.lib.cb_resolve import resolve_ajax
+    r = resolve_ajax("alice", lambda slug: {
+        "success": False, "url": "", "room_status": "offline",
+    })
+    assert "User-Agent" in r.headers
+    assert r.headers["Referer"] == "https://chaturbate.com/alice/"
+
+
+def test_resolve_ajax_propagates_fetch_exception() -> None:
+    from resources.lib.cb_resolve import resolve_ajax
+
+    def bad_fetch(slug: str) -> dict:
+        raise OSError("network unreachable")
+
+    with pytest.raises(OSError):
+        resolve_ajax("alice", bad_fetch)
+
+
+def test_resolve_ajax_handles_invalid_slug() -> None:
+    from resources.lib.cb_resolve import resolve_ajax
+    with pytest.raises(ValueError):
+        resolve_ajax("", lambda slug: {})
+
+
+def test_resolve_ajax_safe_when_status_missing_keys() -> None:
+    """A truncated/malformed status dict shouldn't crash."""
+    from resources.lib.cb_resolve import resolve_ajax
+    r = resolve_ajax("alice", lambda slug: {})
+    assert r.is_live is False
+    assert r.hls_source is None

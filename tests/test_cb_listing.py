@@ -158,9 +158,12 @@ def test_parse_roomlist_garbage_viewer_count_zeroed() -> None:
 # clean_subject ------------------------------------------------------------- #
 
 
-def test_clean_subject_strips_anchor_tags_keeps_inner_text() -> None:
+def test_clean_subject_strips_anchor_tags_and_hashtags() -> None:
+    """Anchors get unwrapped, hashtags get stripped (they appear separately
+    in the green tag-line below).
+    """
     raw = 'goal: cum #threesum <a href="/tag/trans/">#trans</a> #natural'
-    assert clean_subject(raw) == "goal: cum #threesum #trans #natural"
+    assert clean_subject(raw) == "goal: cum"
 
 
 def test_clean_subject_handles_none() -> None:
@@ -233,7 +236,36 @@ def test_plot_for_includes_viewers_and_followers() -> None:
 
 def test_plot_for_subject_html_anchors_get_stripped() -> None:
     plot = plot_for({"username": "alice",
-                     "subject": 'cum #x <a href="/tag/y/">#y</a>',
+                     "subject": 'cum show <a href="/tag/y/">#y</a>',
                      "num_users": 1, "num_followers": 0})
     assert "<a" not in plot
-    assert "#y" in plot
+
+
+def test_plot_for_subject_strips_hashtags_to_avoid_duplicate_with_tag_line() -> None:
+    """The room subject often inlines hashtags (e.g. 'cum show #blonde #natural').
+    We render the same tags separately as a green tag-line at the bottom of
+    the plot. Strip #word tokens from the subject so the user does not see
+    them twice.
+    """
+    plot = plot_for({"username": "alice",
+                     "subject": "cum show #blonde #natural #petite",
+                     "tags": ["blonde", "natural", "petite"],
+                     "num_users": 1, "num_followers": 0})
+    pre_tags, _, post_tags = plot.partition("[COLOR FF00ff88]")
+    assert "#blonde" not in pre_tags
+    assert "#natural" not in pre_tags
+    assert "#petite" not in pre_tags
+    assert "cum show" in pre_tags
+    assert "#blonde" in post_tags
+    assert "#natural" in post_tags
+
+
+def test_plot_for_subject_strips_hashtags_even_when_tags_empty() -> None:
+    """Hashtags in the subject duplicate the tags[] field anyway; strip
+    regardless to keep rendering consistent.
+    """
+    plot = plot_for({"username": "alice",
+                     "subject": "cum show #blonde",
+                     "num_users": 1, "num_followers": 0})
+    assert "#blonde" not in plot
+    assert "cum show" in plot

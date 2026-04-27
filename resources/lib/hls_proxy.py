@@ -222,6 +222,12 @@ def start_proxy(stream_url: str, room_url: str) -> ProxyHandle:
     )
     thread.start()
 
+    from resources.lib import logger
+    logger._log(
+        f"hls_proxy: bound host={host} port={port} "
+        f"upstream_present={bool(stream_url)} room_url={room_url!r}"
+    )
+
     return ProxyHandle(
         host=host,
         port=port,

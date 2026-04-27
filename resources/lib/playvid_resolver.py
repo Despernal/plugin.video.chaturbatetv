@@ -119,27 +119,22 @@ def _build_listitem(
 
 
 def _default_resolve(slug: str) -> Resolution:
-    """Wrap ``cb_resolve.resolve`` with ``cb_client.fetch_room_dossier``
-    as the network layer.
-
-    Both modules are imported at call time so importing this resolver
-    in unit tests never drags stdlib ``urllib`` into ``sys.modules``;
-    the tests inject their own ``resolve_func`` and never exercise this
-    code path.
-
-    ``cb_resolve.resolve`` expects a ``Callable[[str], str]`` that maps
-    a room URL to its HTML body, while ``cb_client.fetch_room_dossier``
-    takes the slug and constructs the URL itself. We close over the
-    slug so the callback signature lines up; both agree on the URL
-    scheme so refetching ``room_url(slug)`` here would be wasteful.
+    """Resolve via the AJAX endpoint (Lesson 3). The HTML dossier path
+    was unreliable - Chaturbate's page is JS-rendered and the
+    ``initialRoomDossier`` blob is often missing, which produced
+    is_live=False for live rooms and "Cannot download manifest" from
+    ISA. The AJAX endpoint returns clean JSON with a stable shape.
     """
-    from resources.lib import cb_client
-    from resources.lib.cb_resolve import resolve as cb_resolve_resolve
+    from resources.lib import cb_client, logger
+    from resources.lib.cb_resolve import resolve_ajax
 
-    def _fetch(_url: str) -> str:
-        return cb_client.fetch_room_dossier(slug)
-
-    return cb_resolve_resolve(slug, _fetch)
+    logger._log(f"playvid_resolver: resolve_ajax slug={slug!r}")
+    res = resolve_ajax(slug, cb_client.fetch_room_status_json)
+    logger._log(
+        f"playvid_resolver: resolved slug={slug!r} is_live={res.is_live} "
+        f"hls_present={bool(res.hls_source)}"
+    )
+    return res
 
 
 def _default_start_proxy(stream_url: str, room_url: str) -> Any:

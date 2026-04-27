@@ -25,6 +25,7 @@ _USER_AGENT = (
 
 
 _FetchFn = Callable[[str], str]
+_StatusFn = Callable[[str], dict[str, object]]
 
 
 @dataclass(frozen=True)
@@ -69,4 +70,44 @@ def resolve(slug: str, fetch_html_func: _FetchFn) -> Resolution:
         hls_source=parsed["hls_source"],
         headers=headers,
         gender=parsed["gender"],
+    )
+
+
+def resolve_ajax(slug: str, fetch_status_func: _StatusFn) -> Resolution:
+    """Build a Resolution via Chaturbate's clean JSON status endpoint.
+
+    Preferred over :func:`resolve` because the AJAX endpoint
+    (``POST /get_edge_hls_url_ajax/``) returns the room's live status
+    and HLS URL as structured JSON, while the room HTML's
+    ``initialRoomDossier`` blob is JS-rendered and not always present
+    in the static page (Lesson 3).
+
+    ``fetch_status_func(slug)`` is expected to return the parsed JSON
+    dict from the AJAX endpoint, with at least the keys ``url`` and
+    ``room_status``. Use ``cb_client.fetch_room_status_json`` as the
+    real-network implementation; tests pass a stub.
+
+    Live = ``room_status == "public"`` AND non-empty ``url``. An empty
+    URL means "the room is up but the edge has not handed us a stream
+    yet" - we treat as not playable to avoid handing ISA an empty
+    string.
+
+    Gender is not in the AJAX response; left as ``UNKNOWN`` here.
+    Browse views populate gender from the listing JSON; TV mode and
+    playvid only need is_live + hls_source.
+    """
+    url = room_url(slug)
+    status = fetch_status_func(slug)
+    headers = {
+        "User-Agent": _USER_AGENT,
+        "Referer": url,
+    }
+    hls = str(status.get("url") or "") if isinstance(status, dict) else ""
+    room_status = str(status.get("room_status") or "") if isinstance(status, dict) else ""
+    is_live = room_status == "public" and bool(hls)
+    return Resolution(
+        is_live=is_live,
+        hls_source=hls or None,
+        headers=headers,
+        gender=Gender.UNKNOWN,
     )

@@ -117,12 +117,16 @@ def playvid(handle: int, slug: str = "", name: str = "",
     so Kodi tears the playback attempt down cleanly instead of hanging
     on a missing item.
     """
+    from resources.lib import logger
+    logger._log(f"playvid: enter handle={handle} slug={slug!r} name={name!r}")
     if not slug:
+        logger._log("playvid: missing slug, abort")
         _notify("Chaturbate TV", "Play: missing slug")
         return
 
     from resources.lib import playvid_resolver
     result = playvid_resolver.resolve_to_listitem(slug=slug, name=name or slug)
+    logger._log(f"playvid: resolve_to_listitem success={result.success} slug={slug!r}")
 
     try:
         import xbmcplugin
@@ -136,6 +140,7 @@ def playvid(handle: int, slug: str = "", name: str = "",
         return
 
     xbmcplugin.setResolvedUrl(handle, True, result.listitem)
+    logger._log(f"playvid: setResolvedUrl success slug={slug!r}")
 
 
 def _empty_listitem() -> Any:
