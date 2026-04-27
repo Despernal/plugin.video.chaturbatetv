@@ -12,7 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from resources.lib import favs_store, tv_store
+from resources.lib import ctxmenu, favs_store, tv_store
 from resources.lib.cb_models import Favorite, Gender, TVEntry
 
 
@@ -481,10 +481,21 @@ def tv_list(handle: int, store_path: Path | None = None,
         "[COLOR FFff8080]>> Stop TV mode[/COLOR]",
         "tv_stop",
     )
+    # Build the favs once so each row's ctxmenu builder can ask "is
+    # this also in favorites?" without per-row disk reads.
+    favs = favs_store.load(_favs_path())
     sorted_entries = priority_sort(entries)
     for e in sorted_entries:
         label = f"[COLOR FF00d4ff][P{e.priority:02d}][/COLOR] {e.name}"
-        kodi_helpers.add_play_item(handle, label, slug=_slug_from_url(e.url))
+        slug = _slug_from_url(e.url)
+        ctx = ctxmenu.build_ctxmenu(
+            {"slug": slug, "name": e.name, "url": e.url},
+            tv_entries=entries,
+            favs=favs,
+        )
+        kodi_helpers.add_play_item(
+            handle, label, slug=slug, ctx_items=ctx,
+        )
     kodi_helpers.end_directory(handle, content_type="videos")
 
 

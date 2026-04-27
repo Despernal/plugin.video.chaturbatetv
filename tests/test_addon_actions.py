@@ -789,6 +789,41 @@ def test_tv_list_renders_priority_rows(
     fake_kh.end_directory.assert_called_once()
 
 
+def test_tv_list_rows_carry_ctxmenu_with_edit_and_remove(
+    tmp_path: Path,
+    kodi_mocks: dict[str, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: tv_list rows MUST carry the state-aware ctxmenu so
+    the user can right-click an entry and Edit Priority or Remove it
+    from the list. Earlier shipped versions called ``add_play_item``
+    without ``ctx_items``, dropping 's right-click parity.
+    """
+    from resources.lib import tv_store
+    from resources.lib.cb_models import TVEntry
+
+    tv_path = tmp_path / "tv.json"
+    tv_store.save(tv_path, [
+        TVEntry(name="alice", url="https://chaturbate.com/alice/", priority=10),
+    ])
+
+    fake_kh = _patch_kodi_helpers(monkeypatch)
+
+    actions = _import()
+    actions.tv_list(handle=42, store_path=tv_path)
+
+    play_calls = fake_kh.add_play_item.call_args_list
+    assert play_calls, "no play rows added"
+    # Each row should pass ctx_items containing the TV-mgmt actions.
+    ctx_items_kw = play_calls[0].kwargs.get("ctx_items")
+    assert ctx_items_kw is not None, (
+        "tv_list row must pass ctx_items (regression from )"
+    )
+    labels = [item[0] for item in ctx_items_kw]
+    assert any("Edit TV Priority" in lab for lab in labels)
+    assert any("Remove from TV" in lab for lab in labels)
+
+
 def test_tv_list_empty_shows_help_row(
     tmp_path: Path,
     kodi_mocks: dict[str, MagicMock],
