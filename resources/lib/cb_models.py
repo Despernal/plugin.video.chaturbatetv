@@ -68,6 +68,8 @@ class Model:
     is_live: bool
     viewers: int
     gender: Gender = Gender.UNKNOWN
+    image: str = ""
+    plot: str = ""
 
     @classmethod
     def from_dossier(cls, dossier: dict[str, Any]) -> Model:

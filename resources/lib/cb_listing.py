@@ -65,6 +65,8 @@ def _model_from_room(room: dict[str, Any]) -> Model | None:
         is_live=label == "public",
         viewers=_to_int(room.get("num_users"), 0),
         gender=Gender.from_str(room.get("gender")),
+        image=str(room.get("img") or ""),
+        plot=plot_for(room),
     )
 
 

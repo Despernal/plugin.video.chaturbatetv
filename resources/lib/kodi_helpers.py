@@ -46,8 +46,15 @@ def add_dir(handle: int, label: str, mode: str, image: str | None = None,
 
 
 def add_play_item(handle: int, label: str, slug: str, image: str | None = None,
-                  **props: Any) -> None:
-    """Add a playable ListItem that routes through ``mode=playvid``."""
+                  plot: str | None = None, **props: Any) -> None:
+    """Add a playable ListItem that routes through ``mode=playvid``.
+
+    ``plot`` is a Kodi video-info string (Age / Location / etc); when
+    non-empty it lands as ``setInfo("video", {"plot": ...})`` so Kodi
+    renders it in the right-pane on hover. ``plot`` is metadata for
+    the ListItem and is intentionally NOT added to the plugin URL
+    query string (the URL is for routing, not display).
+    """
     import xbmcgui
     import xbmcplugin
 
@@ -56,6 +63,8 @@ def add_play_item(handle: int, label: str, slug: str, image: str | None = None,
     li.setProperty("IsPlayable", "true")
     if image:
         li.setArt({"thumb": image, "icon": image, "fanart": image})
+    if plot:
+        li.setInfo("video", {"plot": plot, "title": label})
     xbmcplugin.addDirectoryItem(handle=handle, url=url, listitem=li, isFolder=False)
 
 

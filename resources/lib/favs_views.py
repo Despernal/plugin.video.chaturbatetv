@@ -19,17 +19,18 @@ from resources.lib.cb_models import Favorite, Gender
 _FetchFn = Callable[..., str]
 
 
+# Kodi requires 8-char AARRGGBB hex; bare 6-char silently renders blank.
 _GENDER_COLORS: dict[Gender, str] = {
-    Gender.FEMALE: "00d4ff",
-    Gender.MALE: "66e3ff",
-    Gender.COUPLE: "00ff88",
-    Gender.TRANS: "ff0080",
-    Gender.UNKNOWN: "c8e8f8",
+    Gender.FEMALE: "FF00d4ff",
+    Gender.MALE: "FF66e3ff",
+    Gender.COUPLE: "FF00ff88",
+    Gender.TRANS: "FFff0080",
+    Gender.UNKNOWN: "FFc8e8f8",
 }
 
 
 def _color_label(label: str, gender: Gender) -> str:
-    color = _GENDER_COLORS.get(gender, "c8e8f8")
+    color = _GENDER_COLORS.get(gender, "FFc8e8f8")
     return f"[COLOR {color}]{label}[/COLOR]"
 
 
@@ -60,16 +61,15 @@ def favs_menu(handle: int, store_path: Path | None = None,
             online.append(f)
         else:
             offline.append(f)
-    kodi_helpers.add_dir(handle, f"Online ({len(online)})", "favs", view="online")
-    kodi_helpers.add_dir(handle, f"Offline ({len(offline)})", "favs", view="offline")
+    kodi_helpers.add_dir(handle, f"Online ({len(online)})", "favs_online")
+    kodi_helpers.add_dir(handle, f"Offline ({len(offline)})", "favs_offline")
     kodi_helpers.end_directory(handle)
 
 
 def _render_favs(handle: int, favs: list[Favorite]) -> None:
     for f in favs:
         label = _color_label(f.name, f.gender)
-        image = f"https://roomimg.stream.highwebmedia.com/ri/{f.slug}.jpg"
-        kodi_helpers.add_play_item(handle, label, f.slug, image=image)
+        kodi_helpers.add_play_item(handle, label, f.slug)
 
 
 def online_favs_view(handle: int, store_path: Path | None = None,

@@ -61,13 +61,21 @@ def main_menu(handle: int, **_params: Any) -> None:
 
 
 def _render_models(handle: int, models: list[Model]) -> None:
-    """Add a list of Model entries as playable items, color-tagged by gender."""
+    """Add Model entries as playable items, color-tagged by gender, with
+    each room's actual thumb URL (not a hardcoded pattern - Chaturbate's
+    img URLs include cache-busting timestamps so guessing fails). The
+    plot string lands via setInfo("video") so Kodi shows Age/Location/
+    Watching/Followers/Tags in the right-pane on hover.
+    """
     for m in models:
         label = _color_label(m.name, m.gender)
         if m.viewers:
             label = f"{label} [{m.viewers}]"
-        image = f"https://roomimg.stream.highwebmedia.com/ri/{m.slug}.jpg"
-        kodi_helpers.add_play_item(handle, label, m.slug, image=image)
+        kodi_helpers.add_play_item(
+            handle, label, m.slug,
+            image=m.image or None,
+            plot=m.plot or None,
+        )
 
 
 def _coerce_page(value: Any) -> int:
