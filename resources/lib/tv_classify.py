@@ -41,16 +41,17 @@ def classify_stop(
     real user stop (the standard idle/live check applies).
 
     Mid-playlist stops are always real user stops (False).
+    Any at-end stop is a natural end - rebuild forever (True). The
+    v0.7.5-0.7.12 era had a "second at-end within 5s = exit" double-
+    tap escape, removed in v0.7.13 per user directive: no double-press
+    gestures, sticky-playback wins. Users exit via Stop+dialog or the
+    "Stop TV mode" menu item.
 
-    First at-end stop (``last_natural_end_time == 0`` or far in the
-    past) -> natural (True). Second at-end stop within ``threshold``
-    seconds -> user double-tapped Stop, real exit (False). This gives
-    the user a "press Stop twice" escape on single-item tiers and at
-    the last position of multi-item tiers.
+    ``last_natural_end_time`` and ``threshold`` are preserved in the
+    signature for backward-compat with existing callers; they're
+    ignored as of v0.7.13.
     """
     if not at_end:
-        return False
-    if last_natural_end_time and (now - last_natural_end_time) < threshold:
         return False
     return True
 

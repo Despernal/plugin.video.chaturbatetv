@@ -406,10 +406,15 @@ def test_start_proxy_stops_previous_active_proxy(
     until process exit because no caller calls .stop() on the old
     handle returned by the previous start_proxy().
 
-    This test verifies the FIRST proxy's port is no longer bound after
-    the second start_proxy() returns.
+    Lesson 34 (v0.7.13): the cleanup happens on a background daemon
+    thread so the new playvid script doesn't block on
+    ``server.shutdown()`` (which waits up to 5+ seconds for in-flight
+    handler threads to drain - long enough for Kodi's CPythonInvoker
+    to time out the addon script). Test waits for the bg cleanup to
+    finish before asserting the port is rebindable.
     """
     import socket
+    import time
     from resources.lib import hls_proxy
 
     cdn_base, state = stub_cdn
@@ -426,13 +431,28 @@ def test_start_proxy_stops_previous_active_proxy(
         room_url="https://chaturbate.com/bob/",
     )
     try:
-        # `a` should have been auto-stopped; rebind on its port should succeed.
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            s.bind(("127.0.0.1", a_port))
-        finally:
-            s.close()
+        # Cleanup is async (bg thread); poll up to 5s for the port to
+        # be rebindable. Real-Kodi cleanup completes near-instantly
+        # under stub_cdn since there are no in-flight requests.
+        deadline = time.monotonic() + 5.0
+        rebound = False
+        last_err: Exception | None = None
+        while time.monotonic() < deadline:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                s.bind(("127.0.0.1", a_port))
+                rebound = True
+                break
+            except OSError as exc:
+                last_err = exc
+                time.sleep(0.1)
+            finally:
+                s.close()
+        assert rebound, (
+            f"previous proxy port {a_port} still bound after 5s; "
+            f"last err={last_err!r}"
+        )
     finally:
         b.stop()
 

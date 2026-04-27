@@ -66,25 +66,25 @@ def test_classify_stop_first_at_end_is_natural() -> None:
     assert classify_stop(True, 0, 100.0) is True
 
 
-def test_classify_stop_second_at_end_within_threshold_is_user_stop() -> None:
-    """Within 5s of prior end -> user double-tapped Stop, real exit."""
-    assert classify_stop(True, 97.5, 100.0) is False
-    assert classify_stop(True, 99.9, 100.0) is False
+def test_classify_stop_at_end_always_natural_v0_7_13() -> None:
+    """v0.7.13 dropped the second-at-end-within-5s exit per user
+    directive: no double-press gestures, sticky-playback wins.
 
-
-def test_classify_stop_second_at_end_outside_threshold_is_natural() -> None:
+    Any at-end stop is now treated as a natural end -> rebuild.
+    Users exit via the Yes/No dialog or the "Stop TV mode" menu item.
+    The ``last_natural_end_time`` and ``threshold`` parameters are
+    preserved in the signature for backward-compat with existing
+    callers but are ignored.
+    """
+    # First at-end: natural.
+    assert classify_stop(True, 0, 100.0) is True
+    # Second at-end "within 5s" used to be a force-exit; now natural.
+    assert classify_stop(True, 97.5, 100.0) is True
+    assert classify_stop(True, 99.9, 100.0) is True
+    # Outside threshold: also natural.
     assert classify_stop(True, 50.0, 100.0) is True
-    # Exactly at threshold (delta == 5s) -> separate event, natural.
-    assert classify_stop(True, 95.0, 100.0) is True
-
-
-def test_classify_stop_custom_threshold() -> None:
-    assert classify_stop(True, 99.0, 100.0, threshold=2.0) is False  # 1s diff < 2s
-    assert classify_stop(True, 97.0, 100.0, threshold=2.0) is True   # 3s diff >= 2s
-
-
-def test_classify_stop_threshold_zero_always_natural_when_at_end() -> None:
-    """threshold=0 -> any non-zero delta is outside, always natural."""
+    # Custom threshold no longer affects behavior.
+    assert classify_stop(True, 99.0, 100.0, threshold=2.0) is True
     assert classify_stop(True, 99.99999, 100.0, threshold=0.0) is True
 
 

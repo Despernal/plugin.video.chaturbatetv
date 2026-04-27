@@ -26,6 +26,10 @@ _POLL_MIN_CEIL = 60
 
 _PROXY_PORT_DEFAULT = 0  # 0 = kernel-assigned
 
+_DIALOG_TIMEOUT_DEFAULT = 10
+_DIALOG_TIMEOUT_FLOOR = 5
+_DIALOG_TIMEOUT_CEIL = 60
+
 # Friendly name -> 8-char AARRGGBB hex. Kodi's [COLOR] tag rejects 6-char
 # (silently renders blank), so every entry must be 8 chars.
 _SCREENSAVER_COLORS: dict[str, str] = {
@@ -122,6 +126,29 @@ def show_gender(gender_key: str) -> bool:
         return bool(_addon().getSettingBool(setting_id))
     except Exception:
         return True
+
+
+def dialog_timeout_seconds() -> int:
+    """How long the exit Yes/No dialog stays up before auto-closing.
+
+    Auto-close defaults to "Keep playing" so an accidental Stop press
+    that the user walks away from preserves sticky-playback. The
+    setting lets users tune the trade-off: lower values resume sooner
+    after a misclick, higher values give more time to actually pick
+    Exit on a slow remote.
+
+    Floor 5s, ceil 60s, default 10s. Out-of-range / Kodi-missing falls
+    back to default (rather than to whatever the slider returned)
+    because a 0 here would dismiss the dialog before the user could
+    react.
+    """
+    try:
+        v = int(_addon().getSettingInt("dialog_timeout_seconds"))
+    except Exception:
+        return _DIALOG_TIMEOUT_DEFAULT
+    if v < _DIALOG_TIMEOUT_FLOOR or v > _DIALOG_TIMEOUT_CEIL:
+        return _DIALOG_TIMEOUT_DEFAULT
+    return v
 
 
 def screensaver_color() -> str:

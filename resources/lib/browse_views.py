@@ -91,6 +91,11 @@ def main_menu(handle: int, **_params: Any) -> None:
         "[COLOR FFff8080]>> Restart Kodi (clears stuck audio buffer)[/COLOR]",
         "restart_kodi",
     )
+    kodi_helpers.add_dir(
+        handle,
+        "[COLOR FFc8e8f8]>> Settings[/COLOR]",
+        "open_settings",
+    )
     kodi_helpers.end_directory(handle, content_type="videos")
 
 

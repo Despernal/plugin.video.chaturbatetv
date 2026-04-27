@@ -907,20 +907,24 @@ _active_proxy_lock = threading.Lock()
 
 
 def _stop_active_proxy() -> None:
-    """Stop the currently-tracked proxy, if any. Best-effort.
+    """Stop the currently-tracked proxy, if any. Async + best-effort.
 
-    's pattern: at the top of every Playvid() call, signal
-    the previous proxy's stopping=True and call ``shutdown() +
-    server_close()`` BEFORE creating the new one. Otherwise daemon
-    threads from the previous proxy keep running until process exit
-    and pile up over a session.
+    Lesson 31: when refactoring globals into "caller passes the handle
+    around" semantics, the cleanup MUST be reproduced at the new
+    abstraction boundary - else daemon threads pile up.
 
-    chaturbatetv's earlier code returned a ProxyHandle and pushed
-    cleanup to the caller, but no caller actually called .stop() on
-    the previous handle - so we leaked threads on every replay.
-    Lesson 31: when refactoring globals into "caller passes the
-    handle around" semantics, the cleanup MUST be reproduced at the
-    new abstraction boundary.
+    Lesson 34 (added v0.7.13): the cleanup MUST be async. The previous
+    in-line ``prev.stop()`` blocked for up to 5+ seconds because
+    ``server.shutdown()`` waits for in-flight handler threads to drain.
+    On a stream-takeover with an unhealthy old proxy (mid-reconnect,
+    ISA hammering chunklists), the new playvid's ``setResolvedUrl()``
+    never ran in time - Kodi's 5s CPythonInvoker timeout killed the
+    script and the playlist item was marked unplayable.
+
+    Spawning the shutdown on a daemon thread frees the new playvid to
+    complete in milliseconds. The old proxy gets torn down at its own
+    pace; if it's slow, only the cleanup thread waits, not the user
+    experience.
     """
     global _active_proxy
     with _active_proxy_lock:
@@ -928,11 +932,25 @@ def _stop_active_proxy() -> None:
         _active_proxy = None
     if prev is None:
         return
-    _log(f"start_proxy: stopping previous proxy port={prev.port}")
-    try:
-        prev.stop()
-    except Exception as exc:
-        _log(f"start_proxy: previous-proxy stop FAILED err={exc!r}")
+    _log(
+        f"start_proxy: spawning ASYNC cleanup of previous proxy "
+        f"port={prev.port}"
+    )
+
+    def _bg_cleanup() -> None:
+        try:
+            prev.stop()
+            _log(f"start_proxy: bg cleanup OK port={prev.port}")
+        except Exception as exc:
+            _log(
+                f"start_proxy: bg cleanup FAILED port={prev.port} err={exc!r}"
+            )
+
+    threading.Thread(
+        target=_bg_cleanup,
+        name=f"chaturbatetv-proxy-cleanup-{prev.port}",
+        daemon=True,
+    ).start()
 
 
 def stop_all() -> None:

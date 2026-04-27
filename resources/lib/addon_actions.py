@@ -254,6 +254,23 @@ def tv_play(handle: int, store_path: Path | None = None,
     )
 
 
+def open_settings(handle: int, **_params: Any) -> None:
+    """Open the addon's settings dialog.
+
+    Kodi's ``Addon.OpenSettings(<id>)`` builtin is the canonical way to
+    surface the settings dialog from inside a directory listing - same
+    dialog the gear icon in the addon manager opens. This gives users
+    a discoverable path from the main menu without leaving the addon.
+    """
+    from resources.lib import logger
+    logger._log("open_settings: user requested settings")
+    try:
+        import xbmc
+        xbmc.executebuiltin("Addon.OpenSettings(plugin.video.chaturbatetv)")
+    except Exception as exc:
+        logger._log(f"open_settings: builtin failed err={exc!r}")
+
+
 def restart_kodi(handle: int, **_params: Any) -> None:
     """Restart Kodi to clear stuck audio/video engine state.
 

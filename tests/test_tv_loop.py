@@ -371,42 +371,51 @@ def test_tv_play_runs_screensaver_when_nothing_live(
 def test_tv_play_resumes_when_screensaver_finds_live(
     kodi_mods: dict[str, Any],
 ) -> None:
-    """Screensaver returns a live entry -> loop builds a playlist."""
+    """Screensaver returns a live entry -> loop builds a playlist.
+
+    Uses a 2-entry tier so playlist size > 1 and pos=0 isn't at-end.
+    With sticky-playback, an at-end stop is treated as natural_end and
+    rebuilds; mid-playlist user stops with low idle take the
+    user_stopped branch (Lesson 17 disambiguator). The test exercises
+    the latter so we can verify the screensaver-resume path produced a
+    valid play call AND that the standard exit gesture still works.
+    """
     tl = _import()
     rt = MockKodiRuntime()
-    target = TVEntry(name="alice", url="https://chaturbate.com/alice/",
-                     priority=10)
+    alice = TVEntry(name="alice", url="https://chaturbate.com/alice/",
+                    priority=10)
+    bob = TVEntry(name="bob", url="https://chaturbate.com/bob/",
+                  priority=10)
 
     walks = {"n": 0}
 
     def is_live(url: str) -> bool:
-        # First pick walk: nothing live. After screensaver: alice live.
+        # First pick walk (one is_live call per entry): both offline.
+        # After screensaver: both live.
         walks["n"] += 1
-        if walks["n"] <= 1:
-            return False
-        return url == target.url
+        return walks["n"] > 2
 
     plays = []
 
     def play_call(_pl: Any) -> None:
         plays.append(1)
         rt.player.simulate_av_started("plugin://x/?slug=alice")
-        # User stops shortly after.
+        # User stops shortly after - mid-playlist (pos=0 of 2-item tier).
         rt.player.simulate_stopped()
 
     def screensaver(**_kw: Any) -> Any:
-        return target
+        return alice
 
     out = tl.run_once_for_test(
         runtime=rt,
-        entries=[target],
+        entries=[alice, bob],
         is_live_func=is_live,
         screensaver_func=screensaver,
         play_func=play_call,
         idle_func=lambda: 1,  # < 3s -> real user stop
     )
     assert plays  # we did call play
-    # The user's real stop was detected.
+    # Mid-playlist user stop with low idle + model live -> user_stopped.
     assert out["exit_reason"] == "user_stopped"
 
 
@@ -431,20 +440,17 @@ def _patch_yesno(kodi_mods: dict[str, Any], answer: bool) -> list[Any]:
     return captured
 
 
-def test_classify_user_stop_picks_exit_in_dialog(
+def test_classify_yesno_exit_returns_user_stopped(
     kodi_mods: dict[str, Any],
 ) -> None:
-    """Lesson 33 (replaces double-stop pattern, 2026-04-27): on a
+    """Lesson 33 (v0.7.11 was good, restored in v0.7.13): on a
     user-input stop where standard logic would continue, fire a
-    Yes/No dialog. If user picks Exit -> classify as user_stopped.
-
-    The double-tap pattern was fundamentally broken because Stop is
-    unavailable when no playback is happening (between iterations,
-    during screensaver). User report: "i don't know where to even
-    find stop a second time love even with a minute".
+    Yes/No dialog. Without defaultbutton (which broke focus on
+    Kodi 21 in v0.7.12), the dialog is navigable - user picks Exit
+    -> user_stopped.
     """
     tl = _import()
-    captured = _patch_yesno(kodi_mods, answer=True)  # user picks Exit
+    captured = _patch_yesno(kodi_mods, answer=True)
 
     class _State:
         user_stopped = True
@@ -457,16 +463,21 @@ def test_classify_user_stop_picks_exit_in_dialog(
     decision = tl._classify_after_stop(s, lambda url: False)
     assert decision == "user_stopped"
     assert captured, "yesno dialog should have fired"
+    # Regression guard: defaultbutton MUST NOT be passed - that param
+    # broke focus on Kodi 21 in v0.7.12.
+    kwargs = captured[0]["kwargs"]
+    assert "defaultbutton" not in kwargs, (
+        f"defaultbutton broke navigation in v0.7.12, do not re-add: {kwargs!r}"
+    )
 
 
-def test_classify_user_stop_picks_keep_playing_in_dialog(
+def test_classify_yesno_keep_playing_returns_fall_through(
     kodi_mods: dict[str, Any],
 ) -> None:
     """User picks "Keep playing" or autoclose fires -> fall through,
-    TV mode continues. The default sticky-playback behavior wins on
-    accidental dismiss."""
+    TV mode continues (sticky-playback default preserved)."""
     tl = _import()
-    _patch_yesno(kodi_mods, answer=False)  # user picks Keep playing
+    _patch_yesno(kodi_mods, answer=False)
 
     class _State:
         user_stopped = True
@@ -480,16 +491,16 @@ def test_classify_user_stop_picks_keep_playing_in_dialog(
     assert decision == "fall_through"
 
 
-def test_classify_double_stop_within_5s_still_force_exits(
+def test_classify_no_double_stop_fast_path_v0_7_13(
     kodi_mods: dict[str, Any],
 ) -> None:
-    """The double-stop override still works as a fallback: two
-    user-input stops within ``_DOUBLE_STOP_WINDOW_S`` (=5s) bypass
-    the dialog entirely and force exit. Useful for power users who
-    spam Stop twice on remote without waiting for the dialog.
+    """Regression guard: v0.7.13 dropped the double-stop fast-path per
+    user directive ("like the double stop and the double next is a no
+    go from now on"). Even if a previous user stop was recorded
+    seconds ago, the dialog must still fire - no shortcut.
     """
     tl = _import()
-    _patch_yesno(kodi_mods, answer=False)  # dialog would say "Keep playing"
+    captured = _patch_yesno(kodi_mods, answer=False)  # "Keep playing"
 
     class _State:
         def __init__(self) -> None:
@@ -497,54 +508,30 @@ def test_classify_double_stop_within_5s_still_force_exits(
             self.idle_at_stop = 1
             self.current_playlist_path = ""
             self.playlist_ended_naturally = False
+            # Even setting this should NOT short-circuit the dialog.
             self.previous_user_stop_time = 0.0
 
     s = _State()
-    # Simulate a stop ~2s ago.
     import time as _time
     s.previous_user_stop_time = _time.time() - 2.0
     decision = tl._classify_after_stop(s, lambda url: False)
-    # Force-exit branch fires BEFORE the dialog even shows.
-    assert decision == "user_stopped"
-
-
-def test_classify_double_stop_outside_window_falls_through_to_dialog(
-    kodi_mods: dict[str, Any],
-) -> None:
-    """Stops more than 5s apart aren't a confirmation gesture - the
-    user wandered away. Logic falls through to the dialog instead of
-    auto-exit."""
-    tl = _import()
-    _patch_yesno(kodi_mods, answer=False)  # dialog says "Keep playing"
-
-    class _State:
-        user_stopped = True
-        idle_at_stop = 1
-        current_playlist_path = ""
-        playlist_ended_naturally = False
-        previous_user_stop_time = 0.0
-
-    s = _State()
-    import time as _time
-    s.previous_user_stop_time = _time.time() - 30.0
-    decision = tl._classify_after_stop(s, lambda url: False)
+    # Dialog fires (mocked to "Keep playing"), so fall_through.
     assert decision == "fall_through"
+    assert captured, "dialog must always fire on user-input stop"
 
 
-def test_classify_first_user_stop_records_timestamp_when_continuing(
+def test_classify_high_idle_stop_falls_through_no_dialog(
     kodi_mods: dict[str, Any],
 ) -> None:
-    """When the standard logic decides to continue but the input WAS
-    user-driven (idle<3s), we remember the timestamp so a follow-up
-    stop within 5s triggers the force-exit branch (even if the user
-    is too fast for the dialog).
-    """
+    """ISA misfire (Kodi self-fired stop, idle>>3s, user wasn't
+    interacting): treated as continue without firing the dialog.
+    Keeps TV mode alive through model-going-offline events."""
     tl = _import()
-    _patch_yesno(kodi_mods, answer=False)  # dialog says "Keep playing"
+    captured = _patch_yesno(kodi_mods, answer=True)
 
     class _State:
         user_stopped = True
-        idle_at_stop = 1
+        idle_at_stop = 30
         current_playlist_path = ""
         playlist_ended_naturally = False
         previous_user_stop_time = 0.0
@@ -552,41 +539,25 @@ def test_classify_first_user_stop_records_timestamp_when_continuing(
     s = _State()
     decision = tl._classify_after_stop(s, lambda url: False)
     assert decision == "fall_through"
-    assert s.previous_user_stop_time > 0, (
-        "first user-input stop must record timestamp for double-stop override"
-    )
-
-
-def test_classify_idle_stop_does_not_record_timestamp(
-    kodi_mods: dict[str, Any],
-) -> None:
-    """An idle stop (no recent input) is treated as ISA misfire, not a
-    user-driven exit attempt. We don't record its timestamp - otherwise
-    a casual mid-stream input + a real stop later could combine into a
-    spurious force-exit.
-    """
-    tl = _import()
-
-    class _State:
-        user_stopped = True
-        idle_at_stop = 30  # high idle -> ISA misfire territory
-        current_playlist_path = ""
-        playlist_ended_naturally = False
-        previous_user_stop_time = 0.0
-
-    s = _State()
-    decision = tl._classify_after_stop(s, lambda url: False)
-    assert decision == "fall_through"
-    assert s.previous_user_stop_time == 0.0
+    assert not captured, "dialog should NOT fire on idle (ISA-misfire) stop"
 
 
 def test_user_stop_with_low_idle_exits(kodi_mods: dict[str, Any]) -> None:
-    """Stop fired AND idle < 3s AND model still live -> real user stop,
-    exit cleanly."""
+    """Mid-playlist user stop (idle < 3s, model still live) -> real
+    user stop, exit cleanly.
+
+    The tier holds 2 entries so the playlist size is 2 and pos=0 is
+    NOT at-end - that takes the user_stopped branch via the Lesson-17
+    disambiguator (model_live + low idle = user really hit Stop).
+    Single-item tiers always at-end so they take the natural_end path
+    instead (sticky-playback rebuilds forever).
+    """
     tl = _import()
     rt = MockKodiRuntime()
-    target = TVEntry(name="alice", url="https://chaturbate.com/alice/",
-                     priority=10)
+    alice = TVEntry(name="alice", url="https://chaturbate.com/alice/",
+                    priority=10)
+    bob = TVEntry(name="bob", url="https://chaturbate.com/bob/",
+                  priority=10)
 
     def play_call(_pl: Any) -> None:
         rt.player.simulate_av_started(
@@ -596,7 +567,7 @@ def test_user_stop_with_low_idle_exits(kodi_mods: dict[str, Any]) -> None:
 
     out = tl.run_once_for_test(
         runtime=rt,
-        entries=[target],
+        entries=[alice, bob],
         is_live_func=lambda u: True,
         play_func=play_call,
         idle_func=lambda: 1,  # recent input
@@ -781,13 +752,21 @@ def test_loop_picks_among_equal_tier(kodi_mods: dict[str, Any]) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Last-natural-end-time tracking + double-tap exit
+# Sticky-playback at end-of-playlist (Lesson 14, v0.7.13 sticky-only)
 # --------------------------------------------------------------------------- #
 
 
-def test_double_tap_stop_at_end_exits(kodi_mods: dict[str, Any]) -> None:
-    """Two stops within ~5s while at end-of-playlist -> exit cleanly,
-    not infinite rebuild."""
+def test_at_end_stop_keeps_rebuilding_forever(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """v0.7.13 sticky-playback: every at-end stop rebuilds the playlist,
+    no matter how many times the user hits Stop. The previous double-
+    tap-at-end-within-5s exit was removed per user directive ("like
+    the double stop and the double next is a no go from now on" /
+    "i never want to remove something that is there to keep it
+    playing forever"). The exit gesture is the Yes/No dialog, which
+    only fires on a NOT-at-end user stop.
+    """
     tl = _import()
     rt = MockKodiRuntime()
     only = TVEntry(name="alice", url="https://chaturbate.com/alice/",
@@ -803,26 +782,15 @@ def test_double_tap_stop_at_end_exits(kodi_mods: dict[str, Any]) -> None:
         rt.playlist.set_position(rt.playlist.size() - 1)
         rt.player.simulate_stopped()
 
-    # Provide a now_func that flows time forward enough that the second
-    # stop falls within the 5s window.
-    now = {"t": 1000.0}
-
-    def now_func() -> float:
-        now["t"] += 0.5  # half-second gap between stops
-        return now["t"]
-
     out = tl.run_once_for_test(
         runtime=rt,
         entries=[only],
         is_live_func=lambda u: True,
         play_func=play_call,
-        idle_func=lambda: 1,  # very low idle so user-stop classifier kicks in
-        now_func=now_func,
+        idle_func=lambda: 1,  # low idle - would have been user-stop in old logic
         max_iterations=4,
     )
-    # First stop is at_end -> natural -> rebuild (continue).
-    # Second stop is at_end again within 5s -> classify_stop returns
-    # False -> standard decide_after_stop runs and idle<3 + model_live
-    # -> user_stopped exit.
-    assert iterations["n"] <= 3
-    assert out["exit_reason"] == "user_stopped"
+    # Every iteration is at_end, so every stop is natural_end -> rebuild
+    # -> continue. The loop runs to max_iters without exiting.
+    assert iterations["n"] == 4
+    assert out["exit_reason"] == "max_iters"

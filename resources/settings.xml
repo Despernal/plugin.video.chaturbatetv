@@ -55,6 +55,17 @@
                     </constraints>
                     <control type="list" format="string"/>
                 </setting>
+                <setting id="dialog_timeout_seconds" type="integer" label="32060" help="32061">
+                    <level>0</level>
+                    <default>10</default>
+                    <constraints>
+                        <minimum>5</minimum>
+                        <maximum>60</maximum>
+                    </constraints>
+                    <control type="slider" format="integer">
+                        <popup>true</popup>
+                    </control>
+                </setting>
             </group>
         </category>
         <category id="genders" label="32100" help="">

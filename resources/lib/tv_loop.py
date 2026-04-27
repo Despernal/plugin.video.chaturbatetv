@@ -82,19 +82,14 @@ def _build_player_class() -> type:
             self.playlist_ended_naturally: bool = False
             self.last_natural_end_time: float = 0.0
             self.queued_paths: set[str] = set()
-            # Timestamp of the previous user-input stop event (idle<3s).
-            # Used by ``_classify_after_stop`` for the double-stop
-            # within-5s force-exit override (Lesson 29). Persists across
-            # iterations on purpose so a stop late in iter N + a stop
-            # early in iter N+1 within 5s also exits.
-            self.previous_user_stop_time: float = 0.0
 
         def reset_for_iteration(self) -> None:
             """Clear all per-iteration event state.
 
-            ``last_natural_end_time`` AND ``previous_user_stop_time``
-            are INTENTIONALLY preserved across iterations - both are
-            timestamps the double-tap detectors compare against.
+            ``last_natural_end_time`` is preserved across iterations
+            for ``classify_stop`` book-keeping (currently unused for
+            decisions since v0.7.13 dropped the double-tap exit, but
+            kept for diagnostic logs).
             """
             self.user_stopped = False
             self.tracked_file = None
@@ -230,9 +225,6 @@ class _LoopOutcome:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-_DOUBLE_STOP_WINDOW_S = 5.0
-
-
 def _classify_after_stop(
     player_state: Any,
     is_live_func: Callable[[str], bool],
@@ -241,24 +233,21 @@ def _classify_after_stop(
 
     Returns one of: ``"user_stopped"``, ``"natural_end"``, ``"fall_through"``.
 
-    Decision order:
+    Decision order (no double-press gestures - sticky playback wins
+    by default; user gestures are single-press only):
 
-    - **Double-stop force-exit (Lesson 29):** if this is the SECOND
-      user-input stop (idle<3s) within ``_DOUBLE_STOP_WINDOW_S`` of
-      the previous one, return ``user_stopped`` regardless of the
-      Lesson 17 disambiguator. The first stop showed a user-visible
-      hint; the second stop is "I meant it."
-    - If ``playlist_ended_naturally`` is True (first at-end stop, or
-      at-end stop more than 5s after the previous natural end):
-      ``natural_end`` - rebuild the playlist, no idle/live check.
-    - Else if ``decide_after_stop(user_stopped, model_live, idle)``
-      says exit (idle<3s + model still live): ``user_stopped``. This
-      catches the natural_end double-tap (``classify_stop`` returns
-      False the second time and the standard idle check kicks in).
-    - Else: ``fall_through`` (ISA misfire / Kodi internal stop). When
-      the input WAS user-driven (idle<3s) we ALSO show the double-stop
-      hint and remember the timestamp so a follow-up stop within
-      ``_DOUBLE_STOP_WINDOW_S`` triggers the force-exit branch.
+    - If ``playlist_ended_naturally`` (at-end stop): ``natural_end``
+      - rebuild the playlist. Keep playing forever.
+    - Else if Lesson-17 disambiguator says exit (user_stopped + idle<3
+      + model still live): ``user_stopped`` immediately, no dialog.
+      This is the common "I'm watching, model is live, I want out"
+      single-Stop case.
+    - Else if the input WAS user-driven (idle<3s) but the model went
+      offline mid-stop: fire a Yes/No dialog asking the user whether
+      to exit. The dialog handles the case where Lesson-17's
+      model_live guard would otherwise trap the user in the loop.
+    - Else: ``fall_through`` (ISA misfire / Kodi internal stop -
+      idle high, no recent user input). Keep playing forever.
     """
     cur_url = ""
     cur_path = getattr(player_state, "current_playlist_path", "") or ""
@@ -276,22 +265,6 @@ def _classify_after_stop(
     user_stopped = bool(getattr(player_state, "user_stopped", False))
     idle = int(getattr(player_state, "idle_at_stop", 0))
     is_user_input_stop = user_stopped and idle < 3
-    now = time.time()
-    prev_stop = float(getattr(player_state, "previous_user_stop_time", 0.0))
-
-    # Double-stop override: bypass the disambiguator if the user is
-    # confirming "I really want out" via two stops within 5s.
-    if (is_user_input_stop and prev_stop > 0
-            and now - prev_stop < _DOUBLE_STOP_WINDOW_S):
-        try:
-            player_state.previous_user_stop_time = 0.0
-        except Exception:  # noqa: S110 - best-effort attr write
-            pass
-        _safe_log(
-            f"_classify_after_stop: double-stop within "
-            f"{_DOUBLE_STOP_WINDOW_S}s -> force exit"
-        )
-        return "user_stopped"
 
     if natural:
         return "natural_end"
@@ -299,37 +272,24 @@ def _classify_after_stop(
         return "user_stopped"
 
     # We're going to continue (ISA misfire / model offline / idle stop).
-    # If the user JUST hit Stop, ask them directly via a Yes/No dialog
-    # whether they want to exit. The dialog is always reachable from
-    # the remote regardless of player state - replaces the old
-    # double-tap-Stop pattern (Lesson 33) which was fundamentally broken
-    # when "nothing is playing" because Stop becomes unavailable
-    # mid-iteration. User report: "i don't know where to even find stop
-    # a second time love even with a minute".
+    # If the user JUST hit Stop AND the model went offline (so Lesson-17
+    # blocked the immediate exit), ask via Yes/No dialog. Without
+    # defaultbutton (which broke focus on Kodi 21 in v0.7.12), the
+    # dialog is navigable - user picks Exit if they want out.
     #
-    # Default focus = "Keep playing" so accidental Enter/OK preserves
-    # the sticky-playback default. Auto-closes after 30s with default
-    # No, so a user who walks away mid-prompt doesn't accidentally
-    # exit TV mode.
+    # Autoclose=30000 returns False (= "Keep playing") on timeout so
+    # accidental walk-away preserves sticky-playback default.
     if is_user_input_stop:
         try:
-            player_state.previous_user_stop_time = now
-        except Exception:  # noqa: S110 - best-effort attr write
-            pass
-        try:
             import xbmcgui
-            # defaultbutton=1 focuses "Exit" so the user who pressed
-            # Stop just hits OK to exit (one click). Autoclose=30000
-            # still defaults to False -> "Keep playing" wins on
-            # timeout, preserving sticky-playback for accidental
-            # dismissal.
+            from resources.lib import addon_settings
+            timeout_ms = addon_settings.dialog_timeout_seconds() * 1000
             choice = xbmcgui.Dialog().yesno(
                 "Chaturbate TV",
                 "Exit TV mode?",
                 nolabel="Keep playing",
                 yeslabel="Exit",
-                autoclose=30000,
-                defaultbutton=1,
+                autoclose=timeout_ms,
             )
             if choice:
                 _safe_log(
