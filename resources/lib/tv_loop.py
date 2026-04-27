@@ -318,12 +318,18 @@ def _classify_after_stop(
             pass
         try:
             import xbmcgui
+            # defaultbutton=1 focuses "Exit" so the user who pressed
+            # Stop just hits OK to exit (one click). Autoclose=30000
+            # still defaults to False -> "Keep playing" wins on
+            # timeout, preserving sticky-playback for accidental
+            # dismissal.
             choice = xbmcgui.Dialog().yesno(
                 "Chaturbate TV",
                 "Exit TV mode?",
                 nolabel="Keep playing",
                 yeslabel="Exit",
                 autoclose=30000,
+                defaultbutton=1,
             )
             if choice:
                 _safe_log(
@@ -549,6 +555,9 @@ def tv_play(
 
     consecutive_errors = 0
     iter_count = 0
+    # Captured by the finally block to fire the right exit-confirmation
+    # notification. Assigned before each return statement.
+    final_reason = "unknown"
     def _should_continue() -> bool:
         return not monitor.abortRequested() and win.getProperty(_ACTIVE_KEY) == "1"
 
@@ -602,7 +611,8 @@ def tv_play(
                         color=color,
                     )
                     if resumed is None:
-                        return "screensaver_dismissed"
+                        final_reason = "screensaver_dismissed"
+                        return final_reason
                     target = resumed
 
                 target_priority = target.priority
@@ -629,16 +639,19 @@ def tv_play(
                 started = False
                 for _ in range(30):
                     if not _should_continue():
-                        return "aborted"
+                        final_reason = "aborted"
+                        return final_reason
                     if player.isPlaying():
                         started = True
                         break
                     if monitor.waitForAbort(1):
-                        return "aborted"
+                        final_reason = "aborted"
+                        return final_reason
                 if not started:
                     _safe_log("tv_loop.tv_play: never started, skip")
                     if monitor.waitForAbort(2):
-                        return "aborted"
+                        final_reason = "aborted"
+                        return final_reason
                     continue
 
                 # Inner monitor loop.
@@ -647,7 +660,8 @@ def tv_play(
                 self_promoted = False
                 while player.isPlaying():
                     if not _should_continue():
-                        return "aborted"
+                        final_reason = "aborted"
+                        return final_reason
                     if player.switched:
                         _safe_log("tv_loop.tv_play: takeover, release")
                         try:
@@ -658,9 +672,11 @@ def tv_play(
                             )
                         except Exception:  # noqa: S110 - best-effort notification
                             pass
-                        return "takeover"
+                        final_reason = "takeover"
+                        return final_reason
                     if monitor.waitForAbort(step):
-                        return "aborted"
+                        final_reason = "aborted"
+                        return final_reason
                     elapsed += step
                     if elapsed >= poll_seconds:
                         elapsed = 0
@@ -691,10 +707,12 @@ def tv_play(
                 if player.user_stopped:
                     decision = _classify_after_stop(player, is_live_func)
                     if decision == "user_stopped":
-                        return "user_stopped"
+                        final_reason = "user_stopped"
+                        return final_reason
                 consecutive_errors = 0
                 if monitor.waitForAbort(1):
-                    return "aborted"
+                    final_reason = "aborted"
+                    return final_reason
             except SystemExit:
                 raise
             except Exception as exc:
@@ -705,10 +723,36 @@ def tv_play(
                 )
                 if consecutive_errors >= 5:
                     _safe_log("tv_loop.tv_play: too many errors, exit")
-                    return "errors_exhausted"
+                    final_reason = "errors_exhausted"
+                    return final_reason
                 if monitor.waitForAbort(30):
-                    return "aborted"
-        return "active_flag_cleared"
+                    final_reason = "aborted"
+                    return final_reason
+        final_reason = "active_flag_cleared"
+        return final_reason
     finally:
         win.setProperty(_ACTIVE_KEY, "0")
-        _safe_log(f"tv_loop.tv_play: exited iters={iter_count}")
+        _safe_log(
+            f"tv_loop.tv_play: exited iters={iter_count} "
+            f"reason={final_reason!r}"
+        )
+        # Confirmation notification so the user knows the exit took
+        # effect. Skip for "aborted" (Kodi shutting down - any UI
+        # call would be late) and "errors_exhausted" (already
+        # noisy, user knows something's off). "takeover" already
+        # has its own notification fired from inside the inner loop.
+        _CONFIRM_REASONS = {
+            "user_stopped": "TV mode exited",
+            "screensaver_dismissed": "TV mode exited",
+            "active_flag_cleared": "TV mode exited",
+            "natural_end": "TV mode exited",
+        }
+        msg = _CONFIRM_REASONS.get(final_reason)
+        if msg:
+            try:
+                xbmcgui.Dialog().notification(
+                    "Chaturbate TV", msg,
+                    xbmcgui.NOTIFICATION_INFO, 4000,
+                )
+            except Exception:  # noqa: S110 - notification best-effort
+                pass
