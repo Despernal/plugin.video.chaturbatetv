@@ -396,7 +396,7 @@ def _make_bulk_is_live_func(poll_minutes: int) -> Any:
     )
     cache: dict[str, Any] = {"slugs": frozenset(), "ts": 0.0}
 
-    def _refresh() -> None:
+    def _refresh() -> bool:
         wm = random.choice(watermarks)
         url = online_rooms_affiliate_url(wm)
         logger._log(f"addon_actions._bulk_is_live: refresh url={url}")
@@ -405,9 +405,9 @@ def _make_bulk_is_live_func(poll_minutes: int) -> Any:
         except OSError as exc:
             logger._log(
                 f"addon_actions._bulk_is_live: refresh FAIL err={exc!r} "
-                f"(keeping stale set with {len(cache['slugs'])} slugs)"
+                f"(stale set has {len(cache['slugs'])} slugs)"
             )
-            return
+            return False
         models = cb_listing.parse_affiliate_onlinerooms(body)
         new_slugs = frozenset(m.slug for m in models)
         cache["slugs"] = new_slugs
@@ -415,11 +415,32 @@ def _make_bulk_is_live_func(poll_minutes: int) -> Any:
         logger._log(
             f"addon_actions._bulk_is_live: refreshed slugs={len(new_slugs)}"
         )
+        return True
 
     def is_live(url: str) -> bool:
         nowt = _time.time()
         if not cache["slugs"] or nowt - cache["ts"] > ttl_seconds:
-            _refresh()
+            ok = _refresh()
+            if not ok and not cache["slugs"]:
+                # Bulk failed AND we have no cached set (cold-start +
+                # affiliate-endpoint outage). Fall back to per-slug AJAX
+                # for THIS query so TV mode can pick a target. Don't
+                # cache the per-slug answer; next call retries bulk
+                # first so we recover automatically when the affiliate
+                # endpoint comes back.
+                slug = _slug_from_url(url)
+                logger._log(
+                    f"addon_actions._bulk_is_live: cold + bulk FAIL, "
+                    f"per-slug fallback slug={slug!r}"
+                )
+                try:
+                    return cb_client.is_model_live(slug)
+                except Exception as exc:
+                    logger._log(
+                        f"addon_actions._bulk_is_live: per-slug fail "
+                        f"slug={slug!r} err={exc!r}"
+                    )
+                    return False
         slug = _slug_from_url(url)
         return slug in cache["slugs"]
 

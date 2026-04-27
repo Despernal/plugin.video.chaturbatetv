@@ -652,6 +652,42 @@ def test_make_bulk_is_live_func_uses_affiliate_endpoint(
     assert "/affiliates/api/onlinerooms/" in fetch_calls[0]
 
 
+def test_make_bulk_is_live_falls_back_to_per_slug_on_cold_start_outage(
+    kodi_mocks: dict[str, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real-world scenario from 2026-04-27: chaturbate's affiliate
+    endpoint slowed to ~30s+ timeouts. Cold-start TV mode (no prior
+    bulk fetch, cache is empty) would have NO live slugs and pick_target
+    would always return None - TV mode silently dies. The fallback hits
+    per-slug ``cb_client.is_model_live`` for the entry being queried so
+    TV mode keeps working even when the bulk endpoint is down.
+    """
+    import resources.lib.cb_client as cb_client_mod
+
+    def fake_bulk_fetch(url: str, **_kw: Any) -> str:
+        raise OSError("simulated affiliate timeout")
+
+    per_slug_calls: list[str] = []
+
+    def fake_per_slug(slug: str, **_kw: Any) -> bool:
+        per_slug_calls.append(slug)
+        return slug == "alice"
+
+    monkeypatch.setattr(cb_client_mod, "fetch_browse_page",
+                        lambda url, **_kw: fake_bulk_fetch(url))
+    monkeypatch.setattr(cb_client_mod, "is_model_live", fake_per_slug)
+
+    actions = _import()
+    is_live = actions._make_bulk_is_live_func(poll_minutes=10)
+
+    # alice is live per the per-slug stub.
+    assert is_live("https://chaturbate.com/alice/") is True
+    # bob is offline per the per-slug stub.
+    assert is_live("https://chaturbate.com/bob/") is False
+    assert per_slug_calls == ["alice", "bob"]
+
+
 def test_make_bulk_is_live_keeps_stale_set_on_network_failure(
     kodi_mocks: dict[str, MagicMock],
     monkeypatch: pytest.MonkeyPatch,
