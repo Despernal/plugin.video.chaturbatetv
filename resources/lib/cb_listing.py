@@ -83,12 +83,20 @@ def parse_roomlist(payload: dict[str, Any] | str | bytes) -> RoomListPage:
     inputs collapse to an empty page rather than raising; the caller
     can treat empty as "site/network hiccup, try later".
     """
+    # Lazy import to keep this module importable without Kodi mocks.
+    try:
+        from resources.lib import logger
+        _log: Any = logger._log
+    except Exception:  # pragma: no cover - never raises
+        def _log(_msg: object) -> None: ...
     if isinstance(payload, (str, bytes)):
         try:
             payload = json.loads(payload)
         except (TypeError, ValueError, json.JSONDecodeError):
+            _log("cb_listing.parse_roomlist: JSON decode failed -> empty page")
             return RoomListPage(models=[], total_count=0, all_rooms_count=0)
     if not isinstance(payload, dict):
+        _log("cb_listing.parse_roomlist: payload not dict -> empty page")
         return RoomListPage(models=[], total_count=0, all_rooms_count=0)
 
     rooms = payload.get("rooms") or []
@@ -103,11 +111,16 @@ def parse_roomlist(payload: dict[str, Any] | str | bytes) -> RoomListPage:
         if m is not None:
             models.append(m)
 
-    return RoomListPage(
+    page = RoomListPage(
         models=models,
         total_count=_to_int(payload.get("total_count"), 0),
         all_rooms_count=_to_int(payload.get("all_rooms_count"), 0),
     )
+    _log(
+        f"cb_listing.parse_roomlist: rooms={len(models)} "
+        f"total_count={page.total_count} all_rooms_count={page.all_rooms_count}"
+    )
+    return page
 
 
 def clean_subject(subject: str | None) -> str:

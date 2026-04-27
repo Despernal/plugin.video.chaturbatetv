@@ -96,6 +96,8 @@ def resolve_ajax(slug: str, fetch_status_func: _StatusFn) -> Resolution:
     Browse views populate gender from the listing JSON; TV mode and
     playvid only need is_live + hls_source.
     """
+    from resources.lib import logger
+    logger._log(f"cb_resolve.resolve_ajax: slug={slug!r}")
     url = room_url(slug)
     status = fetch_status_func(slug)
     headers = {
@@ -105,6 +107,10 @@ def resolve_ajax(slug: str, fetch_status_func: _StatusFn) -> Resolution:
     hls = str(status.get("url") or "") if isinstance(status, dict) else ""
     room_status = str(status.get("room_status") or "") if isinstance(status, dict) else ""
     is_live = room_status == "public" and bool(hls)
+    logger._log(
+        f"cb_resolve.resolve_ajax: slug={slug!r} is_live={is_live} "
+        f"room_status={room_status!r} hls_present={bool(hls)}"
+    )
     return Resolution(
         is_live=is_live,
         hls_source=hls or None,

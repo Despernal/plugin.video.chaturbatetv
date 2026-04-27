@@ -111,10 +111,14 @@ def test_proxy_starts_and_returns_host_port_and_master_url(
         handle.stop()
 
 
-def test_master_playlist_relative_urls_are_rewritten_absolute(
+def test_master_playlist_relative_urls_are_rewritten_to_proxy(
     stub_cdn: tuple[str, _StubState],
 ) -> None:
-    """A master.m3u8 with relative chunklist refs comes back with absolute URLs."""
+    """A master.m3u8 with relative chunklist refs comes back with the
+    chunklist URLs rewritten to ``/chunklist?name=...`` on the proxy
+    (Phase 4c). Direct upstream URLs in the master would let ISA bypass
+    our header injection layer.
+    """
     from resources.lib import hls_proxy
 
     cdn_base, state = stub_cdn
@@ -133,9 +137,12 @@ def test_master_playlist_relative_urls_are_rewritten_absolute(
     try:
         with urlopen(handle.master_url, timeout=5) as resp:
             body = resp.read().decode("utf-8")
-        assert f"{cdn_base}/hls/abc/chunklist_w12345_video.m3u8" in body
-        assert f"{cdn_base}/hls/abc/chunklist_w67890_video.m3u8" in body
-        # No bare relative path should remain in a non-comment line.
+        prefix = f"http://{handle.host}:{handle.port}/chunklist?name="
+        assert f"{prefix}chunklist_w12345_video" in body
+        assert f"{prefix}chunklist_w67890_video" in body
+        # No raw upstream URL should remain in the master.
+        assert cdn_base not in body
+        # No bare relative path on a non-comment line.
         for line in body.splitlines():
             if line and not line.startswith("#"):
                 assert line.startswith("http://"), f"unrewritten: {line!r}"
@@ -143,10 +150,10 @@ def test_master_playlist_relative_urls_are_rewritten_absolute(
         handle.stop()
 
 
-def test_master_playlist_uri_quoted_relative_urls_are_rewritten(
+def test_master_playlist_uri_quoted_relative_urls_routed_through_proxy(
     stub_cdn: tuple[str, _StubState],
 ) -> None:
-    """URI="..." attributes (e.g. EXT-X-MEDIA) get absolutized too."""
+    """URI="..." attributes (EXT-X-MEDIA) get rewritten to the proxy too."""
     from resources.lib import hls_proxy
 
     cdn_base, state = stub_cdn
@@ -164,22 +171,25 @@ def test_master_playlist_uri_quoted_relative_urls_are_rewritten(
     try:
         with urlopen(handle.master_url, timeout=5) as resp:
             body = resp.read().decode("utf-8")
-        assert f'URI="{cdn_base}/hls/zz/audio_w7777.m3u8"' in body
+        prefix = f"http://{handle.host}:{handle.port}/chunklist?name="
+        assert f'URI="{prefix}audio_w7777"' in body
     finally:
         handle.stop()
 
 
-def test_master_playlist_already_absolute_urls_pass_through(
+def test_master_playlist_already_absolute_urls_routed_through_proxy(
     stub_cdn: tuple[str, _StubState],
 ) -> None:
-    """Absolute URLs in the master should be left alone."""
+    """Absolute upstream URLs ALSO get rewritten to /chunklist?name=...
+    so ISA never goes direct to the CDN regardless of master shape.
+    """
     from resources.lib import hls_proxy
 
     cdn_base, state = stub_cdn
     pre = (
         b"#EXTM3U\n"
         b"#EXT-X-STREAM-INF:BANDWIDTH=2000000\n"
-        b"https://other-edge.example.com/abs/chunklist.m3u8\n"
+        b"https://other-edge.example.com/abs/chunklist_xyz999_video.m3u8\n"
     )
     state.master_body = pre
     upstream = f"{cdn_base}/hls/zz/master.m3u8"
@@ -190,7 +200,10 @@ def test_master_playlist_already_absolute_urls_pass_through(
     try:
         with urlopen(handle.master_url, timeout=5) as resp:
             body = resp.read().decode("utf-8")
-        assert "https://other-edge.example.com/abs/chunklist.m3u8" in body
+        prefix = f"http://{handle.host}:{handle.port}/chunklist?name="
+        assert f"{prefix}chunklist_xyz999_video" in body
+        # Upstream URL is gone.
+        assert "other-edge.example.com" not in body
     finally:
         handle.stop()
 
@@ -227,12 +240,9 @@ def test_proxy_forwards_user_agent_and_referer_to_upstream(
 def test_chunklist_passthrough(
     stub_cdn: tuple[str, _StubState],
 ) -> None:
-    """One chunklist passed through end-to-end via an absolute URL.
-
-    MVP: the master rewrite hands ISA an absolute upstream chunklist URL;
-    the proxy itself does not yet handle /chunklist routes (Phase 4c).
-    Confirm the rewrite makes the chunklist reachable when fetched
-    directly from the stub CDN.
+    """One chunklist passed through end-to-end via the proxy /chunklist
+    route (Phase 4c). Confirms ISA can fetch the rewritten URL and we
+    pass the body back (with segment URLs rewritten further).
     """
     from resources.lib import hls_proxy
 
@@ -249,8 +259,6 @@ def test_chunklist_passthrough(
         b"seg_1.m4s\n"
         b"#EXT-X-ENDLIST\n"
     )
-    # Stub serves /chunklist for any chunklist path; we just need it to
-    # be reachable from the rewritten URL.
     upstream = f"{cdn_base}/chunklist/master.m3u8"
     handle = hls_proxy.start_proxy(
         stream_url=upstream,
@@ -259,14 +267,26 @@ def test_chunklist_passthrough(
     try:
         with urlopen(handle.master_url, timeout=5) as resp:
             master_body = resp.read().decode("utf-8")
-        # Pull out the absolutized chunklist URL the proxy returned.
         chunklist_url = next(
             line for line in master_body.splitlines()
             if line and not line.startswith("#")
         )
+        # Phase 4c: the URL is /chunklist?name=... on the proxy.
+        assert chunklist_url.startswith(
+            f"http://{handle.host}:{handle.port}/chunklist?name="
+        )
         with urlopen(chunklist_url, timeout=5) as resp:
-            chunklist = resp.read()
-        assert chunklist == state.chunklist_body
+            chunklist = resp.read().decode("utf-8")
+        # Body was rewritten so segment URLs go through /segment?url=...
+        seg_lines = [
+            ln for ln in chunklist.splitlines()
+            if ln and not ln.startswith("#")
+        ]
+        assert seg_lines
+        for seg in seg_lines:
+            assert seg.startswith(
+                f"http://{handle.host}:{handle.port}/segment?url="
+            )
     finally:
         handle.stop()
 

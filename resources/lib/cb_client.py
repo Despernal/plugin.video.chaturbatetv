@@ -50,10 +50,22 @@ def _default_fetch(url: str, body: bytes | None = None,
     """Stdlib urllib fetcher. Imported lazily so unit tests never touch network."""
     from urllib.request import Request, urlopen
 
+    from resources.lib import logger
+
+    logger._log(f"cb_client._default_fetch: {method} {url} body_len={len(body) if body else 0}")
     req = Request(url, data=body, headers=headers or {}, method=method)  # noqa: S310
-    with urlopen(req, timeout=timeout) as resp:  # noqa: S310
-        raw: bytes = resp.read()
-    return raw.decode("utf-8", errors="replace")
+    try:
+        with urlopen(req, timeout=timeout) as resp:  # noqa: S310
+            raw: bytes = resp.read()
+            status = getattr(resp, "status", None)
+    except Exception as exc:
+        logger._log(f"cb_client._default_fetch: FAIL {method} {url} err={exc!r}")
+        raise
+    text = raw.decode("utf-8", errors="replace")
+    logger._log(
+        f"cb_client._default_fetch: OK {method} {url} status={status} bytes={len(raw)}"
+    )
+    return text
 
 
 def _resolved(fetch_func: _FetchFn | None) -> _FetchFn:
@@ -64,11 +76,17 @@ def fetch_room_dossier(slug: str, fetch_func: _FetchFn | None = None) -> str:
     """Return the room's HTML page body. Exceptions propagate."""
     if not slug:
         raise ValueError("fetch_room_dossier requires a non-empty slug")
+    from resources.lib import logger
+    logger._log(f"cb_client.fetch_room_dossier: slug={slug!r}")
     fetch = _resolved(fetch_func)
     url = room_url(slug)
     headers = dict(HTTP_HEADERS_IPAD)
     headers["Referer"] = "https://chaturbate.com/"
-    return fetch(url, body=None, headers=headers, method="GET")
+    body = fetch(url, body=None, headers=headers, method="GET")
+    logger._log(
+        f"cb_client.fetch_room_dossier: slug={slug!r} response_bytes={len(body)}"
+    )
+    return body
 
 
 def _safe_status_default() -> dict[str, Any]:
@@ -91,6 +109,8 @@ def fetch_room_status_json(slug: str, fetch_func: _FetchFn | None = None) -> dic
     """
     if not slug:
         raise ValueError("fetch_room_status_json requires a non-empty slug")
+    from resources.lib import logger
+    logger._log(f"cb_client.fetch_room_status_json: slug={slug!r}")
     fetch = _resolved(fetch_func)
     body = urlencode({"room_slug": slug, "bandwidth": "high"}).encode("ascii")
     headers = dict(HTTP_HEADERS_IPAD)
@@ -99,16 +119,29 @@ def fetch_room_status_json(slug: str, fetch_func: _FetchFn | None = None) -> dic
     headers["Referer"] = f"https://chaturbate.com/{slug}/"
     try:
         raw = fetch(_AJAX_URL, body=body, headers=headers, method="POST")
-    except OSError:
+    except OSError as exc:
+        logger._log(
+            f"cb_client.fetch_room_status_json: NETWORK FAIL slug={slug!r} err={exc!r}"
+        )
         return _safe_status_default()
     try:
         data = json.loads(raw)
     except (json.JSONDecodeError, ValueError):
+        logger._log(
+            f"cb_client.fetch_room_status_json: NON_JSON slug={slug!r} bytes={len(raw)}"
+        )
         return _safe_status_default()
     if not isinstance(data, dict):
+        logger._log(
+            f"cb_client.fetch_room_status_json: NOT_DICT slug={slug!r}"
+        )
         return _safe_status_default()
     out = _safe_status_default()
     out.update({k: v for k, v in data.items() if k in out})
+    logger._log(
+        f"cb_client.fetch_room_status_json: slug={slug!r} success={out.get('success')} "
+        f"status={out.get('room_status')!r} hls_present={bool(out.get('url'))}"
+    )
     return out
 
 
@@ -116,10 +149,14 @@ def fetch_browse_page(url: str, fetch_func: _FetchFn | None = None) -> str:
     """Fetch a category / search / listing HTML page."""
     if not url:
         raise ValueError("fetch_browse_page requires a non-empty url")
+    from resources.lib import logger
+    logger._log(f"cb_client.fetch_browse_page: url={url}")
     fetch = _resolved(fetch_func)
     headers = dict(HTTP_HEADERS_IPAD)
     headers["Referer"] = "https://chaturbate.com/"
-    return fetch(url, body=None, headers=headers, method="GET")
+    body = fetch(url, body=None, headers=headers, method="GET")
+    logger._log(f"cb_client.fetch_browse_page: url={url} bytes={len(body)}")
+    return body
 
 
 def is_model_live(slug: str, fetch_func: _FetchFn | None = None) -> bool:

@@ -40,7 +40,15 @@ def parse_qs(qs: str) -> dict[str, str]:
 
 def dispatch(argv: list[str], handlers: dict[str, _Handler]) -> None:
     """Look up a handler by mode and call it with handle + params."""
+    # Logger import is lazy + tolerant: in the pure-test path xbmcaddon
+    # may not be available, so a failure to log must not break dispatch.
+    try:
+        from resources.lib import logger
+        _log: Any = logger._log
+    except Exception:
+        def _log(_msg: object) -> None: ...
     if len(argv) < 3:
+        _log(f"router.dispatch: argv too short ({len(argv)}), bail")
         return
     try:
         handle = int(argv[1])
@@ -48,6 +56,7 @@ def dispatch(argv: list[str], handlers: dict[str, _Handler]) -> None:
         handle = -1
     params = parse_qs(argv[2])
     mode = params.pop("mode", "")
+    _log(f"router.dispatch: handle={handle} mode={mode!r} params={params}")
     if not mode:
         main = handlers.get("main")
         if main is not None:
@@ -55,6 +64,7 @@ def dispatch(argv: list[str], handlers: dict[str, _Handler]) -> None:
         return
     handler = handlers.get(mode)
     if handler is None:
+        _log(f"router.dispatch: no handler for mode={mode!r}, fallback")
         fallback = handlers.get("_fallback")
         if fallback is not None:
             fallback(handle=handle, **params)

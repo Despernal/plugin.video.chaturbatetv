@@ -254,3 +254,177 @@ def test_offline_favs_view_sets_content_videos(
     fv.offline_favs_view(handle=42, store_path=favs_path,
                          fetch_func=_live_fetch(set()))
     kodi_mocks["xbmcplugin"].setContent.assert_called_once_with(42, "videos")
+
+
+# --------------------------------------------------------------------------- #
+# Lesson 11 - bulk-fetch live slugs (10 calls instead of 1224)
+# --------------------------------------------------------------------------- #
+
+
+def _bulk_fetch(live_slugs_per_page: list[list[str]]) -> Any:
+    """fetch_func that responds to room-list URLs with the given slug pages.
+
+    Each invocation returns the next page; the last page is short
+    (< limit) so the caller knows to stop.
+    """
+    state = {"page": 0}
+
+    def fetch(url: str, body: bytes | None = None,
+              headers: dict[str, str] | None = None,
+              method: str = "GET") -> str:
+        if "/api/ts/roomlist/" not in url:
+            # AJAX status endpoint - default to "offline" so the
+            # fallback path doesn't accidentally pick a slug as live.
+            return json.dumps({
+                "success": True, "url": "", "room_status": "offline",
+                "hidden_message": "", "cmaf_edge": False,
+            })
+        idx = state["page"]
+        state["page"] += 1
+        if idx >= len(live_slugs_per_page):
+            return json.dumps({"rooms": [], "total_count": 0,
+                              "all_rooms_count": 0})
+        slugs = live_slugs_per_page[idx]
+        return json.dumps({
+            "rooms": [
+                {"username": s, "gender": "f", "num_users": 100,
+                 "label": "public"}
+                for s in slugs
+            ],
+            "total_count": sum(len(p) for p in live_slugs_per_page),
+            "all_rooms_count": sum(len(p) for p in live_slugs_per_page),
+        })
+    return fetch
+
+
+def test_favs_menu_uses_bulk_path_when_room_list_available(
+    tmp_path: Path,
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """Bulk path returns a set of live slugs from the room-list API;
+    we intersect locally instead of polling each fav."""
+    fv = _import()
+    fv._bulk_cache_clear()
+    favs_path = tmp_path / "favs.json"
+    _write_favs(favs_path, [
+        Favorite(name="alice", slug="alice", url="https://chaturbate.com/alice/",
+                 gender=Gender.FEMALE),
+        Favorite(name="bob", slug="bob", url="https://chaturbate.com/bob/",
+                 gender=Gender.MALE),
+        Favorite(name="cara", slug="cara", url="https://chaturbate.com/cara/",
+                 gender=Gender.FEMALE),
+    ])
+    # Bulk reports alice + cara live (one page, short).
+    fetch = _bulk_fetch([["alice", "cara"]])
+    fv.favs_menu(handle=42, store_path=favs_path, fetch_func=fetch)
+    gui = kodi_mocks["xbmcgui"]
+    labels = [
+        call.kwargs.get("label") or (call.args[0] if call.args else "")
+        for call in gui.ListItem.call_args_list
+    ]
+    assert any("Online (2)" in lab for lab in labels)
+    assert any("Offline (1)" in lab for lab in labels)
+
+
+def test_bulk_live_slugs_paginates_until_short_page(
+    tmp_path: Path,
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """Pages of full size keep going; first short page stops."""
+    fv = _import()
+    fv._bulk_cache_clear()
+    full_page = [f"user{i:04d}" for i in range(500)]
+    short_page = ["last1", "last2"]
+    fetch = _bulk_fetch([full_page, short_page])
+    out = fv._bulk_live_slugs(fetch)
+    assert out is not None
+    assert len(out) == 502
+    assert "user0000" in out
+    assert "last2" in out
+
+
+def test_bulk_live_slugs_returns_none_on_total_failure(
+    tmp_path: Path,
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """No rooms at all -> None so caller falls back to per-slug AJAX."""
+    fv = _import()
+    fv._bulk_cache_clear()
+
+    def fetch(url: str, **_kw: Any) -> str:
+        # Return empty rooms (parse_roomlist sees 0 models).
+        return json.dumps({"rooms": [], "total_count": 0,
+                          "all_rooms_count": 0})
+
+    out = fv._bulk_live_slugs(fetch)
+    assert out is None
+
+
+def test_bulk_live_slugs_caches_results_for_60s(
+    tmp_path: Path,
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """Re-entry within 60s reuses the cache (no re-fetch)."""
+    fv = _import()
+    fv._bulk_cache_clear()
+    fetch_calls = {"n": 0}
+
+    def fetch(url: str, **_kw: Any) -> str:
+        fetch_calls["n"] += 1
+        return json.dumps({
+            "rooms": [{"username": "alice", "gender": "f",
+                       "num_users": 1, "label": "public"}],
+            "total_count": 1, "all_rooms_count": 1,
+        })
+
+    fv._bulk_live_slugs(fetch, now_func=lambda: 100.0)
+    fv._bulk_live_slugs(fetch, now_func=lambda: 130.0)  # within TTL
+    assert fetch_calls["n"] == 1  # cached, no re-fetch
+
+
+def test_bulk_live_slugs_cache_expires_after_60s(
+    tmp_path: Path,
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    fv = _import()
+    fv._bulk_cache_clear()
+    fetch_calls = {"n": 0}
+
+    def fetch(url: str, **_kw: Any) -> str:
+        fetch_calls["n"] += 1
+        return json.dumps({
+            "rooms": [{"username": "alice", "gender": "f",
+                       "num_users": 1, "label": "public"}],
+            "total_count": 1, "all_rooms_count": 1,
+        })
+
+    fv._bulk_live_slugs(fetch, now_func=lambda: 100.0)
+    fv._bulk_live_slugs(fetch, now_func=lambda: 200.0)  # past TTL
+    assert fetch_calls["n"] == 2
+
+
+def test_bulk_live_slugs_falls_through_to_perslug_when_bulk_empty(
+    tmp_path: Path,
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """If bulk returns None, favs_menu falls back to per-slug AJAX
+    (using cb_client.is_model_live). Same final answer, just slower.
+    """
+    fv = _import()
+    fv._bulk_cache_clear()
+    favs_path = tmp_path / "favs.json"
+    _write_favs(favs_path, [
+        Favorite(name="alice", slug="alice", url="https://chaturbate.com/alice/",
+                 gender=Gender.FEMALE),
+    ])
+    # _live_fetch responds with AJAX format - room-list calls also go
+    # through it but get back JSON with no "rooms" key, so the bulk
+    # path returns None.
+    fetch = _live_fetch({"alice"})
+    fv.favs_menu(handle=42, store_path=favs_path, fetch_func=fetch)
+    gui = kodi_mocks["xbmcgui"]
+    labels = [
+        call.kwargs.get("label") or (call.args[0] if call.args else "")
+        for call in gui.ListItem.call_args_list
+    ]
+    assert any("Online (1)" in lab for lab in labels)

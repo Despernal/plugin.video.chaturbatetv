@@ -44,6 +44,8 @@ def _color_label(label: str, gender: Gender) -> str:
 
 def main_menu(handle: int, **_params: Any) -> None:
     """Top-level addon entries with HALO color tags per gender."""
+    from resources.lib import logger
+    logger._log(f"browse_views.main_menu: handle={handle}")
     kodi_helpers.add_dir(handle, "Top Cams", "top")
     kodi_helpers.add_dir(handle, "New Cams", "new")
     kodi_helpers.add_dir(handle, _color_label("Female", Gender.FEMALE),
@@ -95,9 +97,14 @@ def top_cams_view(handle: int, page: Any = 1,
                   fetch_func: _FetchFn | None = None,
                   **_params: Any) -> None:
     """Top-cams listing: most-viewers first, all genders."""
-    url = top_cams_url(_coerce_page(page))
-    _render_models(handle, _fetch_models(url, fetch_func))
-    kodi_helpers.add_dir(handle, "Next page", "top", page=_coerce_page(page) + 1)
+    from resources.lib import logger
+    p = _coerce_page(page)
+    url = top_cams_url(p)
+    logger._log(f"browse_views.top_cams_view: page={p} url={url}")
+    models = _fetch_models(url, fetch_func)
+    logger._log(f"browse_views.top_cams_view: page={p} models={len(models)}")
+    _render_models(handle, models)
+    kodi_helpers.add_dir(handle, "Next page", "top", page=p + 1)
     kodi_helpers.end_directory(handle, content_type="videos")
 
 
@@ -105,9 +112,14 @@ def new_cams_view(handle: int, page: Any = 1,
                   fetch_func: _FetchFn | None = None,
                   **_params: Any) -> None:
     """Recently-online listing."""
-    url = new_cams_url(_coerce_page(page))
-    _render_models(handle, _fetch_models(url, fetch_func))
-    kodi_helpers.add_dir(handle, "Next page", "new", page=_coerce_page(page) + 1)
+    from resources.lib import logger
+    p = _coerce_page(page)
+    url = new_cams_url(p)
+    logger._log(f"browse_views.new_cams_view: page={p} url={url}")
+    models = _fetch_models(url, fetch_func)
+    logger._log(f"browse_views.new_cams_view: page={p} models={len(models)}")
+    _render_models(handle, models)
+    kodi_helpers.add_dir(handle, "Next page", "new", page=p + 1)
     kodi_helpers.end_directory(handle, content_type="videos")
 
 
@@ -115,14 +127,21 @@ def gender_view(handle: int, gender: str = "female", page: Any = 1,
                 fetch_func: _FetchFn | None = None,
                 **_params: Any) -> None:
     """Single-gender listing. Filter is server-side via the JSON API."""
+    from resources.lib import logger
     g = Gender.from_str(gender)
+    p = _coerce_page(page)
+    logger._log(f"browse_views.gender_view: gender={gender!r} page={p}")
     if g is Gender.UNKNOWN:
+        logger._log(f"browse_views.gender_view: unknown gender={gender!r}, abort")
         kodi_helpers.end_directory(handle, succeeded=False, content_type="videos")
         return
-    url = gender_filter_url(g, _coerce_page(page))
-    _render_models(handle, _fetch_models(url, fetch_func))
+    url = gender_filter_url(g, p)
+    logger._log(f"browse_views.gender_view: gender={gender!r} url={url}")
+    models = _fetch_models(url, fetch_func)
+    logger._log(f"browse_views.gender_view: gender={gender!r} page={p} models={len(models)}")
+    _render_models(handle, models)
     kodi_helpers.add_dir(handle, "Next page", "gender",
-                         gender=gender, page=_coerce_page(page) + 1)
+                         gender=gender, page=p + 1)
     kodi_helpers.end_directory(handle, content_type="videos")
 
 
@@ -133,11 +152,19 @@ def search_view(handle: int, query: str = "", page: Any = 1,
     is handled by addon_actions.search which then re-routes here with
     a populated query).
     """
+    from resources.lib import logger
+    p = _coerce_page(page)
+    logger._log(f"browse_views.search_view: query={query!r} page={p}")
     if not query:
+        logger._log("browse_views.search_view: empty query -> close")
         kodi_helpers.end_directory(handle, succeeded=False, content_type="videos")
         return
-    url = search_url(query, _coerce_page(page))
-    _render_models(handle, _fetch_models(url, fetch_func))
+    url = search_url(query, p)
+    models = _fetch_models(url, fetch_func)
+    logger._log(
+        f"browse_views.search_view: query={query!r} page={p} models={len(models)}"
+    )
+    _render_models(handle, models)
     kodi_helpers.add_dir(handle, "Next page", "search",
-                         query=query, page=_coerce_page(page) + 1)
+                         query=query, page=p + 1)
     kodi_helpers.end_directory(handle, content_type="videos")

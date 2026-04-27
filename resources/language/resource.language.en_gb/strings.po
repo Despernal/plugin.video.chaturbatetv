@@ -16,12 +16,12 @@ msgid "General"
 msgstr "General"
 
 msgctxt "#32010"
-msgid "Enable debug logging"
-msgstr "Enable debug logging"
+msgid "Enable verbose debug logging"
+msgstr "Enable verbose debug logging"
 
 msgctxt "#32011"
-msgid "Append events to chaturbatetv_feature.log"
-msgstr "Append events to chaturbatetv_feature.log"
+msgid "Writes detailed events to special://temp/chaturbatetv_feature.log; restart the addon after changing"
+msgstr "Writes detailed events to special://temp/chaturbatetv_feature.log; restart the addon after changing"
 
 msgctxt "#32020"
 msgid "TV poll interval (minutes)"

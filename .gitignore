@@ -14,3 +14,7 @@ htmlcov/
 *.swp
 *.swo
 .DS_Store
+
+# stray test artifacts when xbmcvfs.translatePath leaks through
+special:/
+*.log
