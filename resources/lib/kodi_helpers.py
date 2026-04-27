@@ -45,8 +45,11 @@ def add_dir(handle: int, label: str, mode: str, image: str | None = None,
     xbmcplugin.addDirectoryItem(handle=handle, url=url, listitem=li, isFolder=True)
 
 
-def add_play_item(handle: int, label: str, slug: str, image: str | None = None,
-                  plot: str | None = None, **props: Any) -> None:
+def add_play_item(handle: int, label: str, slug: str,
+                  image: str | None = None,
+                  plot: str | None = None,
+                  ctx_items: list[tuple[str, str]] | None = None,
+                  **props: Any) -> None:
     """Add a playable ListItem that routes through ``mode=playvid``.
 
     ``plot`` is a Kodi video-info string (Age / Location / etc); when
@@ -54,6 +57,11 @@ def add_play_item(handle: int, label: str, slug: str, image: str | None = None,
     renders it in the right-pane on hover. ``plot`` is metadata for
     the ListItem and is intentionally NOT added to the plugin URL
     query string (the URL is for routing, not display).
+
+    ``ctx_items`` is an optional list of ``(label, runplugin_url)``
+    tuples for the right-click context menu. Use the ``ctxmenu`` module
+    to build state-aware entries (Add to TV vs In TV / Edit / Remove,
+    etc.) and pass the result here.
     """
     import xbmcgui
     import xbmcplugin
@@ -65,6 +73,8 @@ def add_play_item(handle: int, label: str, slug: str, image: str | None = None,
         li.setArt({"thumb": image, "icon": image, "fanart": image})
     if plot:
         li.setInfo("video", {"plot": plot, "title": label})
+    if ctx_items:
+        li.addContextMenuItems(ctx_items)
     xbmcplugin.addDirectoryItem(handle=handle, url=url, listitem=li, isFolder=False)
 
 

@@ -390,3 +390,59 @@ def test_search_view_empty_query_still_sets_content_videos(
     bv = _import()
     bv.search_view(handle=42, query="", fetch_func=_empty_fetch)
     kodi_mocks["xbmcplugin"].setContent.assert_called_once_with(42, "videos")
+
+
+# --------------------------------------------------------------------------- #
+# Ctxmenu integration: every model row gets a state-aware right-click menu
+# --------------------------------------------------------------------------- #
+
+
+def test_top_cams_view_attaches_ctxmenu_per_row(
+    kodi_mocks: dict[str, MagicMock],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each playable row gets ``addContextMenuItems(...)`` with at least
+    one entry. With an empty tv.json + favs.json, the menu reads
+    Add to TV + Add to Favorites.
+    """
+    # Point the addon data dir at tmp_path so the views read the empty
+    # tv.json / favs.json.
+    fake_xbmcvfs = kodi_mocks["xbmcvfs"]
+    fake_xbmcvfs.translatePath = lambda p: str(tmp_path) + "/"
+
+    bv = _import()
+    body_text = _read(SAMPLE_JSON)
+
+    captured_ctx: list[Any] = []
+
+    def make_listitem(*args: Any, **kwargs: Any) -> MagicMock:
+        li = MagicMock()
+        li.label = kwargs.get("label") or (args[0] if args else "")
+        li._props: dict[str, str] = {}
+        li.setProperty = lambda k, v: li._props.update({k: v})
+        li.setArt = lambda art: None
+        li.setInfo = lambda *a, **k: None
+
+        def add_ctx(items: Any, replace: bool = False) -> None:
+            captured_ctx.append(list(items))
+
+        li.addContextMenuItems = add_ctx
+        return li
+
+    kodi_mocks["xbmcgui"].ListItem.side_effect = make_listitem
+
+    def fetch(url: str, body: bytes | None = None,
+              headers: dict[str, str] | None = None,
+              method: str = "GET") -> str:
+        return body_text
+
+    bv.top_cams_view(handle=42, fetch_func=fetch)
+    # 5 models in the fixture, each should have got a ctx menu attached.
+    assert len(captured_ctx) == 5
+    for ctx in captured_ctx:
+        labels = [t[0] for t in ctx]
+        # With no tv.json membership, default is "Add to TV".
+        assert any("Add to TV" in lab for lab in labels)
+        # With no favs.json, default is "Add to Favorites".
+        assert any("Add to Favorites" in lab for lab in labels)

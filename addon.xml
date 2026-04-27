@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <addon id="plugin.video.chaturbatetv"
        name="Chaturbate TV"
-       version="0.5.0"
+       version="0.6.0"
        provider-name="flux">
     <requires>
         <import addon="xbmc.python" version="3.0.0"/>
@@ -20,7 +20,8 @@
             <icon>icon.png</icon>
             <fanart>fanart.jpg</fanart>
         </assets>
-        <news>0.5.0 - Phase 4c: HLS proxy hardened with the eleven  PR #1818 lessons. Chunklists and segments now route through 127.0.0.1 so ISA always uses our headers (was 403ing direct CDN hits). Gzip-aware fetcher, three-tier segment fallback, cached playlists during reconnect, lock-protected reconnect guard, watchdog after a successful refresh, terminal-flag fast-path (ENDLIST chunklists / 410 segments) so ISA tears down cleanly. Verbose logging gated on enh_debug across cb_client, cb_resolve, cb_listing, browse_views, favs_views, router, tv_state, hls_proxy. Bonus: favs menu now bulk-fetches the live room-list once instead of polling every favorite (~5s vs 4 minutes for 1224 favs, Lesson 11).
+        <news>0.6.0 - Phase 5: TV mode lands. _TVPlayer subclass with state-reset between iterations (Lesson 10), file-switch takeover detection (Lesson 11), idle-time disambiguator at the stop site (Lesson 17), random-tier pick (Lesson 14). Idle screensaver via xbmcgui.Window (NOT WindowDialog - Lesson 20) with HALO cyan bouncing label, periodic re-walk every 60s. tv_play / tv_stop / tv_list / tv_add / tv_remove / tv_edit verbs all wired through tv_store. Browse + favs rows now show a state-aware right-click menu (Add to TV vs In TV / Edit / Remove; Add to Favorites vs Remove from Favorites). Verbose logging gated on enh_debug across the new modules.
+0.5.0 - Phase 4c: HLS proxy hardened with the eleven  PR #1818 lessons. Chunklists and segments now route through 127.0.0.1 so ISA always uses our headers (was 403ing direct CDN hits). Gzip-aware fetcher, three-tier segment fallback, cached playlists during reconnect, lock-protected reconnect guard, watchdog after a successful refresh, terminal-flag fast-path (ENDLIST chunklists / 410 segments) so ISA tears down cleanly. Verbose logging gated on enh_debug across cb_client, cb_resolve, cb_listing, browse_views, favs_views, router, tv_state, hls_proxy. Bonus: favs menu now bulk-fetches the live room-list once instead of polling every favorite (~5s vs 4 minutes for 1224 favs, Lesson 11).
 0.4.3 - Fix Cannot download manifest: cb_resolve switched to AJAX endpoint (reliable JSON) instead of the fragile HTML dossier scrape. Strip hashtag duplicates from the subject line (tag-line at the bottom already shows them in green). Light gated logging on the playvid path (logger._log -> chaturbatetv_feature.log when enh_debug=true).
 0.4.2 - Phase 4b: playvid resolver + ISA props (Matrix+ inputstream key, manifest_type=hls, stream/manifest headers urlencoded, MIME hint, contentLookup=False); addon_actions.playvid wired through setResolvedUrl with offline notification. Browse + favs views now declare content-type=videos so InfoWall / MediaList view modes are available (thumbnail on the right, plot on the left).
 0.4.1 - QA-driven polish: model thumbnails (real img URL not hardcoded), hover plot info (Age / Location / Watching / Followers / Tags), favs labels render (8-char hex), favs Online/Offline drill-down works (was a router gap).

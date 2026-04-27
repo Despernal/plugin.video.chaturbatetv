@@ -12,7 +12,16 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from resources.lib import cb_client, cb_listing, kodi_helpers
+from pathlib import Path
+
+from resources.lib import (
+    cb_client,
+    cb_listing,
+    ctxmenu,
+    favs_store,
+    kodi_helpers,
+    tv_store,
+)
 from resources.lib.cb_endpoints import (
     gender_filter_url,
     new_cams_url,
@@ -62,21 +71,47 @@ def main_menu(handle: int, **_params: Any) -> None:
     kodi_helpers.end_directory(handle, content_type="videos")
 
 
+def _addon_data_dir() -> Path:
+    """Resolve the addon's userdata dir for tv.json / favs.json."""
+    try:
+        import xbmcvfs
+        base = xbmcvfs.translatePath(
+            "special://profile/addon_data/plugin.video.chaturbatetv/")
+        return Path(base)
+    except Exception:
+        return Path.home() / ".kodi" / "userdata" / "addon_data" / \
+            "plugin.video.chaturbatetv"
+
+
 def _render_models(handle: int, models: list[Model]) -> None:
     """Add Model entries as playable items, color-tagged by gender, with
     each room's actual thumb URL (not a hardcoded pattern - Chaturbate's
     img URLs include cache-busting timestamps so guessing fails). The
     plot string lands via setInfo("video") so Kodi shows Age/Location/
     Watching/Followers/Tags in the right-pane on hover.
+
+    Also attaches a state-aware context menu (Add to TV / In TV /
+    Add to Favorites / Remove from Favorites) per :func:`ctxmenu.build_ctxmenu`.
+    Loads tv.json + favs.json once per render so the membership lookup is
+    cheap regardless of model count (Lesson 13 from -patches).
     """
+    data_dir = _addon_data_dir()
+    tv_entries = tv_store.load(data_dir / "tv.json")
+    favs = favs_store.load(data_dir / "favs.json")
     for m in models:
         label = _color_label(m.name, m.gender)
         if m.viewers:
             label = f"{label} [{m.viewers}]"
+        ctx = ctxmenu.build_ctxmenu(
+            {"slug": m.slug, "name": m.name, "url": m.url},
+            tv_entries=tv_entries,
+            favs=favs,
+        )
         kodi_helpers.add_play_item(
             handle, label, m.slug,
             image=m.image or None,
             plot=m.plot or None,
+            ctx_items=ctx,
         )
 
 

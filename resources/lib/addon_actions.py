@@ -4,28 +4,36 @@ These are the verbs the addon performs in response to a ctxmenu /
 runplugin (not just listing renders). Each takes the same shape:
 ``(handle: int, **params: Any) -> None``.
 
-Phase 5 will fill in tv_play / tv_stop / playvid; Phase 7 covers login.
-For Phase 2 we ship the favs verbs and the search dialog; the TV
-verbs are stubs that show a notification so the router stays wired.
+Phase 5 wired the TV verbs to ``tv_loop`` and ``tv_store`` for real.
+Phase 7 (login) is still deferred.
 """
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
 
-from resources.lib import favs_store
-from resources.lib.cb_models import Favorite, Gender
+from resources.lib import favs_store, tv_store
+from resources.lib.cb_models import Favorite, Gender, TVEntry
 
 
-def _favs_path() -> Path:
+def _addon_data_dir() -> Path:
+    """Resolve the addon's userdata dir for tv.json / favs.json."""
     try:
         import xbmcvfs
         base = xbmcvfs.translatePath(
             "special://profile/addon_data/plugin.video.chaturbatetv/")
-        return Path(base) / "favs.json"
+        return Path(base)
     except Exception:
         return Path.home() / ".kodi" / "userdata" / "addon_data" / \
-            "plugin.video.chaturbatetv" / "favs.json"
+            "plugin.video.chaturbatetv"
+
+
+def _favs_path() -> Path:
+    return _addon_data_dir() / "favs.json"
+
+
+def _tv_path() -> Path:
+    return _addon_data_dir() / "tv.json"
 
 
 def _notify(heading: str, msg: str) -> None:
@@ -155,28 +163,227 @@ def _empty_listitem() -> Any:
         return None
 
 
-def tv_play(handle: int, **_params: Any) -> None:
-    _notify("Chaturbate TV", "TV mode arrives in Phase 5")
+def tv_play(handle: int, store_path: Path | None = None,
+            poll_minutes: int = 10,
+            **_params: Any) -> None:
+    """Run the TV loop. Loads tv.json, hands off to tv_loop.tv_play.
+
+    Loading is done at this layer so a missing/empty file does NOT
+    silently no-op the loop.
+    """
+    from resources.lib import logger
+    path = store_path if store_path is not None else _tv_path()
+    entries = tv_store.load(path)
+    logger._log(f"addon_actions.tv_play: entries={len(entries)} path={path}")
+    if not entries:
+        _notify("Chaturbate TV", "TV list is empty - use 'Add to TV' on a model")
+        return
+    # Real-Kodi path: import tv_loop lazily so unit tests of the
+    # verb-shim layer don't need the whole xbmc shim.
+    from resources.lib import cb_client, tv_loop
+    tv_loop.tv_play(
+        entries=entries,
+        is_live_func=lambda url: cb_client.is_model_live(_slug_from_url(url)),
+        poll_minutes=poll_minutes,
+    )
 
 
 def tv_stop(handle: int, **_params: Any) -> None:
-    _notify("Chaturbate TV", "TV mode arrives in Phase 5")
+    """Clear the chaturbatetv_active flag so the running loop exits.
+
+    Equivalent to 's ResetTVMode - if the loop self-locked
+    due to a glitch, this is the user-facing recovery path.
+    """
+    from resources.lib import logger
+    try:
+        import xbmcgui
+        win = xbmcgui.Window(10000)
+        prior = win.getProperty("chaturbatetv_active")
+        win.setProperty("chaturbatetv_active", "0")
+        logger._log(f"addon_actions.tv_stop: prior={prior!r} cleared")
+        if prior == "1":
+            _notify("Chaturbate TV", "TV mode flag cleared")
+        else:
+            _notify("Chaturbate TV", "TV mode already idle")
+    except Exception:
+        return
 
 
-def tv_list(handle: int, **_params: Any) -> None:
-    _notify("Chaturbate TV", "TV mode arrives in Phase 5")
+def tv_list(handle: int, store_path: Path | None = None,
+            **_params: Any) -> None:
+    """Render the TV priority list as a Kodi directory.
+
+    Each row gets a [P{priority}] prefix and an Edit/Remove ctxmenu.
+    A header row links to ``mode=tv_play``.
+    """
+    from resources.lib import logger
+    from resources.lib.tv_select import priority_sort
+    path = store_path if store_path is not None else _tv_path()
+    entries = tv_store.load(path)
+    logger._log(f"addon_actions.tv_list: handle={handle} entries={len(entries)}")
+    try:
+        from resources.lib import kodi_helpers
+    except ImportError:  # pragma: no cover - outside Kodi
+        return
+    if not entries:
+        kodi_helpers.add_dir(
+            handle,
+            "[COLOR FFff8080]TV list empty - use 'Add to TV' on any model[/COLOR]",
+            "tv_list",
+        )
+        kodi_helpers.end_directory(handle, content_type="videos")
+        return
+    kodi_helpers.add_dir(
+        handle,
+        "[COLOR FF00d4ff][B]>> Play TV (highest-priority live)[/B][/COLOR]",
+        "tv_play",
+    )
+    kodi_helpers.add_dir(
+        handle,
+        "[COLOR FFff8080]>> Stop TV mode[/COLOR]",
+        "tv_stop",
+    )
+    sorted_entries = priority_sort(entries)
+    for e in sorted_entries:
+        label = f"[COLOR FF00d4ff][P{e.priority:02d}][/COLOR] {e.name}"
+        kodi_helpers.add_play_item(handle, label, slug=_slug_from_url(e.url))
+    kodi_helpers.end_directory(handle, content_type="videos")
 
 
-def tv_add(handle: int, slug: str = "", **_params: Any) -> None:
-    _notify("Chaturbate TV",
-            f"AddToTV for {slug or 'unknown'} arrives in Phase 5")
+def tv_add(handle: int, slug: str = "", name: str = "",
+           url: str = "",
+           priority: str = "",
+           store_path: Path | None = None,
+           **_params: Any) -> None:
+    """Add a model to the TV list. Idempotent: existing url -> no-op.
+
+    Priority: if not provided as a query param, prompts via
+    ``Dialog().numeric``. Clamps to 1..20.
+    """
+    from resources.lib import logger
+    if not slug:
+        _notify("Chaturbate TV", "Add to TV: missing slug")
+        return
+    path = store_path if store_path is not None else _tv_path()
+    target_url = url or f"https://chaturbate.com/{slug}/"
+    entries = tv_store.load(path)
+    if any(e.url == target_url for e in entries):
+        logger._log(f"addon_actions.tv_add: {slug!r} already in list")
+        existing_priority = next(
+            (e.priority for e in entries if e.url == target_url), 1,
+        )
+        _notify(
+            "Chaturbate TV",
+            f"{slug} already in TV list (priority {existing_priority})",
+        )
+        return
+    p = _resolve_priority(priority, name or slug)
+    if p is None:
+        return
+    entries.append(TVEntry(name=name or slug, url=target_url, priority=p))
+    tv_store.save(path, entries)
+    logger._log(f"addon_actions.tv_add: added {slug!r} P{p}")
+    _notify("Chaturbate TV", f"Added {slug} (priority {p})")
 
 
-def tv_remove(handle: int, slug: str = "", **_params: Any) -> None:
-    _notify("Chaturbate TV",
-            f"RemoveFromTV for {slug or 'unknown'} arrives in Phase 5")
+def tv_remove(handle: int, slug: str = "", url: str = "",
+              store_path: Path | None = None,
+              **_params: Any) -> None:
+    """Remove a model from the TV list."""
+    from resources.lib import logger
+    if not slug and not url:
+        _notify("Chaturbate TV", "Remove from TV: missing slug/url")
+        return
+    target_url = url or f"https://chaturbate.com/{slug}/"
+    path = store_path if store_path is not None else _tv_path()
+    entries = tv_store.load(path)
+    new_entries = [e for e in entries if e.url != target_url]
+    if len(new_entries) == len(entries):
+        logger._log(f"addon_actions.tv_remove: {slug!r} not in list")
+        _notify("Chaturbate TV", f"{slug or 'entry'} was not in TV list")
+        return
+    tv_store.save(path, new_entries)
+    logger._log(
+        f"addon_actions.tv_remove: removed {slug!r} ({len(entries)} -> {len(new_entries)})"
+    )
+    _notify("Chaturbate TV", f"Removed {slug or 'entry'}")
+    _refresh_container()
 
 
-def tv_edit(handle: int, slug: str = "", **_params: Any) -> None:
-    _notify("Chaturbate TV",
-            f"EditTVPriority for {slug or 'unknown'} arrives in Phase 5")
+def tv_edit(handle: int, slug: str = "", url: str = "",
+            priority: str = "",
+            store_path: Path | None = None,
+            **_params: Any) -> None:
+    """Edit a TV entry's priority. Prompts numeric if priority param
+    is empty.
+    """
+    from resources.lib import logger
+    if not slug and not url:
+        _notify("Chaturbate TV", "Edit TV: missing slug/url")
+        return
+    target_url = url or f"https://chaturbate.com/{slug}/"
+    path = store_path if store_path is not None else _tv_path()
+    entries = tv_store.load(path)
+    cur = next((e for e in entries if e.url == target_url), None)
+    if cur is None:
+        logger._log(f"addon_actions.tv_edit: {slug!r} not in list")
+        _notify("Chaturbate TV", f"{slug or 'entry'} not in TV list")
+        return
+    new_p = _resolve_priority(priority, cur.name, default=cur.priority)
+    if new_p is None:
+        return
+    new_entries = [
+        TVEntry(name=e.name, url=e.url, priority=new_p) if e.url == target_url else e
+        for e in entries
+    ]
+    tv_store.save(path, new_entries)
+    logger._log(
+        f"addon_actions.tv_edit: {slug!r} P{cur.priority} -> P{new_p}"
+    )
+    _notify("Chaturbate TV", f"{cur.name} priority -> {new_p}")
+    _refresh_container()
+
+
+# ---------- helpers ---------- #
+
+
+def _slug_from_url(url: str) -> str:
+    """``https://chaturbate.com/alice/`` -> ``alice``."""
+    return url.rstrip("/").rsplit("/", 1)[-1]
+
+
+def _resolve_priority(raw: str, name: str,
+                      default: int = 10) -> int | None:
+    """Either parse the query-param priority or prompt the user.
+
+    Returns None if the user cancels the prompt.
+    """
+    if raw:
+        try:
+            p = int(raw)
+            return max(1, min(20, p))
+        except (TypeError, ValueError):
+            pass
+    try:
+        import xbmcgui
+        kb = xbmcgui.Dialog().numeric(
+            0, f"Priority for {name} (1-20, higher = preferred)",
+            str(default),
+        )
+        if not kb:
+            return None
+        try:
+            return max(1, min(20, int(kb)))
+        except (TypeError, ValueError):
+            return None
+    except ImportError:  # pragma: no cover - outside Kodi
+        return default
+
+
+def _refresh_container() -> None:
+    """Trigger Kodi to refresh the current directory listing."""
+    try:
+        import xbmc
+        xbmc.executebuiltin("Container.Refresh")
+    except Exception:
+        return

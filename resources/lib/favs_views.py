@@ -15,7 +15,14 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from resources.lib import cb_client, cb_listing, favs_store, kodi_helpers
+from resources.lib import (
+    cb_client,
+    cb_listing,
+    ctxmenu,
+    favs_store,
+    kodi_helpers,
+    tv_store,
+)
 from resources.lib.cb_endpoints import top_cams_url
 from resources.lib.cb_models import Favorite, Gender
 
@@ -176,9 +183,19 @@ def favs_menu(handle: int, store_path: Path | None = None,
 
 
 def _render_favs(handle: int, favs: list[Favorite]) -> None:
+    """Add favorite entries with state-aware context menus."""
+    data_dir = _favs_path().parent
+    tv_entries = tv_store.load(data_dir / "tv.json")
     for f in favs:
         label = _color_label(f.name, f.gender)
-        kodi_helpers.add_play_item(handle, label, f.slug)
+        ctx = ctxmenu.build_ctxmenu(
+            {"slug": f.slug, "name": f.name, "url": f.url},
+            tv_entries=tv_entries,
+            favs=favs,
+        )
+        kodi_helpers.add_play_item(
+            handle, label, f.slug, ctx_items=ctx,
+        )
 
 
 def online_favs_view(handle: int, store_path: Path | None = None,
