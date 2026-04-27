@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <addon id="plugin.video.chaturbatetv"
        name="Chaturbate TV"
-       version="0.1.0"
+       version="0.2.0"
        provider-name="">
     <requires>
         <import addon="xbmc.python" version="3.0.0"/>
@@ -20,6 +20,6 @@
             <icon>icon.png</icon>
             <fanart>fanart.jpg</fanart>
         </assets>
-        <news>0.1.0 - Phase 1 scaffolding and pure modules.</news>
+        <news>0.2.0 - Phase 2: browse menus (Top, New, Female, Male, Couple, Trans, Search), local favorites,  migration tool.</news>
     </extension>
 </addon>

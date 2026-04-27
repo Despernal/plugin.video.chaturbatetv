@@ -1,0 +1,137 @@
+"""Browse menus: Top Cams, New Cams, gender filters, search.
+
+The main menu surfaces the high-level entries with HALO color tags per
+gender. Sub-views fetch + parse + render via cb_client + cb_listing +
+kodi_helpers.
+
+Network calls are routed through cb_client; tests inject a fetch_func
+to keep the unit tests off the real network.
+"""
+from __future__ import annotations
+
+from collections.abc import Callable
+from typing import Any
+
+from resources.lib import cb_client, cb_listing, kodi_helpers
+from resources.lib.cb_endpoints import (
+    gender_filter_url,
+    new_cams_url,
+    search_url,
+    top_cams_url,
+)
+from resources.lib.cb_models import Gender, Model
+
+_FetchFn = Callable[..., str]
+
+
+# HALO palette per PLANNING.md.
+GENDER_COLORS: dict[Gender, str] = {
+    Gender.FEMALE: "00d4ff",
+    Gender.MALE: "66e3ff",
+    Gender.COUPLE: "00ff88",
+    Gender.TRANS: "ff0080",
+    Gender.UNKNOWN: "c8e8f8",
+}
+
+
+def _color_label(label: str, gender: Gender) -> str:
+    """Wrap a label in Kodi's [COLOR ABCDEF]...[/COLOR] tag for the gender."""
+    color = GENDER_COLORS.get(gender, "c8e8f8")
+    return f"[COLOR {color}]{label}[/COLOR]"
+
+
+def main_menu(handle: int, **_params: Any) -> None:
+    """Top-level addon entries with HALO color tags per gender."""
+    kodi_helpers.add_dir(handle, "Top Cams", "top")
+    kodi_helpers.add_dir(handle, "New Cams", "new")
+    kodi_helpers.add_dir(handle, _color_label("Female", Gender.FEMALE),
+                         "gender", gender="female")
+    kodi_helpers.add_dir(handle, _color_label("Male", Gender.MALE),
+                         "gender", gender="male")
+    kodi_helpers.add_dir(handle, _color_label("Couple", Gender.COUPLE),
+                         "gender", gender="couple")
+    kodi_helpers.add_dir(handle, _color_label("Trans", Gender.TRANS),
+                         "gender", gender="trans")
+    kodi_helpers.add_dir(handle, "Search", "search")
+    kodi_helpers.add_dir(handle, "TV Mode", "tv_list")
+    kodi_helpers.add_dir(handle, "Favorites", "favs")
+    kodi_helpers.end_directory(handle)
+
+
+def _render_models(handle: int, models: list[Model]) -> None:
+    """Add a list of Model entries as playable items, color-tagged by gender."""
+    for m in models:
+        label = _color_label(m.name, m.gender)
+        if m.viewers:
+            label = f"{label} [{m.viewers}]"
+        image = f"https://roomimg.stream.highwebmedia.com/ri/{m.slug}.jpg"
+        kodi_helpers.add_play_item(handle, label, m.slug, image=image)
+
+
+def _coerce_page(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 1
+
+
+def top_cams_view(handle: int, page: Any = 1,
+                  fetch_func: _FetchFn | None = None,
+                  **_params: Any) -> None:
+    """Top-cams listing: most-viewers first, all genders."""
+    url = top_cams_url(_coerce_page(page))
+    html = cb_client.fetch_browse_page(url, fetch_func=fetch_func)
+    models = cb_listing.parse_top_cams(html)
+    _render_models(handle, models)
+    kodi_helpers.add_dir(handle, "Next page", "top", page=_coerce_page(page) + 1)
+    kodi_helpers.end_directory(handle)
+
+
+def new_cams_view(handle: int, page: Any = 1,
+                  fetch_func: _FetchFn | None = None,
+                  **_params: Any) -> None:
+    """Recently-online listing."""
+    url = new_cams_url(_coerce_page(page))
+    html = cb_client.fetch_browse_page(url, fetch_func=fetch_func)
+    models = cb_listing.parse_top_cams(html)
+    _render_models(handle, models)
+    kodi_helpers.add_dir(handle, "Next page", "new", page=_coerce_page(page) + 1)
+    kodi_helpers.end_directory(handle)
+
+
+def gender_view(handle: int, gender: str = "female", page: Any = 1,
+                fetch_func: _FetchFn | None = None,
+                **_params: Any) -> None:
+    """Single-gender listing."""
+    g = Gender.from_str(gender)
+    if g is Gender.UNKNOWN:
+        kodi_helpers.end_directory(handle, succeeded=False)
+        return
+    url = gender_filter_url(g, _coerce_page(page))
+    html = cb_client.fetch_browse_page(url, fetch_func=fetch_func)
+    models = cb_listing.parse_gender_filter(html, g)
+    _render_models(handle, models)
+    kodi_helpers.add_dir(handle, "Next page", "gender",
+                         gender=gender, page=_coerce_page(page) + 1)
+    kodi_helpers.end_directory(handle)
+
+
+def search_view(handle: int, query: str = "", page: Any = 1,
+                fetch_func: _FetchFn | None = None,
+                **_params: Any) -> None:
+    """Keyword search. Empty query -> open input dialog (handled in
+    addon_actions); the view itself just renders results.
+    """
+    if not query:
+        # No query yet - the dispatch path goes through addon_actions.search
+        # which prompts then re-runs search_view with a real query. If we get
+        # here with empty, just close the directory.
+        kodi_helpers.end_directory(handle, succeeded=False)
+        return
+    url = search_url(query, _coerce_page(page))
+    html = cb_client.fetch_browse_page(url, fetch_func=fetch_func)
+    models = cb_listing.parse_search_results(html, query)
+    _render_models(handle, models)
+    kodi_helpers.add_dir(handle, "Next page", "search",
+                         query=query, page=_coerce_page(page) + 1)
+    kodi_helpers.end_directory(handle)

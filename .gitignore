@@ -14,3 +14,6 @@ htmlcov/
 *.swp
 *.swo
 .DS_Store
+
+# Icon design scratch dir (not part of the addon)
+tools/icon-design/
