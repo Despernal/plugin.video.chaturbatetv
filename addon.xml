@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <addon id="plugin.video.chaturbatetv"
        name="Chaturbate TV"
-       version="0.7.3"
+       version="0.7.4"
        provider-name="flux">
     <requires>
         <import addon="xbmc.python" version="3.0.0"/>
@@ -20,7 +20,8 @@
             <icon>icon.png</icon>
             <fanart>fanart.jpg</fanart>
         </assets>
-        <news>0.7.3 - URGENT: TV mode now falls back to per-slug AJAX when the affiliate-onlinerooms endpoint times out on cold start. Real-world scenario tonight: chaturbate's affiliate API slowed to 30s+ timeouts, TV mode dead-started with no cached slugs. Without a fallback, every is_live call returned False and pick_target found no live targets. With the fallback, when bulk fails AND cache is empty, we hit cb_client.is_model_live(slug) per-query for THIS call only; subsequent calls retry bulk first so we recover automatically when the affiliate endpoint comes back. Pinned with regression test.
+        <news>0.7.4 - URGENT: chunklist terminal/no-cache paths return HTTP 410 instead of empty ENDLIST body. Empty ENDLIST manifest had no segments, so ISA logged "ParseChildManifest: No segments in the manifest" and re-fetched immediately, producing a 100+ req/sec tight retry loop on  = the long-spinning buffer wheel. 410 matches the segment terminal-path behavior and tells ISA "permanently gone, stop retrying." Two regression tests pin the new contract for terminal flag and no-cache fallback paths.
+0.7.3 - URGENT: TV mode now falls back to per-slug AJAX when the affiliate-onlinerooms endpoint times out on cold start. Real-world scenario tonight: chaturbate's affiliate API slowed to 30s+ timeouts, TV mode dead-started with no cached slugs. Without a fallback, every is_live call returned False and pick_target found no live targets. With the fallback, when bulk fails AND cache is empty, we hit cb_client.is_model_live(slug) per-query for THIS call only; subsequent calls retry bulk first so we recover automatically when the affiliate endpoint comes back. Pinned with regression test.
 0.7.2 - TV mode list rows finally carry the state-aware ctxmenu (Edit TV Priority + Remove from TV + Add to / Remove from Favorites). Regression from  - previous tv_list rendering passed nothing to ctx_items so right-clicking a TV entry showed an empty menu. Pinned with regression test.
 0.7.1 - refresh_artwork now walks every Textures*.db it finds (Kodi 21+ bumped to Textures14.db; older addons targeted Textures13.db only). Forward-compat for whatever schema bump comes next. Tolerates schema-mismatched DBs gracefully (skip with log, don't crash). Added regression tests for both the dual-DB walk and the schema-mismatch skip path.
 0.7.0 - Tier-Next button no longer stops TV mode (real bug, not by design): clicking Next in the player to switch between live tier members was firing TAKEOVER because the queued plugin URLs got resolved to localhost proxy URLs before onAVStarted saw them, so the "is this in our queue?" check always failed. Fixed with a playlist-coherence fallback: if path is 127.0.0.1 AND playlist size matches queued count AND position is valid, treat as internal advance. User direct-play (which replaces the playlist) still fires takeover correctly. Plus three new features: max_resolution setting (auto / 1080p / 720p / 480p) caps ISA's variant pick to reduce buffering on slow edges. Two new menu items at the bottom of the main menu: "Refresh artwork" clears Kodi's Textures13.db cache for the addon (icon/fanart never auto-refresh after an update); "Restart Kodi" runs Quit (LibreELEC respawns) to clear stuck audio renderer state without ssh.

@@ -654,10 +654,16 @@ def _make_handler(host: str, port: int, state: _State,
             self.wfile.write(body)
 
         def _serve_chunklist(self) -> None:
-            # Terminal fast-path: ENDLIST so ISA stops cleanly.
+            # Terminal fast-path: HTTP 410 so ISA gives up cleanly.
+            # ENDLIST-with-no-segments produces a tight retry loop because
+            # ISA logs "ParseChildManifest: No segments in the manifest"
+            # and immediately re-fetches (saw 100s of req/sec on 
+            # 2026-04-27 07:57). 410 matches the segment terminal path
+            # and tells ISA the resource is permanently gone - stop
+            # retrying.
             if state.terminal:
-                _log("handler: chunklist terminal-flag fast path -> ENDLIST")
-                self._serve_endlist()
+                _log("handler: chunklist terminal-flag fast path -> 410")
+                self.send_error(410)
                 return
             qs = parse_qs(urlparse(self.path).query)
             name = (qs.get("name") or [""])[0]
@@ -668,13 +674,15 @@ def _make_handler(host: str, port: int, state: _State,
                 cdn_url = state.url_map.get(name, "")
             if not cdn_url:
                 _log(f"handler: chunklist name={name!r} not in url_map")
-                # No mapping known. Serve cache if available else ENDLIST.
+                # No mapping known. Serve cache if available; else 410.
+                # ENDLIST-with-no-segments here triggered the same retry
+                # loop ISA does on terminal — 410 stops it cleanly.
                 with state.lock:
                     cached = state.chunklist_cache.get(name)
                 if cached:
                     self._send_body(cached, "application/vnd.apple.mpegurl")
                     return
-                self._serve_endlist()
+                self.send_error(410)
                 return
             try:
                 raw, _ct = _fetch(cdn_url, state.headers)
@@ -691,7 +699,10 @@ def _make_handler(host: str, port: int, state: _State,
                     _log(f"handler: chunklist serving cached body name={name!r}")
                     self._send_body(cached, "application/vnd.apple.mpegurl")
                     return
-                self._serve_endlist()
+                # No cache + upstream failed = nothing to serve. 410
+                # rather than empty-ENDLIST so ISA stops retrying
+                # instead of hammering us 100/sec.
+                self.send_error(410)
                 return
             body = raw.decode("utf-8", "replace")
             cbase = cdn_url.rsplit("/", 1)[0] + "/"

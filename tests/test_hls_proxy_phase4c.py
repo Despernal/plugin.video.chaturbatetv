@@ -438,12 +438,16 @@ def test_chunklist_endpoint_serves_cache_when_upstream_fails(
         handle.stop()
 
 
-def test_chunklist_endpoint_returns_endlist_when_no_cache_and_upstream_fails(
+def test_chunklist_endpoint_returns_410_when_no_cache_and_upstream_fails(
     stub_cdn: tuple[str, _StubState],
 ) -> None:
-    """No cache yet AND upstream failing -> graceful EXT-X-ENDLIST so
-    ISA stops without locking the UI.
+    """No cache yet AND upstream failing -> HTTP 410 so ISA stops
+    retrying instead of looping on an empty ENDLIST manifest.
+
+    The empty ENDLIST body produced an ISA tight retry loop in 0.7.x
+    ("ParseChildManifest: No segments in the manifest" 100+/sec).
     """
+    import urllib.error
     from resources.lib import hls_proxy
 
     cdn_base, state = stub_cdn
@@ -461,9 +465,12 @@ def test_chunklist_endpoint_returns_endlist_when_no_cache_and_upstream_fails(
             line for line in master.splitlines()
             if line and not line.startswith("#")
         )
-        with urlopen(cl_url, timeout=5) as resp:
-            body = resp.read()
-        assert b"EXT-X-ENDLIST" in body
+        try:
+            urlopen(cl_url, timeout=5).read()
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 410
+        else:
+            raise AssertionError("expected 410 Gone")
     finally:
         handle.stop()
 
@@ -594,13 +601,19 @@ def test_trigger_reconnect_is_lock_protected_against_duplicate_threads(
 # --------------------------------------------------------------------------- #
 
 
-def test_chunklist_endpoint_returns_endlist_when_terminal_flag_set(
+def test_chunklist_endpoint_returns_410_when_terminal_flag_set(
     stub_cdn: tuple[str, _StubState],
 ) -> None:
-    """Once the terminal flag is set (giving up after reconnect
-    exhausted), every chunklist request gets EXT-X-ENDLIST immediately
-    so ISA tears down cleanly.
+    """Once the terminal flag is set (reconnect exhausted), every
+    chunklist request gets HTTP 410 Gone so ISA stops retrying.
+
+    Regression: 0.7.x earlier shipped an empty ENDLIST body here.
+    ISA logged "ParseChildManifest: No segments in the manifest" and
+    immediately re-fetched, producing a 100+ req/sec retry loop. 410
+    matches the segment terminal path and tells ISA "permanently gone,
+    stop."
     """
+    import urllib.error
     from resources.lib import hls_proxy
 
     cdn_base, state = stub_cdn
@@ -622,9 +635,12 @@ def test_chunklist_endpoint_returns_endlist_when_terminal_flag_set(
             if line and not line.startswith("#")
         )
         handle.set_terminal()
-        with urlopen(cl_url, timeout=5) as resp:
-            body = resp.read()
-        assert b"EXT-X-ENDLIST" in body
+        try:
+            urlopen(cl_url, timeout=5).read()
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 410
+        else:
+            raise AssertionError("expected 410 Gone")
     finally:
         handle.stop()
 
