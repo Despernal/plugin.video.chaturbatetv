@@ -767,7 +767,23 @@ def _make_handler(host: str, port: int, state: _State,
                     f"handler: chunklist FAIL name={name!r} "
                     f"url={_redact_url(cdn_url)!r} err={exc!r}"
                 )
-                # Trigger reconnect (lock-guarded).
+                # STOP REINFORCED ('s pattern): if upstream
+                # fails AND we're already stopping/terminal, don't waste
+                # time on cache fallback - serve ENDLIST + hammer
+                # PlayerControl(Stop). This catches the race where
+                # reconnect just exhausted but ISA is still firing
+                # chunklist requests faster than the bg-thread's force
+                # stop reaches Kodi.
+                if state.stopping or state.terminal:
+                    _log(
+                        f"handler: chunklist FAIL + stopping/terminal -> "
+                        f"STOP REINFORCED name={name!r}"
+                    )
+                    self._send_body(_ENDLIST_BODY, "application/vnd.apple.mpegurl")
+                    _force_player_stop_throttled()
+                    return
+                # Otherwise: trigger reconnect (lock-guarded), serve
+                # cached body if we have one, fall back to ENDLIST.
                 trigger_fn(f"chunklist fail name={name}")
                 with state.lock:
                     cached = state.chunklist_cache.get(name)
@@ -886,6 +902,47 @@ def _build_master_for_isa(host: str, port: int, state: _State) -> bytes:
 # --------------------------------------------------------------------------- #
 
 
+_active_proxy: ProxyHandle | None = None
+_active_proxy_lock = threading.Lock()
+
+
+def _stop_active_proxy() -> None:
+    """Stop the currently-tracked proxy, if any. Best-effort.
+
+    's pattern: at the top of every Playvid() call, signal
+    the previous proxy's stopping=True and call ``shutdown() +
+    server_close()`` BEFORE creating the new one. Otherwise daemon
+    threads from the previous proxy keep running until process exit
+    and pile up over a session.
+
+    chaturbatetv's earlier code returned a ProxyHandle and pushed
+    cleanup to the caller, but no caller actually called .stop() on
+    the previous handle - so we leaked threads on every replay.
+    Lesson 31: when refactoring globals into "caller passes the
+    handle around" semantics, the cleanup MUST be reproduced at the
+    new abstraction boundary.
+    """
+    global _active_proxy
+    with _active_proxy_lock:
+        prev = _active_proxy
+        _active_proxy = None
+    if prev is None:
+        return
+    _log(f"start_proxy: stopping previous proxy port={prev.port}")
+    try:
+        prev.stop()
+    except Exception as exc:
+        _log(f"start_proxy: previous-proxy stop FAILED err={exc!r}")
+
+
+def stop_all() -> None:
+    """Public hook to forcibly stop the most-recently-started proxy.
+    Used by addon teardown paths (e.g. when TV mode exits and the very
+    last proxy would otherwise leak until process exit).
+    """
+    _stop_active_proxy()
+
+
 def start_proxy(stream_url: str, room_url: str,
                 port: int = 0) -> ProxyHandle:
     """Bind a localhost HTTP server and start serving the rewritten master.
@@ -905,6 +962,12 @@ def start_proxy(stream_url: str, room_url: str,
         ISA. The caller must keep a reference until playback ends and
         then call ``handle.stop()``.
     """
+    #  cleanup pattern: stop any previous proxy from THIS
+    # module before standing up a new one. Without this, daemon threads
+    # from the prior proxy keep running until process exit and pile up
+    # on every replay.
+    _stop_active_proxy()
+
     headers = {
         "User-Agent": _IPAD_UA,
         "Referer": room_url,
@@ -997,6 +1060,11 @@ def start_proxy(stream_url: str, room_url: str,
     # request (including an immediate ISA fetch) sees a valid callback.
     handle_box[0] = handle
     thread.start()
+
+    # Register this handle so the next start_proxy() call cleans it up.
+    global _active_proxy
+    with _active_proxy_lock:
+        _active_proxy = handle
 
     _log(f"start_proxy: bound host={host} port={port}")
     return handle

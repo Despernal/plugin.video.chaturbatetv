@@ -398,6 +398,45 @@ def test_two_proxies_get_different_ports(
         b.stop()
 
 
+def test_start_proxy_stops_previous_active_proxy(
+    stub_cdn: tuple[str, _StubState],
+) -> None:
+    """Lesson 31: when starting a new proxy, stop any previously-tracked
+    one first. Without this, daemon threads from prior proxies pile up
+    until process exit because no caller calls .stop() on the old
+    handle returned by the previous start_proxy().
+
+    This test verifies the FIRST proxy's port is no longer bound after
+    the second start_proxy() returns.
+    """
+    import socket
+    from resources.lib import hls_proxy
+
+    cdn_base, state = stub_cdn
+    state.master_body = b"#EXTM3U\n#EXT-X-ENDLIST\n"
+
+    a = hls_proxy.start_proxy(
+        stream_url=f"{cdn_base}/master.m3u8",
+        room_url="https://chaturbate.com/alice/",
+    )
+    a_port = a.port
+
+    b = hls_proxy.start_proxy(
+        stream_url=f"{cdn_base}/master.m3u8",
+        room_url="https://chaturbate.com/bob/",
+    )
+    try:
+        # `a` should have been auto-stopped; rebind on its port should succeed.
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind(("127.0.0.1", a_port))
+        finally:
+            s.close()
+    finally:
+        b.stop()
+
+
 def test_master_url_path_distinct_from_internal_routes(
     stub_cdn: tuple[str, _StubState],
 ) -> None:
