@@ -38,10 +38,13 @@ _BULK_DISK_TTL = 1800.0
 # Filename for the on-disk cache, lives next to favs.json so it shares
 # the same userdata directory.
 _BULK_CACHE_FILE = "bulk_live_cache.json"
-# Paginate chaturbate's room-list at 500/page, the API max.
-_BULK_PAGE_LIMIT = 500
-# Hard ceiling on pages so we don't spin if the API misbehaves.
-_BULK_MAX_PAGES = 20
+# Paginate chaturbate's room-list. The API caps limit at 100 - sending
+# anything higher returns 400 Bad Request with an "Ensure this value is
+# less than or equal to 100" body.
+_BULK_PAGE_LIMIT = 100
+# Hard ceiling on pages so we don't spin if the API misbehaves. With
+# limit=100 this gives us a 5000-room coverage envelope.
+_BULK_MAX_PAGES = 50
 # Politeness delay between page fetches so we don't thunder-herd the
 # room-list endpoint.
 _BULK_PAGE_DELAY_S = 0.2
@@ -235,6 +238,19 @@ def _favs_path() -> Path:
             "plugin.video.chaturbatetv" / "favs.json"
 
 
+def _dismiss_busy_dialog() -> None:
+    """Close any lingering Kodi busy dialog. Some legacy code paths
+    ('s pattern) leave it stuck open if the previous addon
+    invocation timed out; dismissing on view entry clears it so the user
+    isn't staring at a spinner over a working video."""
+    try:
+        import xbmc
+        xbmc.executebuiltin("Dialog.Close(busydialognocancel)")
+        xbmc.executebuiltin("Dialog.Close(busydialog)")
+    except Exception:
+        return
+
+
 def favs_menu(handle: int, store_path: Path | None = None,
               fetch_func: _FetchFn | None = None, **_params: Any) -> None:
     """Top-level Favorites menu: just the Online/Offline drill-downs.
@@ -249,6 +265,7 @@ def favs_menu(handle: int, store_path: Path | None = None,
     breadcrumb without paying for a network call.
     """
     from resources.lib import logger
+    _dismiss_busy_dialog()
     path = store_path if store_path is not None else _favs_path()
     favs = favs_store.load(path)
     logger._log(f"favs_views.favs_menu: total={len(favs)} (no network call)")

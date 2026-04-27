@@ -213,6 +213,17 @@ def tv_play(handle: int, store_path: Path | None = None,
     if not entries:
         _notify("Chaturbate TV", "TV list is empty - use 'Add to TV' on a model")
         return
+    # Dismiss any lingering Kodi busy dialog before we start the long-
+    # running TV loop. Kodi shows one when a previous addon invocation
+    # took too long to return ('s pattern - dismiss on entry
+    # to every long-running verb).
+    try:
+        import xbmc
+        xbmc.executebuiltin("Dialog.Close(busydialognocancel)")
+        xbmc.executebuiltin("Dialog.Close(busydialog)")
+    except Exception:  # noqa: S110 - best-effort UI cleanup
+        pass
+    _notify("Chaturbate TV", "Starting TV mode...")
     # Real-Kodi path: import tv_loop lazily so unit tests of the
     # verb-shim layer don't need the whole xbmc shim.
     from resources.lib import cb_client, tv_loop

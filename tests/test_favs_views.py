@@ -351,19 +351,53 @@ def test_online_favs_view_uses_bulk_path_for_live_intersection(
     assert play_slugs == {"alice", "cara"}
 
 
+def test_bulk_live_slugs_uses_limit_100_per_page(
+    tmp_path: Path,
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """Regression: Chaturbate's room-list API returns HTTP 400 with
+    'Ensure this value is less than or equal to 100' for any limit > 100.
+    A previous version sent limit=500 and silently failed every bulk fetch,
+    which broke Online Favorites entirely.
+    """
+    fv = _import()
+    fv._bulk_cache_clear()
+    captured_urls: list[str] = []
+
+    def fetch(url: str, **_kw: Any) -> str:
+        captured_urls.append(url)
+        # First page short to stop the walk.
+        return json.dumps({
+            "rooms": [{"username": "alice", "gender": "f",
+                       "num_users": 1, "label": "public"}],
+            "total_count": 1, "all_rooms_count": 1,
+        })
+
+    fv._bulk_live_slugs(fetch)
+    assert captured_urls, "no fetch was made"
+    # No URL should request more than 100 results per page.
+    for url in captured_urls:
+        assert "limit=100" in url or "limit=" not in url, (
+            f"limit must be <= 100, got {url!r}"
+        )
+        assert "limit=500" not in url
+        assert "limit=200" not in url
+
+
 def test_bulk_live_slugs_paginates_until_short_page(
     tmp_path: Path,
     kodi_mocks: dict[str, MagicMock],
 ) -> None:
-    """Pages of full size keep going; first short page stops."""
+    """Pages of full size (100/page, the API max) keep going; first
+    short page stops the walk."""
     fv = _import()
     fv._bulk_cache_clear()
-    full_page = [f"user{i:04d}" for i in range(500)]
+    full_page = [f"user{i:04d}" for i in range(100)]
     short_page = ["last1", "last2"]
     fetch = _bulk_fetch([full_page, short_page])
     out = fv._bulk_live_slugs(fetch)
     assert out is not None
-    assert len(out) == 502
+    assert len(out) == 102
     assert "user0000" in out
     assert "last2" in out
 
