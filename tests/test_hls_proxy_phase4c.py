@@ -438,16 +438,15 @@ def test_chunklist_endpoint_serves_cache_when_upstream_fails(
         handle.stop()
 
 
-def test_chunklist_endpoint_returns_410_when_no_cache_and_upstream_fails(
+def test_chunklist_endpoint_returns_finished_vod_when_no_cache_and_upstream_fails(
     stub_cdn: tuple[str, _StubState],
 ) -> None:
-    """No cache yet AND upstream failing -> HTTP 410 so ISA stops
-    retrying instead of looping on an empty ENDLIST manifest.
-
-    The empty ENDLIST body produced an ISA tight retry loop in 0.7.x
-    ("ParseChildManifest: No segments in the manifest" 100+/sec).
+    """No cache yet AND upstream failing -> finished-VOD ENDLIST body
+    + force player stop. ISA logs "Download failed" on 410 and retries
+    even on terminal, so we use 's tested pattern: serve a
+    body that LOOKS like a completed VOD playlist and fire
+    ``PlayerControl(Stop)`` to tear the player down at the Kodi side.
     """
-    import urllib.error
     from resources.lib import hls_proxy
 
     cdn_base, state = stub_cdn
@@ -465,12 +464,11 @@ def test_chunklist_endpoint_returns_410_when_no_cache_and_upstream_fails(
             line for line in master.splitlines()
             if line and not line.startswith("#")
         )
-        try:
-            urlopen(cl_url, timeout=5).read()
-        except urllib.error.HTTPError as exc:
-            assert exc.code == 410
-        else:
-            raise AssertionError("expected 410 Gone")
+        with urlopen(cl_url, timeout=5) as resp:
+            body = resp.read()
+        assert b"#EXT-X-ENDLIST" in body
+        assert b"#EXT-X-PLAYLIST-TYPE:VOD" in body
+        assert b"#EXTINF:" in body
     finally:
         handle.stop()
 
@@ -601,19 +599,20 @@ def test_trigger_reconnect_is_lock_protected_against_duplicate_threads(
 # --------------------------------------------------------------------------- #
 
 
-def test_chunklist_endpoint_returns_410_when_terminal_flag_set(
+def test_chunklist_endpoint_returns_finished_vod_when_terminal_flag_set(
     stub_cdn: tuple[str, _StubState],
 ) -> None:
     """Once the terminal flag is set (reconnect exhausted), every
-    chunklist request gets HTTP 410 Gone so ISA stops retrying.
+    chunklist request gets a finished-VOD playlist body (PLAYLIST-TYPE:VOD
+    + ENDLIST + a single placeholder segment) and we fire
+    ``PlayerControl(Stop)`` from the handler so Kodi tears the player
+    down.
 
-    Regression: 0.7.x earlier shipped an empty ENDLIST body here.
-    ISA logged "ParseChildManifest: No segments in the manifest" and
-    immediately re-fetched, producing a 100+ req/sec retry loop. 410
-    matches the segment terminal path and tells ISA "permanently gone,
-    stop."
+    Three earlier attempts loop-trapped:
+    - 0.7.3 served empty ENDLIST -> ISA "No segments" -> retry 30+/sec
+    - 0.7.4 served HTTP 410 -> ISA "Download failed" -> retry 30+/sec
+    - 0.7.7 settles on 's pattern: VOD-ish body + executebuiltin
     """
-    import urllib.error
     from resources.lib import hls_proxy
 
     cdn_base, state = stub_cdn
@@ -635,12 +634,14 @@ def test_chunklist_endpoint_returns_410_when_terminal_flag_set(
             if line and not line.startswith("#")
         )
         handle.set_terminal()
-        try:
-            urlopen(cl_url, timeout=5).read()
-        except urllib.error.HTTPError as exc:
-            assert exc.code == 410
-        else:
-            raise AssertionError("expected 410 Gone")
+        with urlopen(cl_url, timeout=5) as resp:
+            body = resp.read()
+        # Body must look like a finished VOD so ISA stops retrying.
+        assert b"#EXT-X-ENDLIST" in body
+        assert b"#EXT-X-PLAYLIST-TYPE:VOD" in body
+        # And carry at least one #EXTINF so the manifest isn't "empty"
+        # which is what triggered the 0.7.3 retry loop.
+        assert b"#EXTINF:" in body
     finally:
         handle.stop()
 

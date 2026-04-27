@@ -175,6 +175,13 @@ class _State:
     # never reads it.
     active_reconnect_threads: int = 0
     peak_reconnect_threads: int = 0
+    # Timestamp of the last ``PlayerControl(Stop)`` we fired during the
+    # terminal-flag fast path. ISA ignores HTTP 410 on chunklists and
+    # an empty EXT-X-ENDLIST body on chunklists too, hammering retry at
+    # ~30 req/sec. 's escape: fire ``PlayerControl(Stop)``
+    # from inside the handler so Kodi forcibly stops the player. Rate-
+    # limited via this timestamp so we don't flood Kodi's event queue.
+    last_force_stop: float = 0.0
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -593,7 +600,27 @@ def _sleep_or_stop(state: _State, seconds: float) -> None:
 # --------------------------------------------------------------------------- #
 
 
-_ENDLIST_BODY = b"#EXTM3U\n#EXT-X-ENDLIST\n"
+# Empty endlist (one fake VOD segment + ENDLIST). ISA accepts this as
+# a finished VOD playlist with no more content, and tears down without
+# the retry-loop behavior an empty playlist or HTTP 410 triggers (both
+# of which we tried in 0.7.3 and 0.7.4 - ISA retried 30+/sec on each).
+# The fake segment URL would 404 if ISA actually fetched it, but with
+# ENDLIST and PLAYLIST-TYPE:VOD set, ISA stops fetching.
+_ENDLIST_BODY = (
+    b"#EXTM3U\n"
+    b"#EXT-X-VERSION:3\n"
+    b"#EXT-X-PLAYLIST-TYPE:VOD\n"
+    b"#EXT-X-TARGETDURATION:1\n"
+    b"#EXT-X-MEDIA-SEQUENCE:0\n"
+    b"#EXTINF:0.001,\n"
+    b"about:blank\n"
+    b"#EXT-X-ENDLIST\n"
+)
+
+# Minimum gap between PlayerControl(Stop) commands fired from the
+# terminal-flag handler. Rate-limited to avoid flooding Kodi's event
+# queue when ISA is hammering us at 30+ req/sec.
+_FORCE_STOP_THROTTLE_S = 1.0
 
 
 def _make_handler(host: str, port: int, state: _State,
@@ -610,6 +637,25 @@ def _make_handler(host: str, port: int, state: _State,
     - ``/segment?url=Y`` -> fetch Y with iPad headers, three-tier
       fallback on failure. Pass through Content-Type.
     """
+
+    def _force_player_stop_throttled() -> None:
+        """Fire ``xbmc.executebuiltin('PlayerControl(Stop)')`` to tear
+        down the player when ISA is stuck in a retry loop on terminal
+        chunklists. Rate-limited to once per ``_FORCE_STOP_THROTTLE_S``
+        so we don't flood Kodi's event queue if 30+ retries hit us in
+        a single second.
+        """
+        nowt = time.time()
+        with state.lock:
+            if nowt - state.last_force_stop < _FORCE_STOP_THROTTLE_S:
+                return
+            state.last_force_stop = nowt
+        _log("handler: PlayerControl(Stop) - tearing down stuck ISA")
+        try:
+            import xbmc
+            xbmc.executebuiltin("PlayerControl(Stop)")
+        except Exception as exc:
+            _log(f"handler: PlayerControl(Stop) failed err={exc!r}")
 
     class _H(BaseHTTPRequestHandler):
         # Silence stdlib stderr access log; we have our own _log.
@@ -654,16 +700,18 @@ def _make_handler(host: str, port: int, state: _State,
             self.wfile.write(body)
 
         def _serve_chunklist(self) -> None:
-            # Terminal fast-path: HTTP 410 so ISA gives up cleanly.
-            # ENDLIST-with-no-segments produces a tight retry loop because
-            # ISA logs "ParseChildManifest: No segments in the manifest"
-            # and immediately re-fetches (saw 100s of req/sec on 
-            # 2026-04-27 07:57). 410 matches the segment terminal path
-            # and tells ISA the resource is permanently gone - stop
-            # retrying.
+            # Terminal fast-path: serve a finished-VOD playlist body AND
+            # fire PlayerControl(Stop) to forcibly tear down the player
+            # at the Kodi side. Two earlier attempts loop-trapped:
+            # - 0.7.3 served empty ENDLIST -> ISA "No segments" -> retry
+            # - 0.7.4 served HTTP 410 -> ISA "Download failed" -> retry
+            # 's working escape: fire PlayerControl(Stop) from
+            # inside the handler. Rate-limited so we don't flood Kodi's
+            # event queue when ISA is hammering us at 30+ req/sec.
             if state.terminal:
-                _log("handler: chunklist terminal-flag fast path -> 410")
-                self.send_error(410)
+                _log("handler: chunklist terminal-flag -> ENDLIST + PlayerControl(Stop)")
+                self._send_body(_ENDLIST_BODY, "application/vnd.apple.mpegurl")
+                _force_player_stop_throttled()
                 return
             qs = parse_qs(urlparse(self.path).query)
             name = (qs.get("name") or [""])[0]
@@ -674,15 +722,17 @@ def _make_handler(host: str, port: int, state: _State,
                 cdn_url = state.url_map.get(name, "")
             if not cdn_url:
                 _log(f"handler: chunklist name={name!r} not in url_map")
-                # No mapping known. Serve cache if available; else 410.
-                # ENDLIST-with-no-segments here triggered the same retry
-                # loop ISA does on terminal — 410 stops it cleanly.
+                # No mapping known. Serve cache if available; else
+                # finished-VOD ENDLIST + force player stop. Without the
+                # PlayerControl hammer, ISA loops on either an empty
+                # ENDLIST or a 410.
                 with state.lock:
                     cached = state.chunklist_cache.get(name)
                 if cached:
                     self._send_body(cached, "application/vnd.apple.mpegurl")
                     return
-                self.send_error(410)
+                self._send_body(_ENDLIST_BODY, "application/vnd.apple.mpegurl")
+                _force_player_stop_throttled()
                 return
             try:
                 raw, _ct = _fetch(cdn_url, state.headers)
@@ -699,10 +749,10 @@ def _make_handler(host: str, port: int, state: _State,
                     _log(f"handler: chunklist serving cached body name={name!r}")
                     self._send_body(cached, "application/vnd.apple.mpegurl")
                     return
-                # No cache + upstream failed = nothing to serve. 410
-                # rather than empty-ENDLIST so ISA stops retrying
-                # instead of hammering us 100/sec.
-                self.send_error(410)
+                # No cache + upstream failed = nothing real to serve.
+                # Send finished-VOD ENDLIST + fire PlayerControl(Stop).
+                self._send_body(_ENDLIST_BODY, "application/vnd.apple.mpegurl")
+                _force_player_stop_throttled()
                 return
             body = raw.decode("utf-8", "replace")
             cbase = cdn_url.rsplit("/", 1)[0] + "/"
