@@ -79,7 +79,8 @@ def add_play_item(handle: int, label: str, slug: str,
 
 
 def end_directory(handle: int, succeeded: bool = True,
-                  content_type: str | None = None) -> None:
+                  content_type: str | None = None,
+                  unsorted: bool = False) -> None:
     """Close the current directory listing.
 
     ``content_type``, when non-empty, declares the directory's content
@@ -90,6 +91,13 @@ def end_directory(handle: int, succeeded: bool = True,
     layout that fits Chaturbate's verbose room descriptions far better
     than the default 'files' view mode (thumb-on-left, plot truncated).
 
+    ``unsorted=True`` declares ``SORT_METHOD_UNSORTED`` so Kodi keeps
+    the insertion order the addon specified rather than alphabetizing
+    by label. Critical for any view where the label embeds an ordering
+    hint (e.g. ``[P17]`` priority prefix in TV mode) - alphabetical sort
+    would put ``[P01]`` before ``[P17]`` which is the opposite of what
+    descending-priority sort intends.
+
     Order matters: setContent must run BEFORE endOfDirectory or Kodi
     has already locked the listing as 'files' content and the hint is
     ignored.
@@ -97,4 +105,6 @@ def end_directory(handle: int, succeeded: bool = True,
     import xbmcplugin
     if content_type:
         xbmcplugin.setContent(handle, content_type)
+    if unsorted:
+        xbmcplugin.addSortMethod(handle, xbmcplugin.SORT_METHOD_UNSORTED)
     xbmcplugin.endOfDirectory(handle, succeeded=succeeded)

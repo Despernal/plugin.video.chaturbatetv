@@ -825,6 +825,37 @@ def test_tv_list_renders_priority_rows(
     fake_kh.end_directory.assert_called_once()
 
 
+def test_tv_list_passes_unsorted_to_end_directory(
+    tmp_path: Path,
+    kodi_mocks: dict[str, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: tv_list MUST close with unsorted=True or Kodi
+    alpha-sorts the labels and ``[P01]`` ends up above ``[P17]``,
+    which is the OPPOSITE of "highest priority on top." User report:
+    "the shorting on tv is in reverse like the lows are at the top
+    and highs at the bottom love is that by design" - it was not.
+    """
+    from resources.lib import tv_store
+    from resources.lib.cb_models import TVEntry
+
+    tv_path = tmp_path / "tv.json"
+    tv_store.save(tv_path, [
+        TVEntry(name="alice", url="https://chaturbate.com/alice/", priority=10),
+    ])
+
+    fake_kh = _patch_kodi_helpers(monkeypatch)
+
+    actions = _import()
+    actions.tv_list(handle=42, store_path=tv_path)
+
+    fake_kh.end_directory.assert_called_once()
+    call = fake_kh.end_directory.call_args
+    assert call.kwargs.get("unsorted") is True, (
+        f"tv_list end_directory must pass unsorted=True, got kwargs={call.kwargs!r}"
+    )
+
+
 def test_tv_list_rows_carry_ctxmenu_with_edit_and_remove(
     tmp_path: Path,
     kodi_mocks: dict[str, MagicMock],

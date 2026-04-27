@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <addon id="plugin.video.chaturbatetv"
        name="Chaturbate TV"
-       version="0.7.5"
+       version="0.7.6"
        provider-name="flux">
     <requires>
         <import addon="xbmc.python" version="3.0.0"/>
@@ -20,7 +20,8 @@
             <icon>icon.png</icon>
             <fanart>fanart.jpg</fanart>
         </assets>
-        <news>0.7.5 - Discoverable double-stop exit (Lesson 29). User can't easily exit TV mode via the player's Stop button when conditions don't fit the Lesson-17 disambiguator (model went offline, idle high, etc) - by design (we want playback persistence). Now when the user hits Stop and we'd normally continue: show a 5-second notification "Hit Stop again within 5s to exit TV mode" and arm a follow-up trigger. Second Stop within the window = force exit, bypassing the disambiguator. Outside the window = resets to first-stop behavior. Existing Lesson-17 ISA-misfire guard preserved (model_live check stays - keep playback sticky in normal cases).
+        <news>0.7.6 - TV mode list now actually shows highest-priority on top. User: "the shorting on tv is in reverse like the lows are at the top and highs at the bottom love is that by design" - it was not. Our priority_sort produced a correct descending list, but Kodi alpha-sorted the labels by default (the [P##] prefix made [P01] sort above [P17] alphabetically/numerically). Fix: pass unsorted=True to end_directory which adds SORT_METHOD_UNSORTED so Kodi keeps our insertion order. Pinned with regression test.
+0.7.5 - Discoverable double-stop exit (Lesson 29). User can't easily exit TV mode via the player's Stop button when conditions don't fit the Lesson-17 disambiguator (model went offline, idle high, etc) - by design (we want playback persistence). Now when the user hits Stop and we'd normally continue: show a 5-second notification "Hit Stop again within 5s to exit TV mode" and arm a follow-up trigger. Second Stop within the window = force exit, bypassing the disambiguator. Outside the window = resets to first-stop behavior. Existing Lesson-17 ISA-misfire guard preserved (model_live check stays - keep playback sticky in normal cases).
 0.7.4 - URGENT: chunklist terminal/no-cache paths return HTTP 410 instead of empty ENDLIST body. Empty ENDLIST manifest had no segments, so ISA logged "ParseChildManifest: No segments in the manifest" and re-fetched immediately, producing a 100+ req/sec tight retry loop on  = the long-spinning buffer wheel. 410 matches the segment terminal-path behavior and tells ISA "permanently gone, stop retrying." Two regression tests pin the new contract for terminal flag and no-cache fallback paths.
 0.7.3 - URGENT: TV mode now falls back to per-slug AJAX when the affiliate-onlinerooms endpoint times out on cold start. Real-world scenario tonight: chaturbate's affiliate API slowed to 30s+ timeouts, TV mode dead-started with no cached slugs. Without a fallback, every is_live call returned False and pick_target found no live targets. With the fallback, when bulk fails AND cache is empty, we hit cb_client.is_model_live(slug) per-query for THIS call only; subsequent calls retry bulk first so we recover automatically when the affiliate endpoint comes back. Pinned with regression test.
 0.7.2 - TV mode list rows finally carry the state-aware ctxmenu (Edit TV Priority + Remove from TV + Add to / Remove from Favorites). Regression from  - previous tv_list rendering passed nothing to ctx_items so right-clicking a TV entry showed an empty menu. Pinned with regression test.

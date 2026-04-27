@@ -517,7 +517,11 @@ def tv_list(handle: int, store_path: Path | None = None,
         kodi_helpers.add_play_item(
             handle, label, slug=slug, ctx_items=ctx,
         )
-    kodi_helpers.end_directory(handle, content_type="videos")
+    # unsorted=True so Kodi keeps our priority-descending order; without
+    # it, Kodi alpha-sorts by label and "[P01]" lands above "[P17]" -
+    # the OPPOSITE of "highest priority on top" which is the whole point
+    # of the view.
+    kodi_helpers.end_directory(handle, content_type="videos", unsorted=True)
 
 
 def tv_add(handle: int, slug: str = "", name: str = "",

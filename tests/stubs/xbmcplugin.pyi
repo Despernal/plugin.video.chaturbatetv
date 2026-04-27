@@ -2,6 +2,7 @@
 from typing import Any
 
 SORT_METHOD_NONE: int
+SORT_METHOD_UNSORTED: int
 SORT_METHOD_LABEL: int
 SORT_METHOD_DATE: int
 
