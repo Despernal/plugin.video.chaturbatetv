@@ -1,207 +1,226 @@
-"""Tests for resources.lib.cb_listing - parse Chaturbate listing pages.
+"""Tests for resources.lib.cb_listing - JSON room-list parser.
 
-Pure module: takes HTML strings, returns list[Model]. No network, no
-Kodi imports.
+Pure module: takes a parsed JSON dict (or a JSON string/bytes) from
+Chaturbate's ``/api/ts/roomlist/room-list/`` endpoint and returns a
+``RoomListPage`` carrying domain ``Model`` objects plus pagination
+totals. No network, no Kodi imports.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from resources.lib.cb_listing import (
-    parse_gender_filter,
-    parse_search_results,
-    parse_top_cams,
+    RoomListPage,
+    clean_subject,
+    parse_roomlist,
+    plot_for,
 )
 from resources.lib.cb_models import Gender, Model
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
-def _read(name: str) -> str:
-    return (FIXTURES / name).read_text(encoding="utf-8")
+def _load_sample() -> dict:
+    return json.loads((FIXTURES / "sample_roomlist.json").read_text())
 
 
-# --------------------------------------------------------------------------- #
-# parse_top_cams
-# --------------------------------------------------------------------------- #
+# parse_roomlist ------------------------------------------------------------ #
 
 
-def test_parse_top_cams_returns_list_of_models() -> None:
-    models = parse_top_cams(_read("sample_top_cams.html"))
-    assert all(isinstance(m, Model) for m in models)
+def test_parse_roomlist_returns_RoomListPage() -> None:
+    page = parse_roomlist(_load_sample())
+    assert isinstance(page, RoomListPage)
 
 
-def test_parse_top_cams_finds_all_rooms() -> None:
-    models = parse_top_cams(_read("sample_top_cams.html"))
-    assert len(models) == 4
+def test_parse_roomlist_models_are_Model() -> None:
+    page = parse_roomlist(_load_sample())
+    assert all(isinstance(m, Model) for m in page.models)
 
 
-def test_parse_top_cams_extracts_slugs() -> None:
-    models = parse_top_cams(_read("sample_top_cams.html"))
-    slugs = {m.slug for m in models}
-    assert slugs == {"sample_room_1", "sample_room_2", "sample_room_3", "sample_room_4"}
+def test_parse_roomlist_count_matches_fixture() -> None:
+    sample = _load_sample()
+    page = parse_roomlist(sample)
+    assert len(page.models) == len(sample["rooms"])
 
 
-def test_parse_top_cams_extracts_names() -> None:
-    """Name defaults to slug when the title-text matches the slug exactly."""
-    models = parse_top_cams(_read("sample_top_cams.html"))
-    names = {m.name for m in models}
-    assert "sample_room_1" in names
+def test_parse_roomlist_extracts_slugs() -> None:
+    page = parse_roomlist(_load_sample())
+    slugs = {m.slug for m in page.models}
+    assert "sample_room_1" in slugs
 
 
-def test_parse_top_cams_extracts_viewers() -> None:
-    models = parse_top_cams(_read("sample_top_cams.html"))
-    by_slug = {m.slug: m for m in models}
-    assert by_slug["sample_room_1"].viewers == 1234
-    assert by_slug["sample_room_2"].viewers == 567
-    assert by_slug["sample_room_3"].viewers == 42
+def test_parse_roomlist_builds_room_url_for_each_model() -> None:
+    page = parse_roomlist(_load_sample())
+    for m in page.models:
+        assert m.url == f"https://chaturbate.com/{m.slug}/"
 
 
-def test_parse_top_cams_extracts_gender() -> None:
-    models = parse_top_cams(_read("sample_top_cams.html"))
-    by_slug = {m.slug: m for m in models}
-    assert by_slug["sample_room_1"].gender is Gender.FEMALE
-    assert by_slug["sample_room_2"].gender is Gender.COUPLE
-    assert by_slug["sample_room_3"].gender is Gender.MALE
-    assert by_slug["sample_room_4"].gender is Gender.TRANS
+def test_parse_roomlist_extracts_viewer_count_as_int() -> None:
+    page = parse_roomlist(_load_sample())
+    by_slug = {m.slug: m for m in page.models}
+    sample = _load_sample()
+    expected = {r["username"]: r["num_users"] for r in sample["rooms"]}
+    for slug, n in expected.items():
+        assert by_slug[slug].viewers == n
 
 
-def test_parse_top_cams_builds_canonical_url() -> None:
-    models = parse_top_cams(_read("sample_top_cams.html"))
-    by_slug = {m.slug: m for m in models}
-    assert by_slug["sample_room_1"].url == "https://chaturbate.com/sample_room_1/"
+def test_parse_roomlist_maps_gender_codes() -> None:
+    page = parse_roomlist(_load_sample())
+    by_slug = {m.slug: m for m in page.models}
+    sample_genders = {r["username"]: r["gender"] for r in _load_sample()["rooms"]}
+    code_to_enum = {"f": Gender.FEMALE, "m": Gender.MALE,
+                    "c": Gender.COUPLE, "s": Gender.TRANS}
+    for slug, code in sample_genders.items():
+        assert by_slug[slug].gender is code_to_enum.get(code, Gender.UNKNOWN)
 
 
-def test_parse_top_cams_marks_listing_models_as_live() -> None:
-    """Listing pages only show currently-live rooms; treat all as live."""
-    models = parse_top_cams(_read("sample_top_cams.html"))
-    assert all(m.is_live for m in models)
+def test_parse_roomlist_is_live_when_label_public() -> None:
+    """The fixture has all rooms with current_show=public."""
+    page = parse_roomlist(_load_sample())
+    assert all(m.is_live for m in page.models)
 
 
-def test_parse_top_cams_handles_empty_listing() -> None:
-    models = parse_top_cams(_read("sample_empty_listing.html"))
-    assert models == []
+def test_parse_roomlist_total_count() -> None:
+    sample = _load_sample()
+    page = parse_roomlist(sample)
+    assert page.total_count == sample["total_count"]
 
 
-def test_parse_top_cams_handles_blank_input() -> None:
-    assert parse_top_cams("") == []
+def test_parse_roomlist_all_rooms_count() -> None:
+    sample = _load_sample()
+    page = parse_roomlist(sample)
+    assert page.all_rooms_count == sample["all_rooms_count"]
 
 
-def test_parse_top_cams_handles_garbage_html() -> None:
-    """Not even close to a Chaturbate page -> empty list, no exceptions."""
-    assert parse_top_cams("<html><body>Hello</body></html>") == []
+def test_parse_roomlist_accepts_json_string() -> None:
+    raw = json.dumps(_load_sample())
+    page = parse_roomlist(raw)
+    assert len(page.models) > 0
 
 
-def test_parse_top_cams_dedups_repeated_slugs() -> None:
-    """Defensive: a single model card duplicated in markup must not be double-counted."""
-    html = _read("sample_top_cams.html")
-    doubled = html + html
-    models = parse_top_cams(doubled)
-    slugs = [m.slug for m in models]
-    # Each slug appears at most once.
-    assert len(slugs) == len(set(slugs))
+def test_parse_roomlist_accepts_json_bytes() -> None:
+    raw = json.dumps(_load_sample()).encode("utf-8")
+    page = parse_roomlist(raw)
+    assert len(page.models) > 0
 
 
-# --------------------------------------------------------------------------- #
-# parse_gender_filter
-# --------------------------------------------------------------------------- #
+def test_parse_roomlist_empty_payload() -> None:
+    page = parse_roomlist({"rooms": [], "total_count": 0, "all_rooms_count": 0})
+    assert page.models == []
+    assert page.total_count == 0
+    assert page.all_rooms_count == 0
 
 
-def test_parse_gender_filter_female() -> None:
-    models = parse_gender_filter(_read("sample_female_filter.html"), Gender.FEMALE)
-    assert len(models) == 2
-    assert all(m.gender is Gender.FEMALE for m in models)
+def test_parse_roomlist_missing_rooms_key() -> None:
+    page = parse_roomlist({"total_count": 5})
+    assert page.models == []
 
 
-def test_parse_gender_filter_keeps_only_matching_gender() -> None:
-    """Mixed page (top cams) filtered by a gender returns only that gender."""
-    models = parse_gender_filter(_read("sample_top_cams.html"), Gender.MALE)
-    assert len(models) == 1
-    assert models[0].slug == "sample_room_3"
+def test_parse_roomlist_garbage_string() -> None:
+    page = parse_roomlist("not even close to json")
+    assert page.models == []
+    assert page.total_count == 0
 
 
-def test_parse_gender_filter_empty_when_no_match() -> None:
-    models = parse_gender_filter(_read("sample_female_filter.html"), Gender.MALE)
-    assert models == []
+def test_parse_roomlist_garbage_dict() -> None:
+    page = parse_roomlist({"rooms": "not a list"})
+    assert page.models == []
 
 
-def test_parse_gender_filter_extracts_viewers() -> None:
-    models = parse_gender_filter(_read("sample_female_filter.html"), Gender.FEMALE)
-    by_slug = {m.slug: m for m in models}
-    assert by_slug["sample_female_1"].viewers == 2010
+def test_parse_roomlist_skips_room_without_username() -> None:
+    page = parse_roomlist({"rooms": [{"username": ""}, {"gender": "f"}]})
+    assert page.models == []
 
 
-# --------------------------------------------------------------------------- #
-# parse_search_results
-# --------------------------------------------------------------------------- #
+def test_parse_roomlist_skips_non_dict_room_entries() -> None:
+    page = parse_roomlist({"rooms": [{"username": "alice"}, 42, "bogus", None]})
+    assert len(page.models) == 1
+    assert page.models[0].slug == "alice"
 
 
-def test_parse_search_results_returns_models() -> None:
-    models = parse_search_results(_read("sample_search_results.html"), "sample")
-    assert len(models) == 1
-    assert models[0].slug == "sample_search_1"
+def test_parse_roomlist_unknown_gender_falls_back() -> None:
+    page = parse_roomlist({"rooms": [{"username": "alice", "gender": "?"}]})
+    assert page.models[0].gender is Gender.UNKNOWN
 
 
-def test_parse_search_results_empty_when_no_matches() -> None:
-    models = parse_search_results(_read("sample_empty_listing.html"), "ghost")
-    assert models == []
+def test_parse_roomlist_int_coercion_for_string_viewers() -> None:
+    """Defensive: if num_users ever comes back as a string, we should still get an int."""
+    page = parse_roomlist({"rooms": [{"username": "alice", "num_users": "1234"}]})
+    assert page.models[0].viewers == 1234
 
 
-def test_parse_search_results_query_is_currently_unused_but_accepted() -> None:
-    """The query is reserved for future fuzzy filtering; for now we just
-    return whatever the page rendered."""
-    models = parse_search_results(_read("sample_search_results.html"), "anything")
-    assert len(models) == 1
+def test_parse_roomlist_garbage_viewer_count_zeroed() -> None:
+    page = parse_roomlist({"rooms": [{"username": "alice", "num_users": "abc"}]})
+    assert page.models[0].viewers == 0
 
 
-# --------------------------------------------------------------------------- #
-# Edge cases
-# --------------------------------------------------------------------------- #
+# clean_subject ------------------------------------------------------------- #
 
 
-def test_parse_top_cams_skips_card_without_slug() -> None:
-    html = """
-    <html><body><ul>
-    <li class="roomCard"><a><div class="title">no-slug</div></a></li>
-    <li class="roomCard"><a href="/good_slug/" data-room="good_slug">
-        <img src="https://x/good_slug.jpg" alt="good_slug">
-        <div class="title">good_slug</div>
-        <div class="details"><span class="viewers">5 viewers</span>
-        <span class="gender" data-gender="f">Female</span></div>
-    </a></li>
-    </ul></body></html>
-    """
-    models = parse_top_cams(html)
-    assert len(models) == 1
-    assert models[0].slug == "good_slug"
+def test_clean_subject_strips_anchor_tags_keeps_inner_text() -> None:
+    raw = 'goal: cum #threesum <a href="/tag/trans/">#trans</a> #natural'
+    assert clean_subject(raw) == "goal: cum #threesum #trans #natural"
 
 
-def test_parse_top_cams_handles_zero_viewers() -> None:
-    html = """
-    <html><body><ul>
-    <li class="roomCard"><a href="/quiet/" data-room="quiet">
-        <img src="https://x/quiet.jpg" alt="quiet">
-        <div class="title">quiet</div>
-        <div class="details"><span class="viewers">0 viewers</span>
-        <span class="gender" data-gender="f">Female</span></div>
-    </a></li>
-    </ul></body></html>
-    """
-    models = parse_top_cams(html)
-    assert len(models) == 1
-    assert models[0].viewers == 0
+def test_clean_subject_handles_none() -> None:
+    assert clean_subject(None) == ""
 
 
-def test_parse_top_cams_unknown_gender_falls_back() -> None:
-    html = """
-    <html><body><ul>
-    <li class="roomCard"><a href="/x/" data-room="x">
-        <img src="https://x/x.jpg" alt="x">
-        <div class="title">x</div>
-        <div class="details"><span class="viewers">1 viewers</span></div>
-    </a></li>
-    </ul></body></html>
-    """
-    models = parse_top_cams(html)
-    assert len(models) == 1
-    assert models[0].gender is Gender.UNKNOWN
+def test_clean_subject_handles_empty() -> None:
+    assert clean_subject("") == ""
+
+
+def test_clean_subject_no_anchors_passes_through() -> None:
+    assert clean_subject("plain text subject") == "plain text subject"
+
+
+# plot_for ------------------------------------------------------------------ #
+
+
+def test_plot_for_includes_age() -> None:
+    plot = plot_for({"username": "alice", "display_age": 22, "num_users": 10, "num_followers": 100})
+    assert "Age:" in plot
+    assert "22" in plot
+
+
+def test_plot_for_unknown_age_when_missing() -> None:
+    plot = plot_for({"username": "alice", "num_users": 10, "num_followers": 0})
+    assert "Unknown" in plot
+
+
+def test_plot_for_includes_location_when_present() -> None:
+    plot = plot_for({"username": "alice", "location": "Berlin",
+                     "num_users": 1, "num_followers": 0})
+    assert "Location:" in plot
+    assert "Berlin" in plot
+
+
+def test_plot_for_omits_location_line_when_blank() -> None:
+    plot = plot_for({"username": "alice", "location": "",
+                     "num_users": 1, "num_followers": 0})
+    assert "Location:" not in plot
+
+
+def test_plot_for_renders_tags_in_green() -> None:
+    plot = plot_for({"username": "alice", "tags": ["blonde", "teen"],
+                     "num_users": 1, "num_followers": 0})
+    assert "#blonde" in plot
+    assert "#teen" in plot
+    assert "00ff88" in plot
+
+
+def test_plot_for_includes_viewers_and_followers() -> None:
+    plot = plot_for({"username": "alice", "num_users": 1234, "num_followers": 5678})
+    assert "Watching:" in plot
+    assert "1234" in plot
+    assert "Followers:" in plot
+    assert "5678" in plot
+
+
+def test_plot_for_subject_html_anchors_get_stripped() -> None:
+    plot = plot_for({"username": "alice",
+                     "subject": 'cum #x <a href="/tag/y/">#y</a>',
+                     "num_users": 1, "num_followers": 0})
+    assert "<a" not in plot
+    assert "#y" in plot

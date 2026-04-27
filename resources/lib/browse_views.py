@@ -75,14 +75,18 @@ def _coerce_page(value: Any) -> int:
         return 1
 
 
+def _fetch_models(url: str, fetch_func: _FetchFn | None) -> list[Model]:
+    """GET the JSON room-list, return parsed Models. Empty on any failure."""
+    body = cb_client.fetch_browse_page(url, fetch_func=fetch_func)
+    return cb_listing.parse_roomlist(body).models
+
+
 def top_cams_view(handle: int, page: Any = 1,
                   fetch_func: _FetchFn | None = None,
                   **_params: Any) -> None:
     """Top-cams listing: most-viewers first, all genders."""
     url = top_cams_url(_coerce_page(page))
-    html = cb_client.fetch_browse_page(url, fetch_func=fetch_func)
-    models = cb_listing.parse_top_cams(html)
-    _render_models(handle, models)
+    _render_models(handle, _fetch_models(url, fetch_func))
     kodi_helpers.add_dir(handle, "Next page", "top", page=_coerce_page(page) + 1)
     kodi_helpers.end_directory(handle)
 
@@ -92,9 +96,7 @@ def new_cams_view(handle: int, page: Any = 1,
                   **_params: Any) -> None:
     """Recently-online listing."""
     url = new_cams_url(_coerce_page(page))
-    html = cb_client.fetch_browse_page(url, fetch_func=fetch_func)
-    models = cb_listing.parse_top_cams(html)
-    _render_models(handle, models)
+    _render_models(handle, _fetch_models(url, fetch_func))
     kodi_helpers.add_dir(handle, "Next page", "new", page=_coerce_page(page) + 1)
     kodi_helpers.end_directory(handle)
 
@@ -102,15 +104,13 @@ def new_cams_view(handle: int, page: Any = 1,
 def gender_view(handle: int, gender: str = "female", page: Any = 1,
                 fetch_func: _FetchFn | None = None,
                 **_params: Any) -> None:
-    """Single-gender listing."""
+    """Single-gender listing. Filter is server-side via the JSON API."""
     g = Gender.from_str(gender)
     if g is Gender.UNKNOWN:
         kodi_helpers.end_directory(handle, succeeded=False)
         return
     url = gender_filter_url(g, _coerce_page(page))
-    html = cb_client.fetch_browse_page(url, fetch_func=fetch_func)
-    models = cb_listing.parse_gender_filter(html, g)
-    _render_models(handle, models)
+    _render_models(handle, _fetch_models(url, fetch_func))
     kodi_helpers.add_dir(handle, "Next page", "gender",
                          gender=gender, page=_coerce_page(page) + 1)
     kodi_helpers.end_directory(handle)
@@ -119,19 +119,15 @@ def gender_view(handle: int, gender: str = "female", page: Any = 1,
 def search_view(handle: int, query: str = "", page: Any = 1,
                 fetch_func: _FetchFn | None = None,
                 **_params: Any) -> None:
-    """Keyword search. Empty query -> open input dialog (handled in
-    addon_actions); the view itself just renders results.
+    """Keyword search. Empty query -> close directory (the input dialog
+    is handled by addon_actions.search which then re-routes here with
+    a populated query).
     """
     if not query:
-        # No query yet - the dispatch path goes through addon_actions.search
-        # which prompts then re-runs search_view with a real query. If we get
-        # here with empty, just close the directory.
         kodi_helpers.end_directory(handle, succeeded=False)
         return
     url = search_url(query, _coerce_page(page))
-    html = cb_client.fetch_browse_page(url, fetch_func=fetch_func)
-    models = cb_listing.parse_search_results(html, query)
-    _render_models(handle, models)
+    _render_models(handle, _fetch_models(url, fetch_func))
     kodi_helpers.add_dir(handle, "Next page", "search",
                          query=query, page=_coerce_page(page) + 1)
     kodi_helpers.end_directory(handle)

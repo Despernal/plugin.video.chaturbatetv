@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <addon id="plugin.video.chaturbatetv"
        name="Chaturbate TV"
-       version="0.2.1"
+       version="0.3.0"
        provider-name="flux">
     <requires>
         <import addon="xbmc.python" version="3.0.0"/>
@@ -20,7 +20,8 @@
             <icon>icon.png</icon>
             <fanart>fanart.jpg</fanart>
         </assets>
-        <news>0.2.1 - Polish: full-bleed fanart, provider-name fix.
+        <news>0.3.0 - Switch browse to Chaturbates JSON API (room-list endpoint). Drops HTML scraping entirely. 373 tests passing.
+0.2.1 - Polish: full-bleed fanart, provider-name fix.
 0.2.0 - Phase 2: browse menus (Top, New, Female, Male, Couple, Trans, Search), local favorites,  migration tool.</news>
     </extension>
 </addon>

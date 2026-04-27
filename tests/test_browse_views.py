@@ -135,19 +135,23 @@ def _read(name: str) -> str:
     return (FIXTURES / name).read_text(encoding="utf-8")
 
 
+SAMPLE_JSON = "sample_roomlist.json"
+EMPTY_JSON = '{"rooms": [], "total_count": 0, "all_rooms_count": 0}'
+
+
 def test_top_cams_view_renders_models(kodi_mocks: dict[str, MagicMock]) -> None:
     bv = _import()
-    html = _read("sample_top_cams.html")
+    body_text = _read(SAMPLE_JSON)
 
     def fetch(url: str, body: bytes | None = None,
               headers: dict[str, str] | None = None,
               method: str = "GET") -> str:
-        return html
+        return body_text
 
     bv.top_cams_view(handle=42, fetch_func=fetch)
     urls = _added_urls(kodi_mocks["xbmcplugin"])
-    # 4 models + 1 next-page entry
-    assert sum(1 for u in urls if "mode=playvid" in u) == 4
+    # 5 models in the fixture + 1 next-page entry
+    assert sum(1 for u in urls if "mode=playvid" in u) == 5
     assert any("mode=top" in u and "page=2" in u for u in urls)
 
 
@@ -159,10 +163,11 @@ def test_top_cams_view_passes_page_to_fetch(kodi_mocks: dict[str, MagicMock]) ->
               headers: dict[str, str] | None = None,
               method: str = "GET") -> str:
         seen.append(url)
-        return _read("sample_empty_listing.html")
+        return EMPTY_JSON
 
     bv.top_cams_view(handle=42, page=3, fetch_func=fetch)
-    assert any("page=3" in u for u in seen)
+    # Page 3 with default limit 100 = offset 200
+    assert any("offset=200" in u for u in seen)
 
 
 def test_top_cams_view_handles_empty_page(kodi_mocks: dict[str, MagicMock]) -> None:
@@ -171,7 +176,7 @@ def test_top_cams_view_handles_empty_page(kodi_mocks: dict[str, MagicMock]) -> N
     def fetch(url: str, body: bytes | None = None,
               headers: dict[str, str] | None = None,
               method: str = "GET") -> str:
-        return _read("sample_empty_listing.html")
+        return EMPTY_JSON
 
     bv.top_cams_view(handle=42, fetch_func=fetch)
     urls = _added_urls(kodi_mocks["xbmcplugin"])
@@ -180,43 +185,74 @@ def test_top_cams_view_handles_empty_page(kodi_mocks: dict[str, MagicMock]) -> N
     assert any("mode=top" in u and "page=2" in u for u in urls)
 
 
-# --------------------------------------------------------------------------- #
-# new_cams_view
-# --------------------------------------------------------------------------- #
+# new_cams_view ----------------------------------------------------------- #
 
 
 def test_new_cams_view_renders(kodi_mocks: dict[str, MagicMock]) -> None:
     bv = _import()
+    body_text = _read(SAMPLE_JSON)
 
     def fetch(url: str, body: bytes | None = None,
               headers: dict[str, str] | None = None,
               method: str = "GET") -> str:
-        return _read("sample_top_cams.html")
+        return body_text
 
     bv.new_cams_view(handle=42, fetch_func=fetch)
     urls = _added_urls(kodi_mocks["xbmcplugin"])
-    assert sum(1 for u in urls if "mode=playvid" in u) == 4
+    assert sum(1 for u in urls if "mode=playvid" in u) == 5
 
 
-# --------------------------------------------------------------------------- #
-# gender_view
-# --------------------------------------------------------------------------- #
-
-
-def test_gender_view_filters_to_gender(kodi_mocks: dict[str, MagicMock]) -> None:
+def test_new_cams_view_uses_new_cams_param(kodi_mocks: dict[str, MagicMock]) -> None:
     bv = _import()
+    seen: list[str] = []
 
     def fetch(url: str, body: bytes | None = None,
               headers: dict[str, str] | None = None,
               method: str = "GET") -> str:
-        return _read("sample_top_cams.html")
+        seen.append(url)
+        return EMPTY_JSON
+
+    bv.new_cams_view(handle=42, fetch_func=fetch)
+    assert any("new_cams=true" in u for u in seen)
+
+
+# gender_view ------------------------------------------------------------- #
+
+
+def test_gender_view_passes_gender_code_to_fetch(kodi_mocks: dict[str, MagicMock]) -> None:
+    """The view passes the right gender code (m for male) to the API URL.
+
+    With JSON API, the API does the gender filter server-side - we no longer
+    re-filter client-side. Test asserts the URL is correct.
+    """
+    bv = _import()
+    seen: list[str] = []
+
+    def fetch(url: str, body: bytes | None = None,
+              headers: dict[str, str] | None = None,
+              method: str = "GET") -> str:
+        seen.append(url)
+        return EMPTY_JSON
+
+    bv.gender_view(handle=42, gender="male", fetch_func=fetch)
+    assert any("genders=m" in u for u in seen)
+
+
+def test_gender_view_renders_what_api_returns(kodi_mocks: dict[str, MagicMock]) -> None:
+    """The view trusts the server-filtered response - no client-side re-filter."""
+    bv = _import()
+    body_text = _read(SAMPLE_JSON)
+
+    def fetch(url: str, body: bytes | None = None,
+              headers: dict[str, str] | None = None,
+              method: str = "GET") -> str:
+        return body_text
 
     bv.gender_view(handle=42, gender="male", fetch_func=fetch)
     urls = _added_urls(kodi_mocks["xbmcplugin"])
     play_urls = [u for u in urls if "mode=playvid" in u]
-    # Only sample_room_3 is male in the fixture.
-    assert len(play_urls) == 1
-    assert "slug=sample_room_3" in play_urls[0]
+    # All 5 fixture rooms render (we trust the API response).
+    assert len(play_urls) == 5
 
 
 def test_gender_view_unknown_gender_closes_directory(
@@ -227,22 +263,35 @@ def test_gender_view_unknown_gender_closes_directory(
     kodi_mocks["xbmcplugin"].endOfDirectory.assert_called_once()
 
 
-# --------------------------------------------------------------------------- #
-# search_view
-# --------------------------------------------------------------------------- #
+# search_view ------------------------------------------------------------- #
 
 
 def test_search_view_with_query_renders(kodi_mocks: dict[str, MagicMock]) -> None:
     bv = _import()
+    body_text = _read(SAMPLE_JSON)
 
     def fetch(url: str, body: bytes | None = None,
               headers: dict[str, str] | None = None,
               method: str = "GET") -> str:
-        return _read("sample_search_results.html")
+        return body_text
 
     bv.search_view(handle=42, query="sample", fetch_func=fetch)
     urls = _added_urls(kodi_mocks["xbmcplugin"])
-    assert any("slug=sample_search_1" in u for u in urls)
+    assert any("slug=sample_room_1" in u for u in urls)
+
+
+def test_search_view_passes_keyword_to_url(kodi_mocks: dict[str, MagicMock]) -> None:
+    bv = _import()
+    seen: list[str] = []
+
+    def fetch(url: str, body: bytes | None = None,
+              headers: dict[str, str] | None = None,
+              method: str = "GET") -> str:
+        seen.append(url)
+        return EMPTY_JSON
+
+    bv.search_view(handle=42, query="blonde", fetch_func=fetch)
+    assert any("keywords=blonde" in u for u in seen)
 
 
 def test_search_view_empty_query_closes_directory(

@@ -1,7 +1,9 @@
-"""Tests for resources.lib.cb_endpoints - URL construction.
+"""Tests for resources.lib.cb_endpoints - JSON-API URL construction.
 
-Endpoints are deliberately minimal; we use Chaturbate's public listing
-URLs and just construct them from named arguments.
+Chaturbate publishes the room list at
+``/api/ts/roomlist/room-list/`` with limit/offset pagination. These
+tests pin the URL shape so we cannot accidentally regress to HTML
+scraping.
 """
 from __future__ import annotations
 
@@ -11,6 +13,9 @@ import pytest
 
 from resources.lib.cb_endpoints import (
     BASE_URL,
+    DEFAULT_LIMIT,
+    DOSSIER_AJAX,
+    ROOMLIST_API,
     gender_filter_url,
     new_cams_url,
     room_url,
@@ -21,58 +26,101 @@ from resources.lib.cb_models import Gender
 
 
 def _qs(url: str) -> dict[str, list[str]]:
-    return parse_qs(urlparse(url).query)
+    return parse_qs(urlparse(url).query, keep_blank_values=True)
 
 
-def test_base_url_is_https_chaturbate() -> None:
+def test_base_url() -> None:
     assert BASE_URL == "https://chaturbate.com"
 
 
-def test_top_cams_url_default_page() -> None:
-    url = top_cams_url()
-    assert url.startswith("https://chaturbate.com/")
-    assert "page=1" in url
+def test_roomlist_api_is_the_json_endpoint() -> None:
+    assert ROOMLIST_API == "https://chaturbate.com/api/ts/roomlist/room-list/"
 
 
-def test_top_cams_url_with_page() -> None:
-    url = top_cams_url(page=3)
-    assert "page=3" in url
+def test_dossier_ajax_is_the_post_endpoint() -> None:
+    assert DOSSIER_AJAX == "https://chaturbate.com/get_edge_hls_url_ajax/"
 
 
-def test_new_cams_url_default_page() -> None:
-    url = new_cams_url()
-    assert url.startswith("https://chaturbate.com/")
-    assert "page=1" in url
+def test_default_limit_is_at_least_50() -> None:
+    assert DEFAULT_LIMIT >= 50
 
 
-def test_new_cams_url_with_page() -> None:
-    url = new_cams_url(page=2)
-    assert "page=2" in url
+# top_cams_url --------------------------------------------------------------- #
 
 
-def test_top_and_new_are_distinct() -> None:
-    assert top_cams_url() != new_cams_url()
+def test_top_cams_url_uses_roomlist_api() -> None:
+    assert top_cams_url().startswith(ROOMLIST_API)
 
 
-def test_gender_filter_female() -> None:
-    url = gender_filter_url(Gender.FEMALE)
-    assert "/female-cams/" in url
-    assert "page=1" in url
+def test_top_cams_url_default_offset_is_zero() -> None:
+    assert _qs(top_cams_url())["offset"] == ["0"]
 
 
-def test_gender_filter_male() -> None:
-    url = gender_filter_url(Gender.MALE)
-    assert "/male-cams/" in url
+def test_top_cams_url_default_limit() -> None:
+    assert _qs(top_cams_url())["limit"] == [str(DEFAULT_LIMIT)]
 
 
-def test_gender_filter_couple() -> None:
-    url = gender_filter_url(Gender.COUPLE)
-    assert "/couple-cams/" in url
+def test_top_cams_url_page_2_offsets_by_limit() -> None:
+    assert _qs(top_cams_url(page=2))["offset"] == [str(DEFAULT_LIMIT)]
 
 
-def test_gender_filter_trans() -> None:
-    url = gender_filter_url(Gender.TRANS)
-    assert "/trans-cams/" in url
+def test_top_cams_url_page_3_offsets_by_double_limit() -> None:
+    assert _qs(top_cams_url(page=3))["offset"] == [str(DEFAULT_LIMIT * 2)]
+
+
+def test_top_cams_url_clamps_zero_page() -> None:
+    assert _qs(top_cams_url(page=0))["offset"] == ["0"]
+
+
+def test_top_cams_url_clamps_negative_page() -> None:
+    assert _qs(top_cams_url(page=-5))["offset"] == ["0"]
+
+
+def test_top_cams_url_custom_limit() -> None:
+    qs = _qs(top_cams_url(page=1, limit=25))
+    assert qs["limit"] == ["25"]
+    assert qs["offset"] == ["0"]
+
+
+def test_top_cams_url_does_not_set_genders_or_keywords() -> None:
+    qs = _qs(top_cams_url())
+    assert "genders" not in qs
+    assert "keywords" not in qs
+
+
+# new_cams_url --------------------------------------------------------------- #
+
+
+def test_new_cams_url_uses_roomlist_api() -> None:
+    assert new_cams_url().startswith(ROOMLIST_API)
+
+
+def test_new_cams_url_sets_new_cams_true() -> None:
+    assert _qs(new_cams_url())["new_cams"] == ["true"]
+
+
+def test_new_cams_url_pagination() -> None:
+    assert _qs(new_cams_url(page=4))["offset"] == [str(DEFAULT_LIMIT * 3)]
+
+
+# gender_filter_url ---------------------------------------------------------- #
+
+
+def test_gender_filter_female_sends_f() -> None:
+    assert _qs(gender_filter_url(Gender.FEMALE))["genders"] == ["f"]
+
+
+def test_gender_filter_male_sends_m() -> None:
+    assert _qs(gender_filter_url(Gender.MALE))["genders"] == ["m"]
+
+
+def test_gender_filter_couple_sends_c() -> None:
+    assert _qs(gender_filter_url(Gender.COUPLE))["genders"] == ["c"]
+
+
+def test_gender_filter_trans_sends_s() -> None:
+    """Chaturbate's API uses 's' for trans (historical 'shemale' code)."""
+    assert _qs(gender_filter_url(Gender.TRANS))["genders"] == ["s"]
 
 
 def test_gender_filter_unknown_raises() -> None:
@@ -80,69 +128,59 @@ def test_gender_filter_unknown_raises() -> None:
         gender_filter_url(Gender.UNKNOWN)
 
 
-def test_gender_filter_with_page() -> None:
-    url = gender_filter_url(Gender.FEMALE, page=4)
-    assert "page=4" in url
+def test_gender_filter_uses_roomlist_api() -> None:
+    assert gender_filter_url(Gender.FEMALE).startswith(ROOMLIST_API)
 
 
-def test_search_url_simple() -> None:
-    url = search_url("alice")
-    qs = _qs(url)
-    assert qs.get("keywords") == ["alice"]
+def test_gender_filter_pagination() -> None:
+    assert _qs(gender_filter_url(Gender.MALE, page=3))["offset"] == [str(DEFAULT_LIMIT * 2)]
 
 
-def test_search_url_with_spaces() -> None:
-    url = search_url("hello world")
-    qs = _qs(url)
-    assert qs.get("keywords") == ["hello world"]
+# search_url ----------------------------------------------------------------- #
 
 
-def test_search_url_with_special_chars() -> None:
-    """URL-encoding catches & / # / =."""
-    url = search_url("a&b=c")
-    qs = _qs(url)
-    assert qs.get("keywords") == ["a&b=c"]
+def test_search_url_uses_roomlist_api() -> None:
+    assert search_url("blonde").startswith(ROOMLIST_API)
 
 
-def test_search_url_default_page() -> None:
-    url = search_url("alice")
-    assert "page=1" in url
+def test_search_url_passes_keyword() -> None:
+    assert _qs(search_url("blonde"))["keywords"] == ["blonde"]
 
 
-def test_search_url_page_arg() -> None:
-    url = search_url("alice", page=5)
-    assert "page=5" in url
+def test_search_url_keyword_with_spaces() -> None:
+    qs = _qs(search_url("hot tub"))
+    assert qs["keywords"] == ["hot tub"]
+
+
+def test_search_url_empty_query_passes_through() -> None:
+    qs = _qs(search_url(""))
+    assert qs["keywords"] == [""]
+
+
+def test_search_url_pagination() -> None:
+    assert _qs(search_url("test", page=2))["offset"] == [str(DEFAULT_LIMIT)]
+
+
+# room_url (unchanged behaviour) -------------------------------------------- #
 
 
 def test_room_url_basic() -> None:
     assert room_url("alice") == "https://chaturbate.com/alice/"
 
 
-def test_room_url_strips_leading_at() -> None:
-    """Models sometimes get referenced as '@slug' in URLs; tolerate it."""
+def test_room_url_strips_at_sign() -> None:
     assert room_url("@alice") == "https://chaturbate.com/alice/"
 
 
-def test_room_url_strips_surrounding_slashes() -> None:
+def test_room_url_strips_slashes() -> None:
     assert room_url("/alice/") == "https://chaturbate.com/alice/"
 
 
-def test_room_url_empty_slug_raises() -> None:
+def test_room_url_empty_raises() -> None:
     with pytest.raises(ValueError):
         room_url("")
 
 
-def test_room_url_whitespace_slug_raises() -> None:
+def test_room_url_whitespace_only_raises() -> None:
     with pytest.raises(ValueError):
         room_url("   ")
-
-
-def test_page_zero_clamps_to_one() -> None:
-    """Chaturbate listings are 1-indexed; we accept 0 and silently clamp."""
-    url = top_cams_url(page=0)
-    assert "page=1" in url
-
-
-def test_negative_page_clamps_to_one() -> None:
-    url = top_cams_url(page=-3)
-    assert "page=1" in url
