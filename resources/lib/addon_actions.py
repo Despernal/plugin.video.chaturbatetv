@@ -152,18 +152,27 @@ def playvid(handle: int, slug: str = "", name: str = "",
         return
 
     if not result.success:
-        # Lesson v6.1: when TV mode is active, fire Action(Next) so the
-        # playlist advances past the offline slot instead of leaving Kodi
-        # on a black screen. Outside TV mode, hand back the failed resolve
-        # so the user's own click is acknowledged cleanly.
+        # Lesson v6.1 + Lesson 32: when TV mode is active and a slug
+        # resolves offline, do TWO things: (1) invalidate the
+        # bulk-live cache so the loop's next pick_target doesn't
+        # re-pick this same offline slug for the rest of the poll
+        # cycle, (2) fire ``PlayerControl(Next)`` to advance past
+        # this slot in the current playlist.
+        #
+        # Action(Next) was the original here but Kodi 21+ logs
+        # "Keymapping error: no such action 'next' defined" - the
+        # builtin name is wrong. ``PlayerControl(Next)`` is the
+        # canonical playlist-advance builtin.
         if _tv_mode_active():
+            _tv_bulk_mark_offline(slug)
             logger._log(
-                f"playvid: TV active + offline -> Action(Next) for slug={slug!r}"
+                f"playvid: TV active + offline -> "
+                f"PlayerControl(Next) for slug={slug!r}"
             )
             try:
                 import xbmc
-                xbmc.executebuiltin("Action(Next)")
-            except Exception:  # noqa: S110 - best-effort: builtin missing means no Kodi
+                xbmc.executebuiltin("PlayerControl(Next)")
+            except Exception:  # noqa: S110 - best-effort: no Kodi outside addon
                 pass
             return
         xbmcplugin.setResolvedUrl(handle, False, _empty_listitem())
@@ -366,62 +375,99 @@ def refresh_artwork(handle: int, **_params: Any) -> None:
     _refresh_container()
 
 
-def _make_bulk_is_live_func(poll_minutes: int) -> Any:
-    """Build a TV-mode is_live callback backed by a single affiliate-API
-    call per poll cycle.
+# TV-mode bulk-live cache. Module-level so playvid can invalidate
+# stale entries when it discovers a slug is offline despite the cache
+# saying live - prevents the TV loop from looping on the same offline
+# model for a full poll cycle.
+_TV_BULK_CACHE: dict[str, Any] = {
+    "slugs": frozenset(),
+    "ts": 0.0,
+    "ttl_s": 0.0,
+}
 
-    The naive "call ``is_model_live(slug)`` per entry" approach was 60
-    sequential AJAX hits at the start of every poll cycle for a 60-entry
-    TV list - bad for chaturbate AND slow for the user (the loop blocks
-    on every fetch). The affiliate-onlinerooms endpoint returns ALL
-    online slugs in one call, so we cache it with a TTL aligned to the
-    poll interval and answer ``is_live`` from a frozenset lookup.
+# Affiliate watermarks ('s rotating array; same set favs_views uses).
+_TV_BULK_WATERMARKS = (
+    "C9m5N", "tfZSl", "jQrKO", "5XO2a", "WXomN",
+    "zM6MR", "Lb2aB", "cIbs3", "mnzQo", "N6TZA",
+)
 
-    A network failure DOES NOT update the timestamp - we keep the stale
-    set so a transient 5xx doesn't suddenly mark every model offline.
+
+def _tv_bulk_refresh() -> bool:
+    """Single affiliate-onlinerooms fetch into ``_TV_BULK_CACHE``.
+
+    Network failure preserves the stale set so a transient 5xx doesn't
+    silently mark every model offline.
     """
     import random
     import time as _time
     from resources.lib import cb_client, cb_listing, logger
     from resources.lib.cb_endpoints import online_rooms_affiliate_url
 
+    wm = random.choice(_TV_BULK_WATERMARKS)
+    url = online_rooms_affiliate_url(wm)
+    logger._log(f"addon_actions._tv_bulk_refresh: url={url}")
+    try:
+        body = cb_client.fetch_browse_page(url)
+    except OSError as exc:
+        logger._log(
+            f"addon_actions._tv_bulk_refresh: FAIL err={exc!r} "
+            f"(stale set has {len(_TV_BULK_CACHE['slugs'])} slugs)"
+        )
+        return False
+    models = cb_listing.parse_affiliate_onlinerooms(body)
+    new_slugs = frozenset(m.slug for m in models)
+    _TV_BULK_CACHE["slugs"] = new_slugs
+    _TV_BULK_CACHE["ts"] = _time.time()
+    logger._log(
+        f"addon_actions._tv_bulk_refresh: refreshed slugs={len(new_slugs)}"
+    )
+    return True
+
+
+def _tv_bulk_mark_offline(slug: str) -> None:
+    """Remove ``slug`` from the cached live set.
+
+    Called from playvid when the per-slug AJAX confirms a model is
+    offline despite the bulk cache saying live. Without this, the TV
+    loop's next iteration would re-pick the same model (cache still
+    fresh per its TTL), playvid would offline-Action(Next) again, and
+    the loop would tightly cycle on the same dead model for the full
+    poll-cycle TTL (~9.5 min default).
+
+    Idempotent: if slug isn't in the set, no-op.
+    """
+    from resources.lib import logger
+    current = _TV_BULK_CACHE["slugs"]
+    if slug not in current:
+        return
+    _TV_BULK_CACHE["slugs"] = frozenset(s for s in current if s != slug)
+    logger._log(
+        f"addon_actions._tv_bulk_mark_offline: {slug!r} removed from cache "
+        f"({len(current)} -> {len(_TV_BULK_CACHE['slugs'])})"
+    )
+
+
+def _make_bulk_is_live_func(poll_minutes: int) -> Any:
+    """Build a TV-mode is_live callback backed by ``_TV_BULK_CACHE``.
+
+    Single affiliate-API call per poll cycle replaces 60 sequential
+    per-slug AJAX hits. The cache is module-level so playvid can
+    invalidate stale entries via ``_tv_bulk_mark_offline``.
+    """
+    import time as _time
+    from resources.lib import cb_client, logger
+
     # TTL slightly LESS than the poll interval so we always have fresh
     # data at the start of each tier walk. Floor at 30s for testing.
     ttl_seconds = max(30, int(poll_minutes * 60) - 30)
-    # Affiliate watermarks ('s rotating array - same set
-    # favs_views uses).
-    watermarks = (
-        "C9m5N", "tfZSl", "jQrKO", "5XO2a", "WXomN",
-        "zM6MR", "Lb2aB", "cIbs3", "mnzQo", "N6TZA",
-    )
-    cache: dict[str, Any] = {"slugs": frozenset(), "ts": 0.0}
-
-    def _refresh() -> bool:
-        wm = random.choice(watermarks)
-        url = online_rooms_affiliate_url(wm)
-        logger._log(f"addon_actions._bulk_is_live: refresh url={url}")
-        try:
-            body = cb_client.fetch_browse_page(url)
-        except OSError as exc:
-            logger._log(
-                f"addon_actions._bulk_is_live: refresh FAIL err={exc!r} "
-                f"(stale set has {len(cache['slugs'])} slugs)"
-            )
-            return False
-        models = cb_listing.parse_affiliate_onlinerooms(body)
-        new_slugs = frozenset(m.slug for m in models)
-        cache["slugs"] = new_slugs
-        cache["ts"] = _time.time()
-        logger._log(
-            f"addon_actions._bulk_is_live: refreshed slugs={len(new_slugs)}"
-        )
-        return True
+    _TV_BULK_CACHE["ttl_s"] = ttl_seconds
 
     def is_live(url: str) -> bool:
         nowt = _time.time()
-        if not cache["slugs"] or nowt - cache["ts"] > ttl_seconds:
-            ok = _refresh()
-            if not ok and not cache["slugs"]:
+        if (not _TV_BULK_CACHE["slugs"]
+                or nowt - _TV_BULK_CACHE["ts"] > ttl_seconds):
+            ok = _tv_bulk_refresh()
+            if not ok and not _TV_BULK_CACHE["slugs"]:
                 # Bulk failed AND we have no cached set (cold-start +
                 # affiliate-endpoint outage). Fall back to per-slug AJAX
                 # for THIS query so TV mode can pick a target. Don't
@@ -430,19 +476,19 @@ def _make_bulk_is_live_func(poll_minutes: int) -> Any:
                 # endpoint comes back.
                 slug = _slug_from_url(url)
                 logger._log(
-                    f"addon_actions._bulk_is_live: cold + bulk FAIL, "
+                    f"addon_actions._tv_bulk_is_live: cold + bulk FAIL, "
                     f"per-slug fallback slug={slug!r}"
                 )
                 try:
                     return cb_client.is_model_live(slug)
                 except Exception as exc:
                     logger._log(
-                        f"addon_actions._bulk_is_live: per-slug fail "
+                        f"addon_actions._tv_bulk_is_live: per-slug fail "
                         f"slug={slug!r} err={exc!r}"
                     )
                     return False
         slug = _slug_from_url(url)
-        return slug in cache["slugs"]
+        return slug in _TV_BULK_CACHE["slugs"]
 
     return is_live
 

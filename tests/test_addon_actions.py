@@ -241,7 +241,7 @@ def test_playvid_offline_during_tv_mode_fires_action_next(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Lesson v6.1: when TV mode is active and a slot in the playlist
-    resolves offline, ``playvid`` must fire ``Action(Next)`` so the
+    resolves offline, ``playvid`` must fire ``PlayerControl(Next)`` so the
     player advances. Sitting on ``setResolvedUrl(False)`` mid-playlist
     leaves Kodi on a black screen until the user mashes Next themselves.
     """
@@ -264,10 +264,10 @@ def test_playvid_offline_during_tv_mode_fires_action_next(
 
     actions.playvid(handle=42, slug="ghost", name="ghost")
 
-    # Action(Next) was fired - player advances to next TV slot.
+    # PlayerControl(Next) was fired - player advances to next TV slot.
     builtins_called = [c.args[0] for c in
                        kodi_mocks["xbmc"].executebuiltin.call_args_list]
-    assert "Action(Next)" in builtins_called
+    assert "PlayerControl(Next)" in builtins_called
     # And setResolvedUrl was NOT called (we early-returned).
     assert cap["resolved"] == []
 
@@ -277,7 +277,7 @@ def test_playvid_offline_without_tv_mode_still_fails_cleanly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Outside TV mode, offline rooms must still hand back
-    ``setResolvedUrl(False)`` rather than firing Action(Next) (which
+    ``setResolvedUrl(False)`` rather than firing PlayerControl(Next) (which
     would skip past the user's own click).
     """
     state: dict[str, str] = {"chaturbatetv_active": "0"}
@@ -301,7 +301,7 @@ def test_playvid_offline_without_tv_mode_still_fails_cleanly(
 
     builtins_called = [c.args[0] for c in
                        kodi_mocks["xbmc"].executebuiltin.call_args_list]
-    assert "Action(Next)" not in builtins_called
+    assert "PlayerControl(Next)" not in builtins_called
     assert len(cap["resolved"]) == 1
     _h, succeeded, _li = cap["resolved"][0]
     assert succeeded is False
@@ -611,6 +611,63 @@ def test_refresh_artwork_tolerates_schema_mismatch_db(
     actions = _import()
     # Must not raise.
     actions.refresh_artwork(handle=42)
+
+
+def test_playvid_offline_invalidates_bulk_live_cache(
+    kodi_mocks: dict[str, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lesson 32: when playvid resolves offline AND TV mode is active,
+    drop that slug from the cached live set BEFORE firing
+    PlayerControl(Next). Without this, the loop's next pick_target
+    re-picks the same offline slug for the rest of the poll cycle
+    (~9.5 min default), each iter offline-skipping again, infinite
+    tight loop on a dead model.
+    """
+    state: dict[str, str] = {"chaturbatetv_active": "1"}
+
+    class _Win:
+        def __init__(self, _id: int = 0) -> None:
+            pass
+
+        def getProperty(self, k: str) -> str:
+            return state.get(k, "")
+
+        def setProperty(self, k: str, v: str) -> None:
+            state[k] = v
+
+    kodi_mocks["xbmcgui"].Window = _Win
+
+    _patch_resolver_and_xbmcplugin(monkeypatch, success=False)
+
+    # Pre-seed the bulk cache with our offline slug so we can verify
+    # it gets removed.
+    import resources.lib.addon_actions as actions_mod
+    monkeypatch.setattr(
+        actions_mod, "_TV_BULK_CACHE",
+        {"slugs": frozenset({"ghost", "alice", "bob"}), "ts": 1000.0,
+         "ttl_s": 300.0},
+    )
+    actions = _import()
+    # Repoint the real cache after _import (sys.modules dance).
+    import resources.lib.addon_actions as actions_real
+    actions_real._TV_BULK_CACHE = {
+        "slugs": frozenset({"ghost", "alice", "bob"}),
+        "ts": 1000.0,
+        "ttl_s": 300.0,
+    }
+
+    actions.playvid(handle=42, slug="ghost", name="ghost")
+
+    # ghost should be removed from the cache.
+    assert "ghost" not in actions_real._TV_BULK_CACHE["slugs"]
+    # alice + bob untouched.
+    assert "alice" in actions_real._TV_BULK_CACHE["slugs"]
+    assert "bob" in actions_real._TV_BULK_CACHE["slugs"]
+    # And PlayerControl(Next) was fired.
+    builtins_called = [c.args[0] for c in
+                       kodi_mocks["xbmc"].executebuiltin.call_args_list]
+    assert "PlayerControl(Next)" in builtins_called
 
 
 def test_make_bulk_is_live_func_uses_affiliate_endpoint(
