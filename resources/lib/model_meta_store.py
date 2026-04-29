@@ -881,6 +881,185 @@ def plot_for_offline_row(row: dict[str, Any], now: float | int | None = None) ->
     return "\n".join(parts)
 
 
+def bio_field_entries(
+    row: dict[str, Any], now: float | int | None = None,
+) -> list[tuple[str, str]]:
+    """Return the bio as a list of ``(label, plot)`` tuples for the
+    v0.7.27 per-field view-info directory layout. Each tuple becomes
+    one listitem on the LEFT, so fields fit even when the right-pane
+    plot pane gets cut off by long content.
+
+    Short fields (Age, Sex, Location) -> ``plot`` is empty: the value
+    is fully visible in the label. Long fields (Wish list, About me,
+    Social) -> ``plot`` carries the full value so a hovering user can
+    preview the right-pane text without clicking.
+    """
+    entries: list[tuple[str, str]] = []
+
+    sex = row.get("bio_sex")
+    subgender = row.get("bio_subgender")
+    if sex or subgender:
+        sex_parts = [s for s in (sex, subgender) if s]
+        entries.append((
+            f"[COLOR FF00d4ff]Sex:[/COLOR] {' / '.join(sex_parts)}",
+            "",
+        ))
+
+    age = row.get("age")
+    if age:
+        entries.append((
+            f"[COLOR FF00d4ff]Age:[/COLOR] {age}",
+            "",
+        ))
+
+    location = row.get("location")
+    if location:
+        entries.append((
+            f"[COLOR FF00d4ff]Location:[/COLOR] {location}",
+            "",
+        ))
+
+    followers = _coalesce_int(row.get("last_followers"))
+    if followers > 0:
+        entries.append((
+            f"[COLOR FF00d4ff]Followers:[/COLOR] {followers}",
+            "",
+        ))
+
+    last_seen = last_seen_ago_label(row, now=now)
+    if last_seen:
+        entries.append((
+            f"[COLOR FF00d4ff]Last seen:[/COLOR] {last_seen}",
+            "",
+        ))
+
+    last_bc_epoch = row.get("last_broadcast_epoch")
+    if last_bc_epoch:
+        bc_label = last_seen_ago_label(
+            {"last_online_epoch": last_bc_epoch}, now=now,
+        )
+        if bc_label:
+            entries.append((
+                f"[COLOR FF00d4ff]Last broadcast:[/COLOR] {bc_label}",
+                "",
+            ))
+    elif row.get("last_broadcast_human"):
+        entries.append((
+            f"[COLOR FF00d4ff]Last broadcast:[/COLOR] "
+            f"{row['last_broadcast_human']}",
+            "",
+        ))
+
+    check_epoch = row.get("last_status_check_epoch")
+    if check_epoch:
+        verified_label = last_seen_ago_label(
+            {"last_online_epoch": check_epoch}, now=now,
+        )
+        if verified_label:
+            entries.append((
+                f"[COLOR FF00d4ff]Verified:[/COLOR] {verified_label}",
+                "",
+            ))
+
+    body_type = row.get("bio_body_type")
+    decorations = row.get("bio_body_decorations")
+    if body_type or decorations:
+        body_bits = [s for s in (body_type, decorations) if s]
+        entries.append((
+            f"[COLOR FF00d4ff]Body:[/COLOR] {', '.join(body_bits)}",
+            "",
+        ))
+
+    smoke_drink = row.get("bio_smoke_drink")
+    if smoke_drink:
+        entries.append((
+            f"[COLOR FF00d4ff]Smoke / Drink:[/COLOR] {smoke_drink}",
+            "",
+        ))
+
+    has_fc = _coalesce_int(row.get("bio_performer_has_fanclub"))
+    fc_cost = _coalesce_int(row.get("bio_fan_club_cost"))
+    if has_fc or fc_cost:
+        cost_str = f"{fc_cost} tokens" if fc_cost > 0 else "yes"
+        entries.append((
+            f"[COLOR FF00d4ff]Fan club:[/COLOR] {cost_str}",
+            "",
+        ))
+
+    wish = row.get("bio_wish_list_html")
+    if wish:
+        wish_str = str(wish)
+        # Truncate the label so it fits one line; full text lives in
+        # the plot for hover preview, and the textviewer-on-click
+        # always shows everything.
+        snippet = wish_str if len(wish_str) <= 80 else wish_str[:77] + "..."
+        entries.append((
+            f"[COLOR FF00d4ff]Wish list:[/COLOR] {snippet}",
+            wish_str,
+        ))
+
+    about = row.get("bio_about_html")
+    if about:
+        about_str = str(about)
+        snippet = about_str if len(about_str) <= 80 else about_str[:77] + "..."
+        entries.append((
+            f"[COLOR FF00d4ff]About:[/COLOR] {snippet}",
+            about_str,
+        ))
+
+    social_raw = row.get("bio_social_medias_json")
+    if social_raw:
+        try:
+            socials = json.loads(social_raw)
+        except (TypeError, ValueError):
+            socials = None
+        if isinstance(socials, list) and socials:
+            chunks: list[str] = []
+            for s in socials:
+                if not isinstance(s, dict):
+                    continue
+                plat = (s.get("platform") or "").strip()
+                handle = (s.get("url_or_handle") or "").strip()
+                if plat and handle:
+                    chunks.append(f"{plat} {handle}")
+                elif plat:
+                    chunks.append(plat)
+                elif handle:
+                    chunks.append(handle)
+            if chunks:
+                joined = ", ".join(chunks)
+                snippet = joined if len(joined) <= 80 else joined[:77] + "..."
+                entries.append((
+                    f"[COLOR FF00d4ff]Social:[/COLOR] {snippet}",
+                    joined,
+                ))
+
+    status = (row.get("last_room_status") or "").strip()
+    if status:
+        status_color = ("FFff8080" if status.lower() in _STATUS_GONE
+                        else "FF00d4ff")
+        entries.append((
+            f"[COLOR FF00d4ff]Status:[/COLOR] "
+            f"[COLOR {status_color}]{status}[/COLOR]",
+            "",
+        ))
+
+    tags_raw = row.get("last_tags_json")
+    if tags_raw:
+        try:
+            tags = json.loads(tags_raw)
+        except (TypeError, ValueError):
+            tags = None
+        if isinstance(tags, list) and tags:
+            tag_str = ", ".join(f"#{t}" for t in tags)
+            entries.append((
+                f"[COLOR FF00ff88]Tags:[/COLOR] {tag_str}",
+                "",
+            ))
+
+    return entries
+
+
 def bio_full_plot_for_view_info(
     row: dict[str, Any], now: float | int | None = None,
 ) -> str:

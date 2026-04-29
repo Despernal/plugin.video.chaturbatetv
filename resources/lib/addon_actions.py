@@ -576,37 +576,59 @@ def view_model_info(
 def _render_view_model_info(
     handle: int, *, slug: str, row: dict[str, Any],
 ) -> None:
-    """Build the directory listing for view_model_info: Profile entry +
-    one item per photo_set."""
+    """Build the v0.7.27 view-info directory: a "View full profile"
+    header plus one entry per non-empty bio field plus one entry per
+    photo_set.
+
+    Per-field entries put each fact on its own LEFT-side row so long
+    bios don't get cut off in the right-pane plot. Click any field to
+    open the textviewer dialog with the full multi-line bio. Click a
+    photo_set to open its cover_url in Kodi's fullscreen picture
+    viewer (the photos themselves are paywalled).
+    """
     import xbmcgui
     import xbmcplugin
+    from urllib.parse import urlencode
     from resources.lib import model_meta_store as mms
     import json as _json
 
     title = (row.get("real_name") or row.get("display_name")
              or row.get("last_subject") or slug)
-    plot = mms.bio_full_plot_for_view_info(row)
     image = mms.image_for_row(row) or None
 
-    profile_label = f"[COLOR FF00d4ff]Profile: {title}[/COLOR]"
-    profile_li = xbmcgui.ListItem(label=profile_label)
-    profile_li.setProperty("IsPlayable", "false")
-    if image:
-        profile_li.setArt({"thumb": image, "icon": image, "fanart": image})
-    if plot:
-        profile_li.setInfo("video", {"plot": plot, "title": profile_label})
-    # Profile is informational, not navigable. Use a plugin URL that
-    # routes back to view_model_info so a click is a no-op refresh
-    # rather than an error.
+    plugin_prefix = "plugin://plugin.video.chaturbatetv/"
     profile_url = (
-        f"plugin://plugin.video.chaturbatetv/?mode=view_model_info"
-        f"&slug={slug}"
-    )
-    xbmcplugin.addDirectoryItem(
-        handle=handle, url=profile_url, listitem=profile_li, isFolder=True,
+        f"{plugin_prefix}?{urlencode({'mode': 'show_profile', 'slug': slug})}"
     )
 
-    # Photo sets -- each carries the cover_url as the thumbnail.
+    # Header: click opens the full-bio scrollable textviewer dialog.
+    header_label = f"[COLOR FF00d4ff][ View full profile: {title} ][/COLOR]"
+    header_li = xbmcgui.ListItem(label=header_label)
+    header_li.setProperty("IsPlayable", "false")
+    if image:
+        header_li.setArt({"thumb": image, "icon": image, "fanart": image})
+    full_plot = mms.bio_full_plot_for_view_info(row)
+    if full_plot:
+        header_li.setInfo("video", {"plot": full_plot, "title": header_label})
+    xbmcplugin.addDirectoryItem(
+        handle=handle, url=profile_url, listitem=header_li, isFolder=True,
+    )
+
+    # Per-field entries -- one row per non-empty bio fact. Click any
+    # of them to open the full-bio textviewer dialog (consistent
+    # action regardless of which field is highlighted).
+    for label, plot in mms.bio_field_entries(row):
+        li = xbmcgui.ListItem(label=label)
+        li.setProperty("IsPlayable", "false")
+        if plot:
+            li.setInfo("video", {"plot": plot, "title": label})
+        xbmcplugin.addDirectoryItem(
+            handle=handle, url=profile_url, listitem=li, isFolder=True,
+        )
+
+    # Photo sets -- each carries the cover_url as the thumbnail and
+    # a show_picture URL so click opens the cover in Kodi's
+    # fullscreen image viewer (the actual photos are paywalled).
     photo_sets_raw = row.get("bio_photo_sets_json") or ""
     photo_sets: list[dict[str, Any]] = []
     if photo_sets_raw:
@@ -620,28 +642,152 @@ def _render_view_model_info(
     for pset in photo_sets:
         name = (pset.get("name") or "Photo set").strip()
         cover = (pset.get("cover_url") or "").strip()
-        cost = pset.get("tip_amount")
-        if isinstance(cost, int) and cost > 0:
-            label = f"[Photo set] {name} ({cost} tokens)"
-        else:
-            label = f"[Photo set] {name}"
+        # Token cost: biocontext gives ``tokens`` (or ``tip_amount`` in
+        # older payloads). Fall back to 0 if neither is present.
+        cost = pset.get("tokens")
+        if not isinstance(cost, int):
+            cost = pset.get("tip_amount")
+            if not isinstance(cost, int):
+                cost = 0
+        is_video = bool(pset.get("is_video"))
+        photo_count = pset.get("photo_count")
+        duration_s = pset.get("video_duration_in_seconds")
+
+        meta_bits: list[str] = []
+        if is_video:
+            if isinstance(duration_s, int) and duration_s > 0:
+                m, s = divmod(duration_s, 60)
+                meta_bits.append(f"{m}m{s:02d}s video")
+            else:
+                meta_bits.append("video")
+        elif isinstance(photo_count, int) and photo_count > 0:
+            meta_bits.append(f"{photo_count} photos")
+        if cost > 0:
+            meta_bits.append(f"{cost} tokens")
+        meta_bits.append("paywalled")
+
+        kind = "Video" if is_video else "Photo set"
+        meta_str = ", ".join(meta_bits)
+        label = f"[COLOR FF00d4ff][{kind}][/COLOR] {name} ({meta_str})"
+        plot = (
+            f"{name}\n\n"
+            f"{kind} -- {meta_str}\n"
+            f"Click to view the cover image fullscreen "
+            f"(the {kind.lower()} content is paywalled)."
+        )
+
         li = xbmcgui.ListItem(label=label)
         li.setProperty("IsPlayable", "false")
         if cover:
             li.setArt({"thumb": cover, "icon": cover, "fanart": cover})
-        # Clicking a photo set re-routes to view_model_info: Kodi shows
-        # the full-resolution cover (the only public part of the set)
-        # via its native artwork preview.
-        item_url = (
-            f"plugin://plugin.video.chaturbatetv/?mode=view_model_info"
-            f"&slug={slug}"
-        )
+        li.setInfo("video", {"plot": plot, "title": label})
+
+        if cover:
+            item_url = (
+                f"{plugin_prefix}?"
+                f"{urlencode({'mode': 'show_picture', 'url': cover})}"
+            )
+        else:
+            # No cover URL on this set -- routing to show_profile
+            # gives a useful click instead of a dead end.
+            item_url = profile_url
         xbmcplugin.addDirectoryItem(
             handle=handle, url=item_url, listitem=li, isFolder=True,
         )
 
     xbmcplugin.setContent(handle, "videos")
     xbmcplugin.endOfDirectory(handle, succeeded=True)
+
+
+def show_profile(
+    handle: int,
+    *,
+    slug: str = "",
+    **_params: Any,
+) -> None:
+    """v0.7.27: open a fullscreen scrollable textviewer dialog with
+    the model's full bio. Wired to clicks on any view_model_info
+    entry (header or per-field) so the user can read everything
+    without right-pane truncation.
+
+    Closes the directory with succeeded=False so Kodi keeps the user
+    on the parent view_model_info listing after they dismiss the
+    dialog.
+    """
+    from resources.lib import logger
+
+    slug = (slug or "").strip()
+    if not slug:
+        logger._log("show_profile: empty slug, closing")
+        _close_directory_handle(handle)
+        return
+
+    logger._log(f"show_profile: slug={slug!r}")
+
+    from resources.lib import model_meta_store as mms
+    row: dict[str, Any] = {}
+    try:
+        conn = mms.open_db(str(_model_meta_db_path()))
+        try:
+            row = mms.get_model(conn, slug) or {}
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger._log(f"show_profile: DB error slug={slug!r} err={exc!r}")
+
+    title = (row.get("real_name") or row.get("display_name")
+             or row.get("last_subject") or slug)
+    plot = mms.bio_full_plot_for_view_info(row)
+    if not plot:
+        plot = f"No profile data cached for {slug} yet."
+    heading = f"Profile: {title} ({slug})"
+
+    try:
+        import xbmcgui
+        xbmcgui.Dialog().textviewer(heading, plot)
+    except Exception as exc:
+        logger._log(f"show_profile: textviewer failed slug={slug!r} err={exc!r}")
+
+    # succeeded=False keeps the user on the parent view_model_info
+    # listing after the dialog is dismissed.
+    try:
+        import xbmcplugin
+        xbmcplugin.endOfDirectory(handle, succeeded=False)
+    except Exception as exc:
+        logger._log(f"endOfDirectory failed handle={handle} err={exc!r}")
+
+
+def show_picture(
+    handle: int,
+    *,
+    url: str = "",
+    **_params: Any,
+) -> None:
+    """v0.7.27: open the given image URL in Kodi's fullscreen picture
+    viewer via the ShowPicture builtin. Used by photo_set entries to
+    surface the cover (the only public image we have for paywalled
+    sets) at full resolution on click.
+    """
+    from resources.lib import logger
+
+    url = (url or "").strip()
+    if not url:
+        logger._log("show_picture: empty url, closing")
+        _close_directory_handle(handle)
+        return
+
+    logger._log(f"show_picture: url={url!r}")
+    try:
+        import xbmc
+        xbmc.executebuiltin(f"ShowPicture({url})")
+    except Exception as exc:
+        logger._log(f"show_picture: builtin failed err={exc!r}")
+
+    try:
+        import xbmcplugin
+        xbmcplugin.endOfDirectory(handle, succeeded=False)
+    except Exception as exc:
+        logger._log(f"endOfDirectory failed handle={handle} err={exc!r}")
 
 
 def deep_refresh_offline_meta(

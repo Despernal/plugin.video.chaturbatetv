@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <addon id="plugin.video.chaturbatetv"
        name="Chaturbate TV"
-       version="0.7.26"
+       version="0.7.27"
        provider-name="flux">
     <requires>
         <import addon="xbmc.python" version="3.0.0"/>
@@ -20,7 +20,19 @@
             <icon>icon.png</icon>
             <fanart>fanart.jpg</fanart>
         </assets>
-        <news>0.7.26 - HOTFIX for v0.7.25's "View info" entry. The ctxmenu was using RunPlugin() which fires the plugin URL with handle=-1 (action verb mode, no directory). The handler ran fine in the log -- biocontext fetched, DB upserted -- but addDirectoryItem(-1, ...) silently does nothing, so the user saw "nothing happens." Fixed by switching just the View info entry to Container.Update() which navigates the current container into the new directory listing with a real handle. Pinned by an updated test that asserts the ctxmenu entry uses Container.Update, not RunPlugin.
+        <news>0.7.27 - View info gets a per-field directory + working clicks.
+
+The Profile entry from v0.7.25/0.7.26 stuffed all the bio text into one listitem's plot. With long About-me / Wish list content the right pane got cut off and the user saw "Status, Verified, thumbnail" only. New layout: each non-empty bio field is its OWN entry on the LEFT (Sex, Age, Location, Followers, Last seen, Last broadcast, Verified, Body, Smoke / Drink, Fan club, Wish list, About, Social, Status, Tags). Long fields (Wish list, About, Social) get a truncated label plus the full value in the plot pane for hover preview. The first entry "[ View full profile ]" still opens a fullscreen scrollable textviewer dialog with everything.
+
+Profile + per-field clicks now actually do something. Previously they routed back to view_model_info which was a no-op. Now each click opens the show_profile textviewer dialog (xbmcgui.Dialog().textviewer) with the full bio. The dialog closes the directory with succeeded=False so the user lands back on the view_model_info listing instead of bouncing to the parent.
+
+Photo sets click into Kodi's fullscreen picture viewer. Each photo_set entry now carries the cover_url through a show_picture handler that fires xbmc.executebuiltin('ShowPicture(...)'). Labels got richer: "[Video] Pillow Humping (17m41s video, 150 tokens, paywalled)" or "[Photo set] Beach (30 photos, 99 tokens, paywalled)". Plot describes the set + tells the user the click opens the cover (since the actual content is paywalled and we don't have auth).
+
+New helpers in model_meta_store: bio_field_entries(row) returns the [(label, plot)] list driving the per-field listitems, mirroring bio_full_plot_for_view_info but split into rows. New addon_actions handlers: show_profile (textviewer of full bio) and show_picture (ShowPicture builtin). xbmcgui.pyi stub got the textviewer signature so mypy --strict stays clean.
+
+Six new tests covering: show_profile opens textviewer with bio + closes directory with succeeded=False, show_profile no-op on empty slug, view_model_info Profile entry routes to show_profile (not the old no-op view_model_info), show_picture invokes ShowPicture(url) builtin, show_picture no-op on empty url, photo_set entries route through show_picture (not back to view_model_info).
+
+0.7.26 - HOTFIX for v0.7.25's "View info" entry. The ctxmenu was using RunPlugin() which fires the plugin URL with handle=-1 (action verb mode, no directory). The handler ran fine in the log -- biocontext fetched, DB upserted -- but addDirectoryItem(-1, ...) silently does nothing, so the user saw "nothing happens." Fixed by switching just the View info entry to Container.Update() which navigates the current container into the new directory listing with a real handle. Pinned by an updated test that asserts the ctxmenu entry uses Container.Update, not RunPlugin.
 
 0.7.25 - "View info" ctxmenu + rich profile pane. Right-click any model anywhere (browse, favs, TV list) and pick "View info" to drop into a directory whose first entry shows the FULL profile in the right pane: subject, sex/subgender, age, location, watching, followers, last seen, last broadcast, verified, body type, body decorations, smoke/drink, fan club cost, wish list, about-me, social medias, tags. Below the Profile entry, one item per photo_set carrying the cover_url as its thumbnail (label = name + token cost) -- the public part of every paywalled set is now scannable as a gallery without leaving Kodi.
 

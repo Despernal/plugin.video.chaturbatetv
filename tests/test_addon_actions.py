@@ -1208,6 +1208,244 @@ def test_view_model_info_skips_with_empty_slug(
     assert any(c.args and c.args[0] == 42 for c in end_calls)
 
 
+def test_show_profile_opens_textviewer_dialog(
+    kodi_mocks: dict[str, MagicMock],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v0.7.27: clicking the Profile entry inside view_model_info
+    opens a scrollable textviewer dialog with the full formatted bio.
+    The handler closes the directory with succeeded=False so the user
+    stays on the parent view_model_info listing after dismissing the
+    dialog.
+    """
+    actions = _import()
+    db_path = str(tmp_path / "meta.db")
+    monkeypatch.setattr(actions, "_model_meta_db_path",
+                        lambda: Path(db_path))
+
+    import resources.lib.model_meta_store as mms_real
+    conn = mms_real.open_db(db_path)
+    try:
+        bio = {
+            "room_status": "offline",
+            "real_name": "Evelyn",
+            "display_age": 24,
+            "location": "Earth",
+            "about_me": "Hi I am Evelyn",
+            "follower_count": 123,
+        }
+        mms_real.upsert_biocontext(conn, "alice", bio, now=1_000_000)
+    finally:
+        conn.close()
+
+    # Track Dialog().textviewer calls -- the v0.7.27 entry point.
+    textviewer_calls: list[tuple[str, str]] = []
+
+    class _DialogTracker:
+        def textviewer(self, heading: str, message: str,
+                       usemono: bool = False) -> None:
+            textviewer_calls.append((heading, message))
+
+        def notification(self, *a: Any, **kw: Any) -> None: ...
+        def input(self, *a: Any, **kw: Any) -> str:
+            return ""
+        def ok(self, *a: Any, **kw: Any) -> bool:
+            return True
+
+    kodi_mocks["xbmcgui"].Dialog = _DialogTracker
+
+    actions.show_profile(handle=42, slug="alice")
+
+    assert textviewer_calls, "Dialog().textviewer must be invoked"
+    heading, message = textviewer_calls[0]
+    assert "alice" in heading.lower() or "evelyn" in heading.lower(), (
+        f"heading should mention slug or real_name: {heading!r}"
+    )
+    # The message contains the full bio.
+    assert "Evelyn" in message or "Hi I am Evelyn" in message, (
+        f"message missing bio content: {message[:120]!r}"
+    )
+
+    # Directory closes with succeeded=False so Kodi keeps the user
+    # on the parent view_model_info listing after dismiss.
+    end_calls = kodi_mocks["xbmcplugin"].endOfDirectory.call_args_list
+    last_call = end_calls[-1]
+    handle_arg = last_call.args[0] if last_call.args else None
+    succeeded_kw = last_call.kwargs.get("succeeded", True)
+    assert handle_arg == 42 and succeeded_kw is False, (
+        f"expected endOfDirectory(42, succeeded=False), "
+        f"got args={last_call.args!r} kwargs={last_call.kwargs!r}"
+    )
+
+
+def test_show_profile_skips_with_empty_slug(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """No slug -> close dir silently, no Dialog open."""
+    actions = _import()
+    textviewer_calls: list[Any] = []
+
+    class _D:
+        def textviewer(self, h: str, m: str, usemono: bool = False) -> None:
+            textviewer_calls.append((h, m))
+        def notification(self, *a: Any, **kw: Any) -> None: ...
+        def input(self, *a: Any, **kw: Any) -> str:
+            return ""
+        def ok(self, *a: Any, **kw: Any) -> bool:
+            return True
+
+    kodi_mocks["xbmcgui"].Dialog = _D
+    actions.show_profile(handle=42, slug="")
+    assert textviewer_calls == []
+    end_calls = kodi_mocks["xbmcplugin"].endOfDirectory.call_args_list
+    assert any(c.args and c.args[0] == 42 for c in end_calls)
+
+
+def test_view_model_info_profile_entry_routes_to_show_profile(
+    kodi_mocks: dict[str, MagicMock],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Profile entry's URL must point at mode=show_profile so
+    clicking it opens the dialog instead of being a no-op."""
+    actions = _import()
+    db_path = str(tmp_path / "meta.db")
+    monkeypatch.setattr(actions, "_model_meta_db_path",
+                        lambda: Path(db_path))
+
+    import resources.lib.model_meta_store as mms_real
+    conn = mms_real.open_db(db_path)
+    try:
+        mms_real.upsert_biocontext(
+            conn, "alice",
+            {"room_status": "offline", "real_name": "Evelyn"},
+            now=1_000_000,
+        )
+    finally:
+        conn.close()
+
+    actions.view_model_info(
+        handle=42, slug="alice",
+        fetch_biocontext_func=lambda s: {},
+    )
+
+    add_calls = kodi_mocks["xbmcplugin"].addDirectoryItem.call_args_list
+    urls = []
+    for c in add_calls:
+        if "url" in c.kwargs:
+            urls.append(c.kwargs["url"])
+        elif len(c.args) >= 2:
+            urls.append(c.args[1])
+    assert any("mode=show_profile" in u and "slug=alice" in u
+               for u in urls), (
+        f"Profile entry must route to show_profile: urls={urls!r}"
+    )
+
+
+def test_show_picture_invokes_kodi_builtin(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """v0.7.27: clicking a photo_set entry fires the show_picture
+    handler which calls xbmc.executebuiltin('ShowPicture(<url>)')
+    so Kodi opens the cover in its fullscreen picture viewer.
+    """
+    actions = _import()
+    actions.show_picture(
+        handle=-1,
+        url="https://static-pub.example.com/cover.jpg",
+    )
+    bcalls = kodi_mocks["xbmc"].executebuiltin.call_args_list
+    cmds = [str(c.args[0]) if c.args else "" for c in bcalls]
+    assert any("ShowPicture(" in c
+               and "cover.jpg" in c for c in cmds), (
+        f"expected ShowPicture(<url>) builtin, got: {cmds!r}"
+    )
+
+
+def test_show_picture_skips_when_url_empty(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """No url -> silent no-op; the builtin is never called with an
+    empty arg (would open a blank Kodi picture viewer)."""
+    actions = _import()
+    actions.show_picture(handle=-1, url="")
+    bcalls = kodi_mocks["xbmc"].executebuiltin.call_args_list
+    cmds = [str(c.args[0]) if c.args else "" for c in bcalls]
+    assert not any("ShowPicture(" in c for c in cmds), (
+        f"ShowPicture must NOT fire on empty url: {cmds!r}"
+    )
+
+
+def test_view_model_info_photo_set_entries_use_show_picture(
+    kodi_mocks: dict[str, MagicMock],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v0.7.27: each photo_set entry's plugin URL should route through
+    show_picture so clicking opens the cover fullscreen, NOT loop back
+    to view_model_info (which was a no-op in 0.7.25/0.7.26).
+    """
+    import json as _json
+    actions = _import()
+    db_path = str(tmp_path / "meta.db")
+    monkeypatch.setattr(actions, "_model_meta_db_path",
+                        lambda: Path(db_path))
+
+    import resources.lib.model_meta_store as mms_real
+    conn = mms_real.open_db(db_path)
+    try:
+        bio = {
+            "room_status": "offline",
+            "real_name": "Evelyn",
+            "photo_sets": [
+                {"name": "Pillow Humping", "cover_url":
+                 "https://static-pub.example.com/cov1.jpg",
+                 "photo_count": 71, "tokens": 150,
+                 "is_video": True,
+                 "video_duration_in_seconds": 1061,
+                 "video_has_sound": True,
+                 "user_has_purchased": False, "user_can_access": False},
+                {"name": "Beach", "cover_url":
+                 "https://static-pub.example.com/cov2.jpg",
+                 "photo_count": 30, "tokens": 99,
+                 "is_video": False,
+                 "user_has_purchased": False, "user_can_access": False},
+            ],
+        }
+        mms_real.upsert_biocontext(conn, "alice", bio, now=1_000_000)
+    finally:
+        conn.close()
+
+    actions.view_model_info(
+        handle=42,
+        slug="alice",
+        fetch_biocontext_func=lambda s: {},  # row already fresh
+    )
+
+    add_calls = kodi_mocks["xbmcplugin"].addDirectoryItem.call_args_list
+    rendered_urls = []
+    for c in add_calls:
+        if "url" in c.kwargs:
+            rendered_urls.append(c.kwargs["url"])
+        elif len(c.args) >= 2:
+            rendered_urls.append(c.args[1])
+
+    # Profile entry stays on view_model_info; the photo_set entries
+    # must route through show_picture and carry the cover URL.
+    photo_urls = [u for u in rendered_urls if "show_picture" in u]
+    assert len(photo_urls) == 2, (
+        f"expected 2 show_picture URLs, got: {rendered_urls!r}"
+    )
+    joined = "\n".join(photo_urls)
+    assert "cov1.jpg" in joined or "cov1.jpg" in _json.dumps(joined), (
+        f"first cover URL missing from photo_set entries: {photo_urls!r}"
+    )
+    assert "cov2.jpg" in joined, (
+        f"second cover URL missing from photo_set entries: {photo_urls!r}"
+    )
+
+
 def test_deep_refresh_offline_meta_skips_when_locked(
     kodi_mocks: dict[str, MagicMock],
     tmp_path: Path,
