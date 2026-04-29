@@ -317,6 +317,80 @@ def tv_play(handle: int, store_path: Path | None = None,
     )
 
 
+def refresh_offline_meta(
+    handle: int,
+    *,
+    refresh_func: Any = None,
+    notify_func: Any = None,
+    spawn_func: Any = None,
+    **_params: Any,
+) -> None:
+    """Kick off a one-shot bulk-refresh that re-pulls the affiliate
+    feed and upserts every visible room into the model_meta DB.
+
+    Useful when the user wants the "Last seen" timestamps and cached
+    thumbnails on offline favs / TV-list refreshed RIGHT NOW instead
+    of waiting for the next 10-minute auto-poll. Runs on a daemon
+    thread so the directory click returns immediately and Kodi
+    doesn't show a spinner.
+
+    Notification at start ("Refreshing model info...") and finish
+    ("Done. Refreshed N rooms").
+
+    Dependency injection on the keyword-only args is for tests; the
+    default values point at the production paths.
+    """
+    from resources.lib import logger
+
+    if refresh_func is None:
+        refresh_func = _tv_bulk_refresh
+    if notify_func is None:
+        notify_func = _notify
+    if spawn_func is None:
+        import threading
+
+        def _default_spawn(target: Any) -> None:
+            t = threading.Thread(
+                target=target,
+                name="chaturbatetv-refresh-meta",
+                daemon=True,
+            )
+            t.start()
+        spawn_func = _default_spawn
+
+    logger._log("refresh_offline_meta: kicking off background refresh")
+    notify_func(
+        "Chaturbate TV",
+        "Refreshing model info... (will toast when done)",
+    )
+
+    def _bg() -> None:
+        try:
+            ok = refresh_func()
+        except Exception as exc:
+            logger._log(f"refresh_offline_meta: refresh raised err={exc!r}")
+            ok = False
+        if ok:
+            count_str = ""
+            try:
+                count_str = f" ({len(_TV_BULK_CACHE['slugs'])} rooms)"
+            except Exception:  # noqa: S110 - count is decorative; never block
+                pass            # the 'done' toast on a count-format hiccup.
+            notify_func(
+                "Chaturbate TV",
+                f"Model info refresh done{count_str}",
+            )
+            logger._log("refresh_offline_meta: done")
+        else:
+            notify_func(
+                "Chaturbate TV",
+                "Model info refresh failed - check logs",
+            )
+            logger._log("refresh_offline_meta: refresh returned False")
+
+    spawn_func(_bg)
+
+
 def open_settings(handle: int, **_params: Any) -> None:
     """Open the addon's settings dialog.
 
@@ -670,16 +744,46 @@ def tv_list(handle: int, store_path: Path | None = None,
     # this also in favorites?" without per-row disk reads.
     favs = favs_store.load(_favs_path())
     sorted_entries = priority_sort(entries)
+    # v0.7.19: batched meta lookup for all TV entries so each row can
+    # surface the last-seen-online time on the right of the name.
+    # Best-effort -- if the meta DB is missing or unreadable we just
+    # render bare like before.
+    meta_map: dict[str, dict[str, Any]] = {}
+    try:
+        from resources.lib import model_meta_store as mms
+        slugs_for_meta = [_slug_from_url(e.url) for e in sorted_entries]
+        conn = mms.open_db(str(_model_meta_db_path()))
+        try:
+            meta_map = mms.get_models(conn, slugs_for_meta)
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger._log(f"addon_actions.tv_list: meta lookup FAIL err={exc!r}")
     for e in sorted_entries:
-        label = f"[COLOR FF00d4ff][P{e.priority:02d}][/COLOR] {e.name}"
         slug = _slug_from_url(e.url)
+        label = f"[COLOR FF00d4ff][P{e.priority:02d}][/COLOR] {e.name}"
+        meta_row = meta_map.get(slug)
+        plot: str | None = None
+        image: str | None = None
+        if meta_row:
+            from resources.lib import model_meta_store as mms
+            ago = mms.last_seen_ago_label(meta_row)
+            if ago:
+                # Suffix on the right of the name -- HALO cyan so it
+                # blends with the existing [P##] tag styling.
+                label = f"{label}  [COLOR FF8899bb]({ago} ago)[/COLOR]"
+            image = mms.image_for_row(meta_row)
+            plot_str = mms.plot_for_offline_row(meta_row)
+            plot = plot_str or None
         ctx = ctxmenu.build_ctxmenu(
             {"slug": slug, "name": e.name, "url": e.url},
             tv_entries=entries,
             favs=favs,
         )
         kodi_helpers.add_play_item(
-            handle, label, slug=slug, ctx_items=ctx,
+            handle, label, slug=slug,
+            image=image, plot=plot,
+            ctx_items=ctx,
         )
     # unsorted=True so Kodi keeps our priority-descending order; without
     # it, Kodi alpha-sorts by label and "[P01]" lands above "[P17]" -

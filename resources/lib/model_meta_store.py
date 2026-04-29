@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from typing import Any
 
 
@@ -352,3 +353,123 @@ def get_models(conn: sqlite3.Connection, slugs: list[str]) -> dict[str, dict[str
 
 def count(conn: sqlite3.Connection) -> int:
     return int(conn.execute("SELECT COUNT(*) FROM models").fetchone()[0])
+
+
+# Render helpers (consumed by favs_views, addon_actions.tv_list) ---------- #
+
+
+def image_for_row(row: dict[str, Any]) -> str | None:
+    """Pick the best image URL we have cached for an offline row.
+
+    Preference order:
+      1. ``last_image_url`` -- full-size from the affiliate API.
+      2. ``last_image_url_thumb`` -- 360x270 from the affiliate API.
+      3. ``last_image_url_legacy`` -- ``img`` field from the per-gender
+         roomlist API.
+
+    Returns None if all three are absent or empty so the caller can
+    omit the image instead of feeding Kodi an empty path.
+    """
+    for key in ("last_image_url", "last_image_url_thumb",
+                "last_image_url_legacy"):
+        v = row.get(key)
+        if v:
+            return str(v)
+    return None
+
+
+def _format_seconds_ago(seconds: int) -> str:
+    """Mirror cb_listing._format_seconds_online so the Online line on
+    live views and the Last seen line on offline views read with
+    the same shape ("Xm" / "Xh Ym" / "Xd Yh"). Empty for under a
+    minute (the model effectively still being polled).
+    """
+    if seconds < 60:
+        return ""
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        h, rem = divmod(seconds, 3600)
+        m = rem // 60
+        return f"{h}h {m}m"
+    d, rem = divmod(seconds, 86400)
+    h = rem // 3600
+    return f"{d}d {h}h"
+
+
+def last_seen_ago_label(row: dict[str, Any], now: float | int | None = None) -> str:
+    """Return a "Xh Ym" / "Xd Yh" / "Xm" label or "" if we don't have
+    enough info to render. The latter case covers a brand-new row that
+    was just polled (no useful "ago"), a row missing
+    ``last_online_epoch``, or a future-dated epoch (clock skew).
+    """
+    epoch = row.get("last_online_epoch") or 0
+    try:
+        epoch = int(epoch)
+    except (TypeError, ValueError):
+        return ""
+    if epoch <= 0:
+        return ""
+    current = int(now if now is not None else time.time())
+    delta = current - epoch
+    if delta <= 0:
+        return ""
+    return _format_seconds_ago(delta)
+
+
+def _coalesce_int(v: Any) -> int:
+    if v is None:
+        return 0
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return 0
+
+
+def plot_for_offline_row(row: dict[str, Any], now: float | int | None = None) -> str:
+    """Build the plot info pane (left side in Kodi list views) from a
+    cached meta row, mirroring cb_listing.plot_for() so live and
+    offline views read the same way. Adds a "Last seen: Xh Ym" line
+    using last_online_epoch.
+
+    Sparse rows (we only have a handful of fields cached so far) emit
+    only the lines they have data for -- no empty "Location:" lines,
+    no "Watching: 0" when we don't actually know.
+    """
+    parts: list[str] = []
+
+    subject = row.get("last_subject")
+    if subject:
+        parts.append(str(subject))
+
+    age = row.get("age")
+    if age:
+        parts.append(f"[COLOR FF00d4ff]Age:[/COLOR] {age}")
+
+    location = row.get("location")
+    if location:
+        parts.append(f"[COLOR FF00d4ff]Location:[/COLOR] {location}")
+
+    viewers = _coalesce_int(row.get("last_viewers"))
+    if viewers > 0:
+        parts.append(f"[COLOR FF00d4ff]Watching:[/COLOR] {viewers}")
+
+    followers = _coalesce_int(row.get("last_followers"))
+    if followers > 0:
+        parts.append(f"[COLOR FF00d4ff]Followers:[/COLOR] {followers}")
+
+    last_seen = last_seen_ago_label(row, now=now)
+    if last_seen:
+        parts.append(f"[COLOR FF00d4ff]Last seen:[/COLOR] {last_seen}")
+
+    tags_raw = row.get("last_tags_json")
+    if tags_raw:
+        try:
+            tags = json.loads(tags_raw)
+        except (TypeError, ValueError):
+            tags = None
+        if isinstance(tags, list) and tags:
+            tag_str = ", ".join(f"#{t}" for t in tags)
+            parts.append(f"[COLOR FF00ff88]{tag_str}[/COLOR]")
+
+    return "\n".join(parts)

@@ -21,6 +21,7 @@ from resources.lib import (
     ctxmenu,
     favs_store,
     kodi_helpers,
+    model_meta_store,
     tv_store,
 )
 from resources.lib.cb_endpoints import online_rooms_affiliate_url
@@ -248,16 +249,54 @@ def favs_menu(handle: int, store_path: Path | None = None,
     kodi_helpers.end_directory(handle, content_type="videos")
 
 
+def _model_meta_db_path() -> Path:
+    """Resolve the sqlite path for the model_meta store. Same path
+    addon_actions uses; duplicated here so favs_views can read
+    independently without a circular import.
+    """
+    return _favs_path().parent / "model_meta.db"
+
+
+def _load_offline_meta_for(slugs: list[str]) -> dict[str, dict[str, Any]]:
+    """Batched read of cached meta for the given slugs. Empty map if
+    the DB doesn't exist yet (fresh install) or sqlite throws -- the
+    rendering path tolerates an empty map and falls back to the bare
+    label/no-image path.
+    """
+    if not slugs:
+        return {}
+    try:
+        conn = model_meta_store.open_db(str(_model_meta_db_path()))
+    except Exception:
+        # Meta is best-effort -- fresh install, missing parent dir,
+        # transient sqlite issue: render bare instead of crashing.
+        return {}
+    try:
+        return model_meta_store.get_models(conn, slugs)
+    except Exception:
+        return {}
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: S110 - close failure has nothing to handle
+            pass
+
+
 def _render_favs(handle: int, favs: list[Favorite],
-                 enrich_with_models: bool = False) -> None:
+                 enrich_with_models: bool = False,
+                 offline_meta: dict[str, dict[str, Any]] | None = None) -> None:
     """Add favorite entries with state-aware context menus.
 
     When ``enrich_with_models`` is True (online favs only - we have
     live data for them), we look up each slug in ``_bulk_models``
     and pass the room thumbnail + viewer count + plot info through
-    to the ListItem just like browse_views does. Offline favs render
-    as bare entries (no thumbnail or plot is available; we deliberately
-    do NOT scan 1000+ slugs to fish out stale metadata).
+    to the ListItem just like browse_views does.
+
+    When ``offline_meta`` is supplied (offline favs path -- v0.7.19),
+    each fav gets enriched from the model_meta sqlite store: cached
+    thumbnail, last subject, last viewers count for the label, and
+    a "Last seen: Xh Ym" line in the plot. Slugs the DB has never
+    seen still render as bare entries.
     """
     data_dir = _favs_path().parent
     tv_entries = tv_store.load(data_dir / "tv.json")
@@ -265,18 +304,35 @@ def _render_favs(handle: int, favs: list[Favorite],
         # Decorate the label with viewer count when we have the
         # live model data (matches browse_views.add_play_item shape).
         live_model = _bulk_models.get(f.slug) if enrich_with_models else None
+        meta_row = (offline_meta or {}).get(f.slug)
         label = _color_label(f.name, f.gender)
         if live_model and live_model.viewers:
             label = f"{label} [{live_model.viewers}]"
+        elif meta_row and meta_row.get("last_viewers"):
+            # Show the last-known viewer count for offline favs so a
+            # popular model who just went offline still reads as
+            # popular at a glance. Different bracket style so live and
+            # last-known are visually distinct.
+            label = f"{label} (~{meta_row['last_viewers']})"
         ctx = ctxmenu.build_ctxmenu(
             {"slug": f.slug, "name": f.name, "url": f.url},
             tv_entries=tv_entries,
             favs=favs,
         )
+        # Image / plot: live data wins, else cached meta, else nothing.
+        image: str | None = None
+        plot: str | None = None
+        if live_model:
+            image = live_model.image or None
+            plot = live_model.plot or None
+        elif meta_row:
+            image = model_meta_store.image_for_row(meta_row)
+            plot_str = model_meta_store.plot_for_offline_row(meta_row)
+            plot = plot_str or None
         kodi_helpers.add_play_item(
             handle, label, f.slug,
-            image=(live_model.image if live_model else None) or None,
-            plot=(live_model.plot if live_model else None) or None,
+            image=image,
+            plot=plot,
             ctx_items=ctx,
         )
 
@@ -336,18 +392,26 @@ def offline_favs_view(handle: int, store_path: Path | None = None,
                       fetch_func: _FetchFn | None = None,
                       page: Any = 1,
                       **_params: Any) -> None:
-    """Currently-offline favorites, paginated."""
+    """Currently-offline favorites, paginated.
+
+    v0.7.19: enriches each row with cached metadata from the
+    model_meta sqlite store (thumbnail, viewer count, plot info,
+    "Last seen" line). The bulk-refresh poll keeps that DB warm in
+    the background; this view does ONE batched read for just the
+    page's slugs and renders without any per-row HTTP.
+    """
     from resources.lib import logger
     path = store_path if store_path is not None else _favs_path()
     favs = favs_store.load(path)
     p = _coerce_page(page)
     _online, offline = _classify_favs(favs, fetch_func)
     page_items = _slice_page(offline, p)
+    meta_map = _load_offline_meta_for([f.slug for f in page_items])
     logger._log(
         f"favs_views.offline_favs_view: total={len(favs)} offline={len(offline)} "
-        f"page={p} showing={len(page_items)}"
+        f"page={p} showing={len(page_items)} meta_hits={len(meta_map)}"
     )
-    _render_favs(handle, page_items)
+    _render_favs(handle, page_items, offline_meta=meta_map)
     if (p * _FAVS_PER_PAGE) < len(offline):
         kodi_helpers.add_dir(handle, f"Next page ({p + 1})",
                              "favs_offline", page=p + 1)

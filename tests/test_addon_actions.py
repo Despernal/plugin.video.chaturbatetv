@@ -507,6 +507,115 @@ def test_tv_play_empty_list_notifies_and_returns(
     assert any("empty" in m.lower() for m in msgs)
 
 
+def test_refresh_offline_meta_spawns_thread_with_start_and_done_notifications(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """v0.7.20: clicking the 'Refresh offline model info' menu entry
+    must (1) toast 'Refreshing model info...' immediately so the
+    user sees feedback, (2) spawn a background thread that calls
+    _tv_bulk_refresh, (3) toast a 'done' notification when the
+    background work returns.
+
+    Tested via dependency injection on refresh_func / notify_func /
+    spawn_func so we don't actually fire a network call or a real
+    thread.
+    """
+    actions = _import()
+    notifies: list[tuple[str, str]] = []
+    spawn_calls: list[Any] = []
+
+    def fake_notify(heading: str, msg: str) -> None:
+        notifies.append((heading, msg))
+
+    def fake_refresh() -> bool:
+        return True
+
+    def fake_spawn(target: Any) -> None:
+        # Run target inline so we can observe the done notification.
+        spawn_calls.append(target)
+        target()
+
+    actions.refresh_offline_meta(
+        handle=42,
+        refresh_func=fake_refresh,
+        notify_func=fake_notify,
+        spawn_func=fake_spawn,
+    )
+
+    assert len(spawn_calls) == 1, "must spawn exactly one bg worker"
+    headings = [n[0] for n in notifies]
+    msgs = [n[1] for n in notifies]
+    assert all(h == "Chaturbate TV" for h in headings)
+    assert any("Refreshing" in m for m in msgs), (
+        f"missing 'Refreshing' start notification in {msgs!r}"
+    )
+    assert any(("done" in m.lower() or "refreshed" in m.lower()) for m in msgs), (
+        f"missing 'done' finish notification in {msgs!r}"
+    )
+
+
+def test_refresh_offline_meta_failure_notifies_user(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """If _tv_bulk_refresh returns False (network failure), the user
+    sees a 'failed' notification rather than a misleading 'done'
+    one. We don't bubble the exception."""
+    actions = _import()
+    notifies: list[tuple[str, str]] = []
+
+    def fake_notify(heading: str, msg: str) -> None:
+        notifies.append((heading, msg))
+
+    def fake_refresh_failing() -> bool:
+        return False
+
+    def fake_spawn(target: Any) -> None:
+        target()
+
+    actions.refresh_offline_meta(
+        handle=42,
+        refresh_func=fake_refresh_failing,
+        notify_func=fake_notify,
+        spawn_func=fake_spawn,
+    )
+
+    msgs = [n[1] for n in notifies]
+    assert any("fail" in m.lower() for m in msgs), (
+        f"failure notification missing in {msgs!r}"
+    )
+
+
+def test_refresh_offline_meta_swallows_refresh_exception(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """A raised exception inside the background refresh must not
+    propagate out of the bg worker -- daemon thread crashes are
+    silent and we'd lose the 'failure' notification too. Instead the
+    handler catches and notifies."""
+    actions = _import()
+    notifies: list[tuple[str, str]] = []
+
+    def fake_notify(heading: str, msg: str) -> None:
+        notifies.append((heading, msg))
+
+    def fake_refresh_raising() -> bool:
+        raise OSError("boom")
+
+    def fake_spawn(target: Any) -> None:
+        target()  # would raise if uncaught -> test would fail
+
+    # Should not raise.
+    actions.refresh_offline_meta(
+        handle=42,
+        refresh_func=fake_refresh_raising,
+        notify_func=fake_notify,
+        spawn_func=fake_spawn,
+    )
+
+    msgs = [n[1] for n in notifies]
+    assert any("fail" in m.lower() for m in msgs)
+
+
 def test_restart_kodi_runs_quit_builtin(
     kodi_mocks: dict[str, MagicMock],
 ) -> None:

@@ -308,3 +308,165 @@ def test_age_falls_back_from_display_age(tmp_path: Path) -> None:
     row = mms.get_model(conn, "bob")
     assert row is not None
     assert row["age"] == 22
+
+
+# Render helpers (consumed by favs_views + addon_actions.tv_list) ----------
+
+
+def test_image_for_row_prefers_image_url() -> None:
+    """When all three image columns are populated, prefer the
+    full-size image_url. The thumb is a 360x270 reduction, and
+    last_image_url_legacy is the per-gender API's ``img`` field which
+    may be a smaller / thumbnail-only URL."""
+    row = {
+        "last_image_url": "https://example.com/full.jpg",
+        "last_image_url_thumb": "https://example.com/thumb.jpg",
+        "last_image_url_legacy": "https://example.com/legacy.jpg",
+    }
+    assert mms.image_for_row(row) == "https://example.com/full.jpg"
+
+
+def test_image_for_row_falls_back_to_thumb() -> None:
+    row = {
+        "last_image_url": None,
+        "last_image_url_thumb": "https://example.com/thumb.jpg",
+        "last_image_url_legacy": None,
+    }
+    assert mms.image_for_row(row) == "https://example.com/thumb.jpg"
+
+
+def test_image_for_row_falls_back_to_legacy() -> None:
+    row = {
+        "last_image_url": None,
+        "last_image_url_thumb": None,
+        "last_image_url_legacy": "https://example.com/legacy.jpg",
+    }
+    assert mms.image_for_row(row) == "https://example.com/legacy.jpg"
+
+
+def test_image_for_row_returns_none_when_all_missing() -> None:
+    assert mms.image_for_row({}) is None
+    assert mms.image_for_row({"last_image_url": ""}) is None
+    assert mms.image_for_row({
+        "last_image_url": None,
+        "last_image_url_thumb": None,
+        "last_image_url_legacy": None,
+    }) is None
+
+
+def test_last_seen_ago_label_minutes() -> None:
+    """Under an hour -> "Xm"."""
+    label = mms.last_seen_ago_label(
+        {"last_online_epoch": 1_000_000}, now=1_000_000 + 5 * 60,
+    )
+    assert label == "5m"
+
+
+def test_last_seen_ago_label_hours() -> None:
+    label = mms.last_seen_ago_label(
+        {"last_online_epoch": 1_000_000}, now=1_000_000 + 6697,
+    )
+    assert label == "1h 51m"
+
+
+def test_last_seen_ago_label_days() -> None:
+    label = mms.last_seen_ago_label(
+        {"last_online_epoch": 1_000_000},
+        now=1_000_000 + 3 * 86400 + 14 * 3600,
+    )
+    assert label == "3d 14h"
+
+
+def test_last_seen_ago_label_under_a_minute_returns_empty() -> None:
+    """Just-polled-a-minute-ago = effectively still in the live feed.
+    No "last seen" label needed -- caller treats this as "online" for
+    rendering."""
+    label = mms.last_seen_ago_label(
+        {"last_online_epoch": 1_000_000}, now=1_000_000 + 30,
+    )
+    assert label == ""
+
+
+def test_last_seen_ago_label_no_epoch_returns_empty() -> None:
+    """Row has no last_online_epoch (defensive: shouldn't happen in
+    normal flow but the schema allows null somehow). Empty result so
+    the caller can omit the line."""
+    assert mms.last_seen_ago_label({}, now=1_000_000) == ""
+    assert mms.last_seen_ago_label({"last_online_epoch": 0}, now=1_000_000) == ""
+
+
+def test_last_seen_ago_label_future_epoch_returns_empty() -> None:
+    """Defensive: clock skew or bad data shouldn't produce a negative
+    duration. Treat future-dated as "now" (empty)."""
+    label = mms.last_seen_ago_label(
+        {"last_online_epoch": 2_000_000}, now=1_000_000,
+    )
+    assert label == ""
+
+
+def test_plot_for_offline_row_full() -> None:
+    """Mirrors the plot_for() shape for the live-side: Subject / Age
+    / Location / Watching / Followers / Tags lines, plus a new
+    "Last seen: Xh Ym" line so the offline view says how long ago.
+    Uses cyan accents to match the live-side aesthetic.
+    """
+    row = {
+        "slug": "alice",
+        "display_name": "Alice",
+        "age": 22,
+        "location": "California",
+        "last_subject": "first day on cam",
+        "last_tags_json": '["lovense", "blonde"]',
+        "last_viewers": 1234,
+        "last_followers": 5678,
+        "last_online_epoch": 1_000_000,
+    }
+    plot = mms.plot_for_offline_row(row, now=1_000_000 + 6697)
+    assert "first day on cam" in plot
+    assert "Age:" in plot and "22" in plot
+    assert "Location:" in plot and "California" in plot
+    assert "Watching:" in plot and "1234" in plot
+    assert "Followers:" in plot and "5678" in plot
+    assert "#lovense" in plot
+    assert "Last seen:" in plot
+    assert "1h 51m" in plot
+
+
+def test_plot_for_offline_row_partial_omits_missing_lines() -> None:
+    """Sparse row (early in our DB's life) -> we render what we have
+    and quietly skip the rest. No empty "Location:" line, etc.
+    """
+    row = {
+        "slug": "alice",
+        "last_viewers": 100,
+        "last_online_epoch": 1_000_000,
+    }
+    plot = mms.plot_for_offline_row(row, now=1_000_000 + 60)
+    # Location should not appear (no value).
+    assert "Location:" not in plot
+    # Watching should appear with viewers count.
+    assert "Watching:" in plot and "100" in plot
+    # Last seen at 1m -> "1m"
+    assert "1m" in plot
+
+
+def test_plot_for_offline_row_uses_8char_alpha_color_tags() -> None:
+    """Regression guard: every [COLOR <hex>] in the offline plot
+    must use 8-char AARRGGBB. 6-char gets rendered blank by Kodi.
+    """
+    import re
+    row = {
+        "slug": "alice",
+        "last_subject": "test",
+        "age": 22,
+        "location": "X",
+        "last_viewers": 1,
+        "last_followers": 1,
+        "last_tags_json": '["a"]',
+        "last_online_epoch": 1_000_000,
+    }
+    plot = mms.plot_for_offline_row(row, now=1_000_000 + 60)
+    for hex_val in re.findall(r"\[COLOR ([^\]]+)\]", plot):
+        assert len(hex_val) == 8, (
+            f"got {hex_val!r} ({len(hex_val)} chars) - Kodi needs 8-char AARRGGBB"
+        )

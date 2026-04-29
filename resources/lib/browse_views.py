@@ -88,6 +88,11 @@ def main_menu(handle: int, **_params: Any) -> None:
     )
     kodi_helpers.add_dir(
         handle,
+        "[COLOR FFc8e8f8]>> Refresh offline model info (last seen, thumbnails)[/COLOR]",
+        "refresh_offline_meta",
+    )
+    kodi_helpers.add_dir(
+        handle,
         "[COLOR FFff8080]>> Restart Kodi (clears stuck audio buffer)[/COLOR]",
         "restart_kodi",
     )
