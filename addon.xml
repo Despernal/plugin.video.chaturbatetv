@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <addon id="plugin.video.chaturbatetv"
        name="Chaturbate TV"
-       version="0.7.25"
+       version="0.7.26"
        provider-name="flux">
     <requires>
         <import addon="xbmc.python" version="3.0.0"/>
@@ -20,7 +20,9 @@
             <icon>icon.png</icon>
             <fanart>fanart.jpg</fanart>
         </assets>
-        <news>0.7.25 - "View info" ctxmenu + rich profile pane. Right-click any model anywhere (browse, favs, TV list) and pick "View info" to drop into a directory whose first entry shows the FULL profile in the right pane: subject, sex/subgender, age, location, watching, followers, last seen, last broadcast, verified, body type, body decorations, smoke/drink, fan club cost, wish list, about-me, social medias, tags. Below the Profile entry, one item per photo_set carrying the cover_url as its thumbnail (label = name + token cost) -- the public part of every paywalled set is now scannable as a gallery without leaving Kodi.
+        <news>0.7.26 - HOTFIX for v0.7.25's "View info" entry. The ctxmenu was using RunPlugin() which fires the plugin URL with handle=-1 (action verb mode, no directory). The handler ran fine in the log -- biocontext fetched, DB upserted -- but addDirectoryItem(-1, ...) silently does nothing, so the user saw "nothing happens." Fixed by switching just the View info entry to Container.Update() which navigates the current container into the new directory listing with a real handle. Pinned by an updated test that asserts the ctxmenu entry uses Container.Update, not RunPlugin.
+
+0.7.25 - "View info" ctxmenu + rich profile pane. Right-click any model anywhere (browse, favs, TV list) and pick "View info" to drop into a directory whose first entry shows the FULL profile in the right pane: subject, sex/subgender, age, location, watching, followers, last seen, last broadcast, verified, body type, body decorations, smoke/drink, fan club cost, wish list, about-me, social medias, tags. Below the Profile entry, one item per photo_set carrying the cover_url as its thumbnail (label = name + token cost) -- the public part of every paywalled set is now scannable as a gallery without leaving Kodi.
 
 Inline freshness: when the DB row has no bio_fetched_epoch yet (a model we've never auto-tracked or never deep-crawled), view_model_info does ONE biocontext fetch + upsert before rendering. ~1s in the common case; the user gets fresh data on first click without ever hitting "no info" emptiness. If the fetch fails entirely (network blip / banned account), the directory still closes cleanly so Kodi isn't stuck on the busy spinner.
 

@@ -156,13 +156,19 @@ def test_ctxmenu_update_model_info_present_for_in_tv_in_favs() -> None:
 def test_ctxmenu_includes_view_info() -> None:
     """v0.7.25: every model row's context menu offers a "View info"
     entry that opens a directory with the full bio in plot + browseable
-    photo_sets."""
+    photo_sets. Uses Container.Update (NOT RunPlugin) so Kodi
+    navigates into the new listing -- RunPlugin fires with handle=-1
+    which silently breaks addDirectoryItem and shows nothing.
+    """
     items = build_ctxmenu(_model("alice"), tv_entries=[], favs=[])
     labels = [label for label, _ in items]
     assert any("View info" in lbl for lbl in labels), (
         f"ctxmenu missing 'View info' entry: {labels!r}"
     )
     cmd = next(c for lbl, c in items if "View info" in lbl)
+    assert "Container.Update" in cmd, (
+        f"View info must navigate via Container.Update, got: {cmd!r}"
+    )
     assert "mode=view_model_info" in cmd
     assert "slug=alice" in cmd
 

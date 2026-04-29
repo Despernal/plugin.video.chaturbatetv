@@ -33,6 +33,23 @@ def _runplugin(mode: str, **params: Any) -> str:
     return f"RunPlugin({_PLUGIN_PREFIX}?{qs})"
 
 
+def _container_update(mode: str, **params: Any) -> str:
+    """Container.Update navigates the current view to the given plugin
+    URL, invoking the handler with a real directory handle. Use this
+    for ctxmenu entries that produce a NEW directory listing (View
+    info), not just an action-and-return verb. RunPlugin's handle=-1
+    silently breaks addDirectoryItem -- we'd see the handler run in
+    the log but no UI changes.
+    """
+    qs_dict = {"mode": mode}
+    for k, v in params.items():
+        if v is None:
+            continue
+        qs_dict[k] = str(v)
+    qs = urlencode(qs_dict)
+    return f"Container.Update({_PLUGIN_PREFIX}?{qs})"
+
+
 def _find_tv_entry(url: str, tv_entries: list[TVEntry]) -> TVEntry | None:
     for e in tv_entries:
         if e.url == url:
@@ -94,9 +111,11 @@ def build_ctxmenu(
     # bio in the right pane plus browseable photo_sets. Always
     # present; the directory does an inline biocontext fetch when
     # the DB row is empty so even never-seen-online models render.
+    # Container.Update (not RunPlugin) so Kodi navigates into the new
+    # directory listing instead of firing a handle=-1 invocation.
     items.append(
         ("View info",
-         _runplugin("view_model_info", slug=slug)),
+         _container_update("view_model_info", slug=slug)),
     )
 
     return items
