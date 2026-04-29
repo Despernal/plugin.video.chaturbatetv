@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <addon id="plugin.video.chaturbatetv"
        name="Chaturbate TV"
-       version="0.7.28"
+       version="0.7.29"
        provider-name="flux">
     <requires>
         <import addon="xbmc.python" version="3.0.0"/>
@@ -20,7 +20,15 @@
             <icon>icon.png</icon>
             <fanart>fanart.jpg</fanart>
         </assets>
-        <news>0.7.28 - Three fixes the user spotted on .
+        <news>0.7.29 HOTFIX: silent-stub black-screen loop on solo-tier offlines.
+
+User reported "looping black" on : TV mode picked a P12 tier with a single offline slug (model_a), played the silent stub, and re-picked the SAME slug forever. The v0.7.21 fix was supposed to mark the slug offline in the local bulk-live cache after the silent stub played, breaking the loop -- but the fix relied on ``xbmc.PlayList(...).getposition()`` which returns -1 once the stub finishes (Kodi has already reset the playlist). The slug-extraction got "" every iteration, the mark-offline silently no-op'd, and the loop never broke.
+
+Fix: extracted ``_resolve_silent_stub_slug(live_path, queued_paths)`` that tries the live playlist path first, then falls back to ``player.queued_paths`` (captured at playlist-build time when it's reliably non-empty) when the live peek fails. For single-slug tiers we now know exactly which slug just played the stub. Multi-slug tiers with empty live path don't fall back -- we'd risk marking a still-live item, so we leave the cache alone and let the periodic bulk-poll refresh clean it up.
+
+Four new tests: live-path-wins, single-slug-fallback, multi-slug-no-fallback, empty/None queued_paths defensive. 648 tests passing total.
+
+0.7.28 - Three fixes the user spotted on .
 
 [1] Last broadcast timezone bug. Spot check vs CB's own time_since_last_broadcast string proved biocontext serves last_broadcast in PACIFIC TIME with NO timezone marker -- not UTC. v0.7.27's _parse_iso_to_epoch treated naive ISO as UTC, so every Last broadcast line read 7-8h stale (matched model_f's reported "11h ago" vs "Last seen: 4h ago" gap exactly). Fix: when fromisoformat returns a naive datetime, attach America/Los_Angeles via zoneinfo (with a static -7 fallback if tzdata is missing). Three new parser tests pin Pacific-naive, explicit-Z, and explicit -07:00 forms. Bonus: last_broadcast_epoch / iso / human moved to the always-overwrite set in upsert_biocontext so existing wrong-tz epochs get fixed automatically on the next deep refresh -- no manual migration.
 

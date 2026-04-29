@@ -189,6 +189,73 @@ def test_slug_from_playlist_path_extracts_slug(kodi_mods: dict[str, Any]) -> Non
     assert tl._slug_from_playlist_path("") == ""
 
 
+def test_resolve_silent_stub_slug_uses_live_path_when_present(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """v0.7.29: when Kodi's playlist position is still valid post-stub
+    the live path wins -- no fallback needed. ``fallback_used`` is
+    False in this case."""
+    tl = _import()
+    slug, fb = tl._resolve_silent_stub_slug(
+        "plugin://plugin.video.chaturbatetv/?mode=playvid&slug=alice",
+        {"plugin://plugin.video.chaturbatetv/?mode=playvid&slug=alice"},
+    )
+    assert slug == "alice"
+    assert fb is False
+
+
+def test_resolve_silent_stub_slug_falls_back_when_path_empty(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """v0.7.29 regression fix: pl.getposition() returns -1 once the
+    silent stub finishes, so live ``queued_path`` is "". For
+    single-slug tiers we fall back to the queued_paths set captured
+    at playlist-build time. ``fallback_used`` is True so the caller
+    can log the branch."""
+    tl = _import()
+    slug, fb = tl._resolve_silent_stub_slug(
+        "",
+        {"plugin://plugin.video.chaturbatetv/?mode=playvid&slug=alice&name=alice"},
+    )
+    assert slug == "alice"
+    assert fb is True
+
+
+def test_resolve_silent_stub_slug_skips_fallback_for_multi_slug_tiers(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """Multi-slug tier + empty live path = we don't know which item
+    played the stub, so we DON'T mark anything (over-marking would
+    drop a still-live model). Returns ('', False); caller logs and
+    moves on, periodic bulk-poll refresh cleans up."""
+    tl = _import()
+    slug, fb = tl._resolve_silent_stub_slug(
+        "",
+        {
+            "plugin://plugin.video.chaturbatetv/?mode=playvid&slug=alice",
+            "plugin://plugin.video.chaturbatetv/?mode=playvid&slug=bob",
+        },
+    )
+    assert slug == ""
+    assert fb is False
+
+
+def test_resolve_silent_stub_slug_handles_empty_queued_paths(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """No queued_paths captured (defensive) + empty live path -> no
+    mark, no crash."""
+    tl = _import()
+    slug, fb = tl._resolve_silent_stub_slug("", set())
+    assert slug == ""
+    assert fb is False
+    # None should also be tolerated (player.queued_paths can be None
+    # before the first playlist build).
+    slug2, fb2 = tl._resolve_silent_stub_slug("", None)
+    assert slug2 == ""
+    assert fb2 is False
+
+
 def test_is_internal_advance_true_for_queued_path(
     kodi_mods: dict[str, Any],
 ) -> None:

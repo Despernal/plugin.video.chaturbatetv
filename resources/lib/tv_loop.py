@@ -248,6 +248,39 @@ def _slug_from_playlist_path(path: str | None) -> str:
         return ""
 
 
+def _resolve_silent_stub_slug(
+    queued_path: str | None,
+    queued_paths: set[str] | frozenset[str] | None,
+) -> tuple[str, bool]:
+    """Pick the slug that just played the silent stub.
+
+    Tries the live ``playlist[pos].getPath()`` path first
+    (``queued_path``). When the silent stub finishes Kodi often resets
+    the playlist position, leaving ``queued_path`` empty -- the v0.7.21
+    fix relied on the live path and so silently no-op'd, wedging the
+    loop in a black-screen cycle on solo-tier offlines (v0.7.29
+    regression observed by the user).
+
+    Fallback (v0.7.29): if the live path is empty AND ``queued_paths``
+    has exactly one entry (single-slug tier), pull the slug from
+    that. Returns ``(slug, fallback_used)`` so the caller can log the
+    branch taken.
+
+    Multi-slug tiers with empty live path get ``("", False)``: we
+    can't tell which item played the stub, so we leave the cache
+    alone and let the periodic bulk-poll refresh clean it up.
+    """
+    skip_slug = _slug_from_playlist_path(queued_path)
+    if skip_slug:
+        return skip_slug, False
+    if queued_paths and len(queued_paths) == 1:
+        only_path = next(iter(queued_paths))
+        slug = _slug_from_playlist_path(only_path)
+        if slug:
+            return slug, True
+    return "", False
+
+
 def _build_playlist_url(slug: str, name: str) -> str:
     """Build the plugin URL the TV loop queues for a model.
 
@@ -789,29 +822,29 @@ def tv_play(
                 if (not player.user_stopped
                         and not player.switched
                         and _was_silent_stub_played(player.tracked_file)):
+                    queued_path = ""
                     try:
                         pl = xbmc.PlayList(xbmc.PLAYLIST_VIDEO)
                         pos = pl.getposition()
                         size = pl.size()
                         if 0 <= pos < size:
                             queued_path = pl[pos].getPath()
-                        else:
-                            queued_path = ""
                     except Exception:
-                        # Playlist access is best-effort; if Kodi
-                        # has already cleared the playlist between
-                        # the play() and our peek, just skip the
-                        # mark-offline step rather than crashing.
                         queued_path = ""
-                    skip_slug = _slug_from_playlist_path(queued_path)
+                    skip_slug, fallback_used = _resolve_silent_stub_slug(
+                        queued_path, player.queued_paths,
+                    )
                     if skip_slug:
                         try:
                             from resources.lib import addon_actions as _aa
                             _aa._tv_bulk_mark_offline(skip_slug)
                             _safe_log(
                                 f"tv_loop.tv_play: silent-stub played for "
-                                f"slug={skip_slug!r}; dropped from local "
-                                f"bulk-live cache so next pick_target skips it"
+                                f"slug={skip_slug!r}"
+                                + (" (queued_paths fallback)"
+                                   if fallback_used else "")
+                                + "; dropped from local bulk-live "
+                                "cache so next pick_target skips it"
                             )
                         except Exception as exc:
                             _safe_log(
@@ -822,7 +855,8 @@ def tv_play(
                         _safe_log(
                             "tv_loop.tv_play: silent-stub played but "
                             "couldn't extract slug from playlist path "
-                            f"{queued_path!r}"
+                            f"{queued_path!r} or queued_paths "
+                            f"{player.queued_paths!r}"
                         )
 
                 if player.user_stopped:
