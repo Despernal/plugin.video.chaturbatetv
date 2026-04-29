@@ -501,6 +501,149 @@ def refresh_one_model(
         notify_func("Chaturbate TV", f"{slug}: refresh failed")
 
 
+def view_model_info(
+    handle: int,
+    *,
+    slug: str = "",
+    fetch_biocontext_func: Any = None,
+    **_params: Any,
+) -> None:
+    """v0.7.25: open a directory with the model's full profile and
+    browseable photo_sets.
+
+    The directory contains:
+
+    1. A non-playable "Profile" entry whose ``plot`` is the full bio
+       rendering (Sex, Age, Body, Fan club, About, Wish list, etc).
+       Kodi shows the plot in the right pane on hover, so the user
+       reads the bio without an extra click.
+    2. One entry per ``bio_photo_sets`` set, each with the set's
+       ``cover_url`` as the thumbnail. Public images only -- the
+       photos themselves are paywalled, but the cover is the part
+       biocontext gives us free.
+
+    When the DB row for this slug has no ``bio_fetched_epoch`` (never
+    crawled), we do an inline biocontext fetch + upsert so the user
+    gets fresh data on first click. Synchronous; biocontext is one
+    HTTP and ~1s in the common case.
+    """
+    from resources.lib import logger
+
+    if fetch_biocontext_func is None:
+        from resources.lib import cb_client as _cb_client
+        fetch_biocontext_func = _cb_client.fetch_biocontext
+
+    slug = (slug or "").strip()
+    if not slug:
+        logger._log("view_model_info: empty slug, closing directory")
+        _close_directory_handle(handle)
+        return
+
+    logger._log(f"view_model_info: starting slug={slug!r}")
+
+    from resources.lib import model_meta_store as mms
+    import time as _time
+    row: dict[str, Any] = {}
+    try:
+        conn = mms.open_db(str(_model_meta_db_path()))
+        try:
+            row = mms.get_model(conn, slug) or {}
+            # Fetch inline when the row has no bio coverage yet.
+            if not row.get("bio_fetched_epoch"):
+                bio: dict[str, Any] = {}
+                try:
+                    bio = fetch_biocontext_func(slug)
+                except Exception as exc:
+                    logger._log(
+                        f"view_model_info: biocontext fetch failed "
+                        f"slug={slug!r} err={exc!r}"
+                    )
+                    bio = {}
+                if bio:
+                    mms.upsert_biocontext(
+                        conn, slug, bio, now=int(_time.time()),
+                    )
+                    row = mms.get_model(conn, slug) or {}
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger._log(f"view_model_info: DB error slug={slug!r} err={exc!r}")
+        row = {}
+
+    _render_view_model_info(handle, slug=slug, row=row)
+
+
+def _render_view_model_info(
+    handle: int, *, slug: str, row: dict[str, Any],
+) -> None:
+    """Build the directory listing for view_model_info: Profile entry +
+    one item per photo_set."""
+    import xbmcgui
+    import xbmcplugin
+    from resources.lib import model_meta_store as mms
+    import json as _json
+
+    title = (row.get("real_name") or row.get("display_name")
+             or row.get("last_subject") or slug)
+    plot = mms.bio_full_plot_for_view_info(row)
+    image = mms.image_for_row(row) or None
+
+    profile_label = f"[COLOR FF00d4ff]Profile: {title}[/COLOR]"
+    profile_li = xbmcgui.ListItem(label=profile_label)
+    profile_li.setProperty("IsPlayable", "false")
+    if image:
+        profile_li.setArt({"thumb": image, "icon": image, "fanart": image})
+    if plot:
+        profile_li.setInfo("video", {"plot": plot, "title": profile_label})
+    # Profile is informational, not navigable. Use a plugin URL that
+    # routes back to view_model_info so a click is a no-op refresh
+    # rather than an error.
+    profile_url = (
+        f"plugin://plugin.video.chaturbatetv/?mode=view_model_info"
+        f"&slug={slug}"
+    )
+    xbmcplugin.addDirectoryItem(
+        handle=handle, url=profile_url, listitem=profile_li, isFolder=True,
+    )
+
+    # Photo sets -- each carries the cover_url as the thumbnail.
+    photo_sets_raw = row.get("bio_photo_sets_json") or ""
+    photo_sets: list[dict[str, Any]] = []
+    if photo_sets_raw:
+        try:
+            parsed = _json.loads(photo_sets_raw)
+        except (TypeError, ValueError):
+            parsed = None
+        if isinstance(parsed, list):
+            photo_sets = [p for p in parsed if isinstance(p, dict)]
+
+    for pset in photo_sets:
+        name = (pset.get("name") or "Photo set").strip()
+        cover = (pset.get("cover_url") or "").strip()
+        cost = pset.get("tip_amount")
+        if isinstance(cost, int) and cost > 0:
+            label = f"[Photo set] {name} ({cost} tokens)"
+        else:
+            label = f"[Photo set] {name}"
+        li = xbmcgui.ListItem(label=label)
+        li.setProperty("IsPlayable", "false")
+        if cover:
+            li.setArt({"thumb": cover, "icon": cover, "fanart": cover})
+        # Clicking a photo set re-routes to view_model_info: Kodi shows
+        # the full-resolution cover (the only public part of the set)
+        # via its native artwork preview.
+        item_url = (
+            f"plugin://plugin.video.chaturbatetv/?mode=view_model_info"
+            f"&slug={slug}"
+        )
+        xbmcplugin.addDirectoryItem(
+            handle=handle, url=item_url, listitem=li, isFolder=True,
+        )
+
+    xbmcplugin.setContent(handle, "videos")
+    xbmcplugin.endOfDirectory(handle, succeeded=True)
+
+
 def deep_refresh_offline_meta(
     handle: int,
     *,

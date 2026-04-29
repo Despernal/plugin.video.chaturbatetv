@@ -90,4 +90,13 @@ def build_ctxmenu(
          _runplugin("refresh_one_model", slug=slug)),
     )
 
+    # v0.7.25: "View info" opens the rich profile directory -- full
+    # bio in the right pane plus browseable photo_sets. Always
+    # present; the directory does an inline biocontext fetch when
+    # the DB row is empty so even never-seen-online models render.
+    items.append(
+        ("View info",
+         _runplugin("view_model_info", slug=slug)),
+    )
+
     return items

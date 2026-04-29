@@ -893,3 +893,111 @@ def test_plot_for_offline_row_uses_8char_alpha_color_tags() -> None:
         assert len(hex_val) == 8, (
             f"got {hex_val!r} ({len(hex_val)} chars) - Kodi needs 8-char AARRGGBB"
         )
+
+
+# --------------------------------------------------------------------------- #
+# v0.7.25: bio_full_plot_for_view_info -- the rich profile rendering
+# fed to the View-info directory's "Profile" item.
+# --------------------------------------------------------------------------- #
+
+
+def test_bio_full_plot_renders_all_fields() -> None:
+    """Full biocontext-populated row -> the view-info plot includes
+    every header line we promised the user. Subject (real_name when
+    no last_subject), Sex/Subgender, Age, Location, Followers,
+    Last seen, Last broadcast, Verified, Body type, Body decorations,
+    Smoke/drink, Fan club, Wish list, About me, Social medias, Tags.
+    """
+    row = {
+        "slug": "alice",
+        "real_name": "Evelyn",
+        "age": 24,
+        "location": "Earth",
+        "last_followers": 12345,
+        "last_online_epoch": 1_000_000,
+        "last_broadcast_epoch": 1_000_000,
+        "last_status_check_epoch": 1_000_000,
+        "bio_sex": "Female",
+        "bio_subgender": "TGirl",
+        "bio_body_type": "petite",
+        "bio_body_decorations": "tattoos, piercings",
+        "bio_smoke_drink": "social",
+        "bio_fan_club_cost": 100,
+        "bio_performer_has_fanclub": 1,
+        "bio_wish_list_html": "all the things",
+        "bio_about_html": "Hi I'm Evelyn",
+        "bio_social_medias_json": json.dumps([
+            {"platform": "twitter", "url_or_handle": "@evelyn"},
+            {"platform": "instagram", "url_or_handle": "@e_insta"},
+        ]),
+        "last_tags_json": json.dumps(["new", "petite"]),
+    }
+    plot = mms.bio_full_plot_for_view_info(row, now=1_000_000 + 600)
+    # Heading line uses real_name when no last_subject.
+    assert "Evelyn" in plot
+    # Standard offline render lines still appear.
+    assert "Age:" in plot and "24" in plot
+    assert "Location:" in plot and "Earth" in plot
+    assert "Followers:" in plot and "12345" in plot
+    assert "Last broadcast:" in plot
+    assert "Verified:" in plot
+    # Bio-specific richer lines.
+    assert "Sex:" in plot and "Female" in plot
+    assert "TGirl" in plot
+    assert "Body:" in plot and "petite" in plot
+    assert "tattoos" in plot
+    assert "Smoke" in plot or "Drink" in plot
+    assert "Fan club:" in plot and "100" in plot
+    assert "Wish list:" in plot and "all the things" in plot
+    assert "About:" in plot and "Evelyn" in plot
+    # Social medias rendered as a single line with platform names.
+    assert "Social:" in plot
+    assert "twitter" in plot.lower() or "@evelyn" in plot.lower()
+    # Tags survive.
+    assert "#new" in plot or "#petite" in plot
+
+
+def test_bio_full_plot_omits_missing_fields() -> None:
+    """Sparse row -> no empty header lines. The output must contain
+    only lines we have data for."""
+    row = {
+        "slug": "ghost",
+        "last_room_status": "offline",
+    }
+    plot = mms.bio_full_plot_for_view_info(row, now=1_000_000)
+    # No header tags whose data we don't have.
+    assert "Body:" not in plot
+    assert "Fan club:" not in plot
+    assert "Sex:" not in plot
+    assert "Wish list:" not in plot
+    assert "Social:" not in plot
+    # Status line is OK to keep since we DO have it.
+    # The output should still be a well-formed string (possibly empty).
+    assert isinstance(plot, str)
+
+
+def test_bio_full_plot_uses_8char_alpha_color_tags() -> None:
+    """Same regression guard as the offline plot: every [COLOR <hex>]
+    must be 8 chars (AARRGGBB), or Kodi renders it blank."""
+    import re
+    row = {
+        "slug": "alice",
+        "real_name": "Evelyn",
+        "age": 24,
+        "location": "Earth",
+        "last_followers": 100,
+        "last_online_epoch": 1_000_000,
+        "bio_sex": "Female",
+        "bio_subgender": "TGirl",
+        "bio_body_type": "petite",
+        "bio_smoke_drink": "social",
+        "bio_fan_club_cost": 100,
+        "bio_performer_has_fanclub": 1,
+        "bio_about_html": "hi",
+        "last_tags_json": json.dumps(["new"]),
+    }
+    plot = mms.bio_full_plot_for_view_info(row, now=1_000_000 + 60)
+    for hex_val in re.findall(r"\[COLOR ([^\]]+)\]", plot):
+        assert len(hex_val) == 8, (
+            f"got {hex_val!r} ({len(hex_val)} chars) - Kodi needs 8-char AARRGGBB"
+        )

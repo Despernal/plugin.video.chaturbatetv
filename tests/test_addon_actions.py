@@ -1015,6 +1015,199 @@ def test_refresh_one_model_skips_with_empty_slug(
     assert statuses == []
 
 
+# --------------------------------------------------------------------------- #
+# v0.7.25: view_model_info -- right-click "View info" handler. Renders
+# a directory listing with a Profile entry (full bio in plot) plus one
+# entry per photo_set. Fetches biocontext inline when the DB row has
+# no bio data yet so a never-seen-online model still renders rich.
+# --------------------------------------------------------------------------- #
+
+
+def test_view_model_info_renders_existing_row_no_inline_fetch(
+    kodi_mocks: dict[str, MagicMock],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the DB row already has a bio_fetched_epoch, view_model_info
+    renders the directory directly with no biocontext HTTP -- we have
+    fresh enough data already."""
+    import json as _json
+    actions = _import()
+    db_path = str(tmp_path / "meta.db")
+    monkeypatch.setattr(actions, "_model_meta_db_path",
+                        lambda: Path(db_path))
+
+    # Pre-seed a row with biocontext data.
+    import resources.lib.model_meta_store as mms_real
+    conn = mms_real.open_db(db_path)
+    try:
+        bio = {
+            "room_status": "offline",
+            "real_name": "Evelyn",
+            "display_age": 24,
+            "location": "Earth",
+            "follower_count": 100,
+            "sex": "Female",
+            "subgender": "TGirl",
+            "about_me": "hi I'm Evelyn",
+            "photo_sets": [
+                {"name": "Set A", "cover_url": "http://thumb/seta.jpg",
+                 "tip_amount": 100},
+                {"name": "Set B", "cover_url": "http://thumb/setb.jpg",
+                 "tip_amount": 250},
+            ],
+        }
+        mms_real.upsert_biocontext(conn, "alice", bio, now=1_000_000)
+    finally:
+        conn.close()
+
+    bios_fetched: list[str] = []
+
+    def fake_biocontext(slug: str) -> dict[str, Any]:
+        bios_fetched.append(slug)
+        return {}
+
+    actions.view_model_info(
+        handle=42,
+        slug="alice",
+        fetch_biocontext_func=fake_biocontext,
+    )
+
+    # Row was fresh -> no inline biocontext call.
+    assert bios_fetched == [], (
+        f"unexpected biocontext fetch -- row was already fresh: {bios_fetched!r}"
+    )
+
+    # Directory was rendered: addDirectoryItem was called at least once
+    # (the Profile entry plus one per photo_set = 3).
+    add_calls = kodi_mocks["xbmcplugin"].addDirectoryItem.call_args_list
+    assert len(add_calls) >= 3, (
+        f"expected >=3 directory items (Profile + 2 photo sets), got {len(add_calls)}"
+    )
+
+    # endOfDirectory was called to close the listing.
+    end_calls = kodi_mocks["xbmcplugin"].endOfDirectory.call_args_list
+    assert any(c.args and c.args[0] == 42 for c in end_calls), (
+        "endOfDirectory not called -- listing won't close"
+    )
+
+    # At least one of the rendered URLs should reference the photo_set
+    # cover -- unsure of art-mock shape but verify the URL strings on
+    # addDirectoryItem mention the slug or carry the cover URL.
+    rendered_urls = [
+        c.kwargs.get("url", "") if "url" in c.kwargs else
+        (c.args[1] if len(c.args) >= 2 else "")
+        for c in add_calls
+    ]
+    # The photo_set entries should encode the cover URLs somewhere
+    # (we look at addDirectoryItem urls AND the listitem art via the
+    # ListItem mock's setArt call args).
+    li_class = kodi_mocks["xbmcgui"].ListItem
+    art_calls = li_class.return_value.setArt.call_args_list
+    art_urls = [str(c) for c in art_calls]
+    combined = "\n".join(rendered_urls + art_urls)
+    assert "seta.jpg" in combined or "setb.jpg" in combined, (
+        f"photo_set cover URLs missing from rendered listing: "
+        f"urls={rendered_urls!r} art_calls={art_urls!r}"
+    )
+
+    _ = _json  # keep import marker
+
+
+def test_view_model_info_inline_refreshes_when_no_bio(
+    kodi_mocks: dict[str, MagicMock],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the DB row is missing OR bio_fetched_epoch is 0
+    (never crawled), view_model_info fetches biocontext inline,
+    upserts, then renders."""
+    actions = _import()
+    db_path = str(tmp_path / "meta.db")
+    monkeypatch.setattr(actions, "_model_meta_db_path",
+                        lambda: Path(db_path))
+
+    bios_fetched: list[str] = []
+
+    def fake_biocontext(slug: str) -> dict[str, Any]:
+        bios_fetched.append(slug)
+        return {
+            "room_status": "offline",
+            "real_name": "Carol",
+            "display_age": 22,
+            "location": "Mars",
+            "about_me": "hello",
+        }
+
+    actions.view_model_info(
+        handle=42,
+        slug="carol",
+        fetch_biocontext_func=fake_biocontext,
+    )
+
+    # Inline fetch fired exactly once.
+    assert bios_fetched == ["carol"], (
+        f"expected one inline biocontext for carol, got {bios_fetched!r}"
+    )
+
+    # Row was upserted to DB with bio_fetched_epoch set.
+    import resources.lib.model_meta_store as mms_real
+    conn = mms_real.open_db(db_path)
+    try:
+        row = mms_real.get_model(conn, "carol")
+    finally:
+        conn.close()
+    assert row is not None
+    assert row["real_name"] == "Carol"
+    assert row["bio_fetched_epoch"] > 0
+
+    # Directory still rendered.
+    end_calls = kodi_mocks["xbmcplugin"].endOfDirectory.call_args_list
+    assert any(c.args and c.args[0] == 42 for c in end_calls)
+
+
+def test_view_model_info_renders_when_fetch_fails_and_db_empty(
+    kodi_mocks: dict[str, MagicMock],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Worst case: no DB row, fetch returns empty (network blip / banned).
+    view_model_info still closes the directory cleanly with whatever
+    bare-slug rendering it can manage so the user isn't stuck on a
+    spinner."""
+    actions = _import()
+    db_path = str(tmp_path / "meta.db")
+    monkeypatch.setattr(actions, "_model_meta_db_path",
+                        lambda: Path(db_path))
+
+    actions.view_model_info(
+        handle=42,
+        slug="ghost",
+        fetch_biocontext_func=lambda slug: {},
+    )
+
+    end_calls = kodi_mocks["xbmcplugin"].endOfDirectory.call_args_list
+    assert any(c.args and c.args[0] == 42 for c in end_calls), (
+        "endOfDirectory must be called even when both DB and fetch are empty"
+    )
+
+
+def test_view_model_info_skips_with_empty_slug(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """No slug -> close directory immediately, no DB or fetch work."""
+    actions = _import()
+    bios_fetched: list[str] = []
+    actions.view_model_info(
+        handle=42,
+        slug="",
+        fetch_biocontext_func=lambda s: bios_fetched.append(s) or {},
+    )
+    assert bios_fetched == []
+    end_calls = kodi_mocks["xbmcplugin"].endOfDirectory.call_args_list
+    assert any(c.args and c.args[0] == 42 for c in end_calls)
+
+
 def test_deep_refresh_offline_meta_skips_when_locked(
     kodi_mocks: dict[str, MagicMock],
     tmp_path: Path,

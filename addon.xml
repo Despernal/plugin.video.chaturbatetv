@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <addon id="plugin.video.chaturbatetv"
        name="Chaturbate TV"
-       version="0.7.24"
+       version="0.7.25"
        provider-name="flux">
     <requires>
         <import addon="xbmc.python" version="3.0.0"/>
@@ -20,7 +20,15 @@
             <icon>icon.png</icon>
             <fanart>fanart.jpg</fanart>
         </assets>
-        <news>0.7.24 - The biocontext breakthrough. Discovered that /api/biocontext/&lt;slug&gt;/ -- which 404s without a Referer header -- returns HTTP 200 with the full public profile JSON when given Referer: https://chaturbate.com/p/&lt;slug&gt;/. ONE request per model gives us last_broadcast (with timestamp), real_name, display_age, location, follower_count, sex/subgender, body_type/decorations, smoke_drink, fan_club info, photo_sets (cover_url + paywalled tease), social_medias, full bio_about_html and wish_list -- enough to populate offline-favs with rich metadata even for accounts we've never seen broadcasting in our 9k bulk feed.
+        <news>0.7.25 - "View info" ctxmenu + rich profile pane. Right-click any model anywhere (browse, favs, TV list) and pick "View info" to drop into a directory whose first entry shows the FULL profile in the right pane: subject, sex/subgender, age, location, watching, followers, last seen, last broadcast, verified, body type, body decorations, smoke/drink, fan club cost, wish list, about-me, social medias, tags. Below the Profile entry, one item per photo_set carrying the cover_url as its thumbnail (label = name + token cost) -- the public part of every paywalled set is now scannable as a gallery without leaving Kodi.
+
+Inline freshness: when the DB row has no bio_fetched_epoch yet (a model we've never auto-tracked or never deep-crawled), view_model_info does ONE biocontext fetch + upsert before rendering. ~1s in the common case; the user gets fresh data on first click without ever hitting "no info" emptiness. If the fetch fails entirely (network blip / banned account), the directory still closes cleanly so Kodi isn't stuck on the busy spinner.
+
+New bio_full_plot_for_view_info formatter in model_meta_store: superset of plot_for_offline_row with all the bio_* columns added (Sex, Body, Smoke/Drink, Fan club, Wish list, About, Social). Sparse rows still render -- every section is conditional, no empty headers. Eight-char AARRGGBB color tags everywhere (regression-guarded).
+
+Nine new tests covering: bio_full_plot all-fields render, sparse-row omission, 8-char color regression, view_model_info pre-cached row (no inline fetch), inline-refresh-on-sparse, fetch-fail-still-closes-directory, empty-slug guard, ctxmenu "View info" presence + URL shape, all-states presence (in/out of TV / favs).
+
+0.7.24 - The biocontext breakthrough. Discovered that /api/biocontext/&lt;slug&gt;/ -- which 404s without a Referer header -- returns HTTP 200 with the full public profile JSON when given Referer: https://chaturbate.com/p/&lt;slug&gt;/. ONE request per model gives us last_broadcast (with timestamp), real_name, display_age, location, follower_count, sex/subgender, body_type/decorations, smoke_drink, fan_club info, photo_sets (cover_url + paywalled tease), social_medias, full bio_about_html and wish_list -- enough to populate offline-favs with rich metadata even for accounts we've never seen broadcasting in our 9k bulk feed.
 
 Schema bumped to v3 with 20+ new bio_* columns (auto-migrates v2 -> v3 via ALTER TABLE). New upsert_biocontext helper INSERT...ON CONFLICT DO UPDATE COALESCEs every column except the always-overwrite ones, with last_online_epoch protected by MAX so a higher bulk-poll observation isn't lowered. Deep refresh now calls biocontext FIRST and only falls back to status+thumb-HEAD when biocontext returns empty (network failure or account gone) -- corroborates the "deleted account" case while reducing requests from 2 per slug to 1 in the common path. Per-row ctxmenu refresh likewise upgraded to biocontext primary; toast notification surfaces "&lt;slug&gt;: &lt;status&gt; -- last broadcast &lt;time&gt;".
 

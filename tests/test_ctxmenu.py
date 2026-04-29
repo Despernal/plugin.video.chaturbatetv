@@ -153,6 +153,37 @@ def test_ctxmenu_update_model_info_present_for_in_tv_in_favs() -> None:
         )
 
 
+def test_ctxmenu_includes_view_info() -> None:
+    """v0.7.25: every model row's context menu offers a "View info"
+    entry that opens a directory with the full bio in plot + browseable
+    photo_sets."""
+    items = build_ctxmenu(_model("alice"), tv_entries=[], favs=[])
+    labels = [label for label, _ in items]
+    assert any("View info" in lbl for lbl in labels), (
+        f"ctxmenu missing 'View info' entry: {labels!r}"
+    )
+    cmd = next(c for lbl, c in items if "View info" in lbl)
+    assert "mode=view_model_info" in cmd
+    assert "slug=alice" in cmd
+
+
+def test_ctxmenu_view_info_present_for_all_states() -> None:
+    """View info must be available regardless of TV/favs membership --
+    the view-info directory is the single-source-of-truth profile pane
+    for any model anywhere."""
+    fav = Favorite(slug="alice", name="alice",
+                   url="https://chaturbate.com/alice/", gender=Gender.UNKNOWN)
+    tv = TVEntry(name="alice", url="https://chaturbate.com/alice/", priority=10)
+
+    for tv_e, favs_e in [([], []), ([tv], []), ([], [fav]), ([tv], [fav])]:
+        items = build_ctxmenu(_model("alice"), tv_entries=tv_e, favs=favs_e)
+        labels = [lbl for lbl, _ in items]
+        assert any("View info" in lbl for lbl in labels), (
+            f"missing View info entry with tv={bool(tv_e)} favs={bool(favs_e)}: "
+            f"{labels!r}"
+        )
+
+
 def test_ctxmenu_returns_list_of_tuples() -> None:
     items = build_ctxmenu(_model("alice"), tv_entries=[], favs=[])
     for entry in items:
