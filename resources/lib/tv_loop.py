@@ -207,6 +207,47 @@ def _is_internal_advance(cur: str | None, queued_paths: set[str]) -> bool:
     return tv_classify.is_internal_advance(cur, queued_paths)
 
 
+def _was_silent_stub_played(tracked_file: str | None) -> bool:
+    """True if the inner-loop's tracked file matches the offline-skip
+    silent stub at resources/media/silent.mp4 -- that's how playvid
+    signals "this slug is offline" without firing a Kodi failure
+    dialog.
+
+    The outer loop uses this signal to drop the slug from the local
+    bulk-live cache so pick_target won't re-pick it on the next iter.
+    Without this, a solo-tier offline model causes the loop to spin
+    forever: pick -> playvid offline -> stub plays 1s -> pick same
+    slug -> stub again. ``addon_actions._tv_bulk_mark_offline`` does
+    work, but only INSIDE the process that calls it; playvid runs in
+    a separate Kodi-spawned default.py process so its cache mutation
+    never reaches the TV-loop process. This in-loop detection is the
+    fix.
+    """
+    if not tracked_file:
+        return False
+    return "silent.mp4" in tracked_file
+
+
+def _slug_from_playlist_path(path: str | None) -> str:
+    """Extract the slug query param from a queued playvid plugin URL.
+
+    Each tier playlist item is built by ``_build_playlist_url`` with
+    ``mode=playvid&slug=<slug>&name=<name>``. After playvid has
+    resolved that URL into a localhost proxy URL (live) or the silent
+    stub (offline), the queued ORIGINAL is what playlist[pos].getPath
+    returns. This helper pulls the slug out so the silent-stub-detection
+    can mark exactly that slug offline.
+    """
+    if not path:
+        return ""
+    try:
+        from urllib.parse import parse_qs, urlparse
+        qs = parse_qs(urlparse(path).query)
+        return (qs.get("slug") or [""])[0]
+    except Exception:
+        return ""
+
+
 def _build_playlist_url(slug: str, name: str) -> str:
     """Build the plugin URL the TV loop queues for a model.
 
@@ -727,11 +768,62 @@ def tv_play(
                     f"user_stopped={player.user_stopped} "
                     f"switched={player.switched} "
                     f"self_promoted={self_promoted} "
+                    f"tracked_file={player.tracked_file!r} "
                     f"dialog_id={_current_dialog_id()}"
                 )
 
                 if self_promoted:
                     continue
+
+                # v0.7.21 loop unblock: if the inner loop exited cleanly
+                # (no user stop, no takeover, no promotion) and what
+                # actually played was the offline-skip silent stub, the
+                # slug we picked is offline. playvid's
+                # _tv_bulk_mark_offline runs in a separate
+                # Kodi-spawned default.py process and can't update OUR
+                # bulk cache, so we have to mark it ourselves here. The
+                # slug we mark is the one currently at the playlist
+                # position (handles multi-slug tiers correctly: only the
+                # one item that resolved offline gets dropped, others
+                # stay).
+                if (not player.user_stopped
+                        and not player.switched
+                        and _was_silent_stub_played(player.tracked_file)):
+                    try:
+                        pl = xbmc.PlayList(xbmc.PLAYLIST_VIDEO)
+                        pos = pl.getposition()
+                        size = pl.size()
+                        if 0 <= pos < size:
+                            queued_path = pl[pos].getPath()
+                        else:
+                            queued_path = ""
+                    except Exception:
+                        # Playlist access is best-effort; if Kodi
+                        # has already cleared the playlist between
+                        # the play() and our peek, just skip the
+                        # mark-offline step rather than crashing.
+                        queued_path = ""
+                    skip_slug = _slug_from_playlist_path(queued_path)
+                    if skip_slug:
+                        try:
+                            from resources.lib import addon_actions as _aa
+                            _aa._tv_bulk_mark_offline(skip_slug)
+                            _safe_log(
+                                f"tv_loop.tv_play: silent-stub played for "
+                                f"slug={skip_slug!r}; dropped from local "
+                                f"bulk-live cache so next pick_target skips it"
+                            )
+                        except Exception as exc:
+                            _safe_log(
+                                f"tv_loop.tv_play: silent-stub mark FAIL "
+                                f"err={exc!r}"
+                            )
+                    else:
+                        _safe_log(
+                            "tv_loop.tv_play: silent-stub played but "
+                            "couldn't extract slug from playlist path "
+                            f"{queued_path!r}"
+                        )
 
                 if player.user_stopped:
                     decision = _classify_after_stop(player, is_live_func)

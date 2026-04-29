@@ -142,6 +142,53 @@ def test_tvplayer_reset_clears_all_event_state(
 # --------------------------------------------------------------------------- #
 
 
+def test_was_silent_stub_played_matches_silent_mp4_path(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """v0.7.21 loop unblock: the outer loop must recognize when the
+    inner monitor's tracked_file points at the offline-skip stub
+    asset so it can drop the slug from the bulk-live cache.
+
+    True only for paths that include 'silent.mp4'. False for live
+    proxy URLs, queued plugin URLs, and None.
+    """
+    tl = _import()
+    assert tl._was_silent_stub_played(
+        "/storage/.kodi/addons/plugin.video.chaturbatetv/resources/media/silent.mp4"
+    ) is True
+    assert tl._was_silent_stub_played(
+        "C:\\Kodi\\addons\\plugin.video.chaturbatetv\\resources\\media\\silent.mp4"
+    ) is True
+    assert tl._was_silent_stub_played(
+        "http://127.0.0.1:42327/master.m3u8"
+    ) is False
+    assert tl._was_silent_stub_played(
+        "plugin://plugin.video.chaturbatetv/?mode=playvid&slug=alice&name=alice"
+    ) is False
+    assert tl._was_silent_stub_played(None) is False
+    assert tl._was_silent_stub_played("") is False
+
+
+def test_slug_from_playlist_path_extracts_slug(kodi_mods: dict[str, Any]) -> None:
+    """The plugin URL Kodi has at the playlist position carries the
+    slug we queued for this slot. Pulling it out lets the loop tell
+    _tv_bulk_mark_offline exactly which slug to drop."""
+    tl = _import()
+    assert tl._slug_from_playlist_path(
+        "plugin://plugin.video.chaturbatetv/?mode=playvid&slug=alice&name=alice"
+    ) == "alice"
+    # URL-encoded names with spaces should still surface a clean slug:
+    assert tl._slug_from_playlist_path(
+        "plugin://plugin.video.chaturbatetv/?mode=playvid&slug=bob&name=Bob+the+Cam+Star"
+    ) == "bob"
+    # Missing / malformed -> "":
+    assert tl._slug_from_playlist_path(
+        "plugin://plugin.video.chaturbatetv/?mode=tv_list"
+    ) == ""
+    assert tl._slug_from_playlist_path(None) == ""
+    assert tl._slug_from_playlist_path("") == ""
+
+
 def test_is_internal_advance_true_for_queued_path(
     kodi_mods: dict[str, Any],
 ) -> None:
