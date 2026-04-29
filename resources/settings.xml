@@ -66,6 +66,17 @@
                         <popup>true</popup>
                     </control>
                 </setting>
+                <setting id="deep_refresh_rate_seconds" type="integer" label="32070" help="32071">
+                    <level>0</level>
+                    <default>2</default>
+                    <constraints>
+                        <minimum>1</minimum>
+                        <maximum>30</maximum>
+                    </constraints>
+                    <control type="slider" format="integer">
+                        <popup>true</popup>
+                    </control>
+                </setting>
             </group>
         </category>
         <category id="genders" label="32100" help="">

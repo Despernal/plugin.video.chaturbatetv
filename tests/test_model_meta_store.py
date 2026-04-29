@@ -612,6 +612,267 @@ def test_get_offline_fav_slugs_excludes_currently_online(tmp_path: Path) -> None
     assert out == ["carol", "dave"]
 
 
+_BIOCONTEXT_SAMPLE = {
+    "follower_count": 155945,
+    "location": "Deep inside your heart",
+    "real_name": "Evelyn",
+    "body_decorations": "tattoos",
+    "last_broadcast": "2026-04-28T19:56:30.950",
+    "smoke_drink": "occasional",
+    "body_type": "thin",
+    "display_birthday": "Nov. 9, 1989",
+    "about_me": "<p>hi I am Evelyn</p>",
+    "wish_list": "<p>your love</p>",
+    "time_since_last_broadcast": "2 hours ago",
+    "fan_club_cost": 90,
+    "performer_has_fanclub": True,
+    "fan_club_is_member": False,
+    "fan_club_join_url": "/fanclub/join/evelyn/",
+    "needs_supporter_to_pm": True,
+    "interested_in": ["Men"],
+    "display_age": 36,
+    "sex": "a woman",
+    "subgender": "",
+    "room_status": "offline",
+    "is_broadcaster_or_staff": False,
+    "photo_sets": [
+        {"id": 21554915, "name": "undescribed pleasure",
+         "cover_url": "https://static-pub.highwebmedia.com/x/cover.jpg",
+         "tokens": 100, "is_video": True, "photo_count": 12,
+         "video_duration_in_seconds": 179},
+        {"id": 21554916, "name": "morning light",
+         "cover_url": "https://static-pub.highwebmedia.com/x/m.jpg",
+         "tokens": 50, "is_video": False, "photo_count": 8},
+    ],
+    "social_medias": [
+        {"id": 1121261, "title_name": "X - Free",
+         "link": "/external_link/?url=https%3A%2F%2Fx.com%2FEvelyn",
+         "is_free": True},
+        {"id": 1121242, "title_name": "Telegram - Free",
+         "link": "/external_link/?url=https%3A%2F%2Ft.me%2Fevelyn",
+         "is_free": True},
+    ],
+}
+
+
+# v0.7.24 biocontext: the breakthrough endpoint that gives us
+# last_broadcast + real_name + photo_sets + age/location/etc for
+# any model regardless of online state. New schema columns + upsert.
+
+
+def test_v2_db_migrates_to_v3_with_biocontext_columns(tmp_path: Path) -> None:
+    """Schema bump: v2 -> v3 adds the full biocontext capture
+    columns. The user explicitly wanted to "go deep" on stored
+    info: real_name + last_broadcast + birthday + interested_in +
+    body_type + body_decorations + smoke_drink + fan_club + photo
+    sets + social medias + raw JSON blob. Old rows preserved.
+    """
+    conn = _open(tmp_path)
+    mms.upsert_room(conn, _AFFILIATE_ROOM, now=1_000_000, source="affiliate")
+    row = mms.get_model(conn, "alice")
+    assert row is not None
+    for col in (
+        # last broadcast (timestamp + parsed epoch + pre-formatted human)
+        "last_broadcast_epoch", "last_broadcast_iso", "last_broadcast_human",
+        # identity / appearance
+        "real_name",
+        "bio_about_html", "bio_wish_list_html",
+        "bio_birthday", "bio_sex", "bio_subgender",
+        "bio_interested_in_json",
+        "bio_body_type", "bio_body_decorations", "bio_smoke_drink",
+        # fan club / interaction
+        "bio_fan_club_cost", "bio_performer_has_fanclub",
+        "bio_fan_club_join_url", "bio_needs_supporter_to_pm",
+        "bio_is_broadcaster_or_staff",
+        # collections (stored as JSON arrays)
+        "bio_photo_sets_json", "bio_social_medias_json",
+        # extracted thumbnail + raw blob + when we fetched
+        "photo_set_cover_url", "bio_full_json", "bio_fetched_epoch",
+    ):
+        assert col in row, f"v3 column {col!r} missing from schema"
+
+
+def test_upsert_biocontext_writes_all_known_fields(tmp_path: Path) -> None:
+    """upsert_biocontext extracts every useful field from the
+    /api/biocontext/<slug>/ response into typed columns AND stashes
+    the full raw response in bio_full_json so future-us can extract
+    new fields without a re-crawl. Fields the response doesn't carry
+    leave the existing column value alone (sticky-on-non-null COALESCE)."""
+    conn = _open(tmp_path)
+    mms.upsert_biocontext(conn, "model_i", _BIOCONTEXT_SAMPLE, now=2_000_000)
+    row = mms.get_model(conn, "model_i")
+    assert row is not None
+    # identity + appearance
+    assert row["real_name"] == "Evelyn"
+    assert row["bio_birthday"] == "Nov. 9, 1989"
+    assert row["bio_sex"] == "a woman"
+    assert row["bio_body_type"] == "thin"
+    assert row["bio_body_decorations"] == "tattoos"
+    assert row["bio_smoke_drink"] == "occasional"
+    assert "Evelyn" in (row["bio_about_html"] or "")
+    assert "your love" in (row["bio_wish_list_html"] or "")
+    assert json.loads(row["bio_interested_in_json"]) == ["Men"]
+    # last broadcast (ISO + parsed epoch + pre-formatted human)
+    assert row["last_broadcast_iso"] == "2026-04-28T19:56:30.950"
+    assert row["last_broadcast_epoch"] is not None
+    assert row["last_broadcast_epoch"] > 0
+    assert row["last_broadcast_human"] == "2 hours ago"
+    # fan club / interaction
+    assert row["bio_fan_club_cost"] == 90
+    assert row["bio_performer_has_fanclub"] == 1
+    assert row["bio_fan_club_join_url"] == "/fanclub/join/evelyn/"
+    assert row["bio_needs_supporter_to_pm"] == 1
+    assert row["bio_is_broadcaster_or_staff"] == 0
+    # photo sets + socials persisted as JSON
+    photo_sets = json.loads(row["bio_photo_sets_json"])
+    assert len(photo_sets) == 2
+    assert photo_sets[0]["name"] == "undescribed pleasure"
+    assert photo_sets[0]["is_video"] is True
+    socials = json.loads(row["bio_social_medias_json"])
+    assert len(socials) == 2
+    assert socials[0]["title_name"] == "X - Free"
+    # First photo set's cover surfaces to the dedicated column
+    # (so image_for_row can grab it without parsing JSON).
+    assert row["photo_set_cover_url"] == \
+        "https://static-pub.highwebmedia.com/x/cover.jpg"
+    # Full raw JSON blob for future-proofing -- if biocontext starts
+    # returning new fields tomorrow, we can backfill from this column.
+    full = json.loads(row["bio_full_json"])
+    assert full["follower_count"] == 155945
+    assert row["bio_fetched_epoch"] == 2_000_000
+    # Standard cross-populated fields (also writable by bulk poll;
+    # biocontext just fills them in if they were null):
+    assert row["age"] == 36
+    assert row["location"] == "Deep inside your heart"
+    assert row["last_followers"] == 155945
+    assert row["last_room_status"] == "offline"
+    assert row["last_status_check_epoch"] == 2_000_000
+    assert row["last_source"] == "biocontext"
+
+
+def test_upsert_biocontext_overlays_preserve_bulk_data(tmp_path: Path) -> None:
+    """A bulk-poll upsert seeded the row with display_name, image_url,
+    etc. A later biocontext upsert layers in last_broadcast, real_name,
+    photo_set_cover_url WITHOUT wiping the bulk fields."""
+    conn = _open(tmp_path)
+    mms.upsert_room(conn, _AFFILIATE_ROOM, now=1_000_000, source="affiliate")
+    mms.upsert_biocontext(conn, "alice", _BIOCONTEXT_SAMPLE, now=2_000_000)
+    row = mms.get_model(conn, "alice")
+    assert row is not None
+    # Bulk-only fields preserved:
+    assert row["display_name"] == "Alice"
+    assert row["spoken_languages"] == "English, Spanish"
+    assert row["last_image_url"] == "https://example.com/alice.jpg"
+    # Biocontext-only fields now also present:
+    assert row["real_name"] == "Evelyn"
+    assert row["last_broadcast_iso"] == "2026-04-28T19:56:30.950"
+    assert row["photo_set_cover_url"] == \
+        "https://static-pub.highwebmedia.com/x/cover.jpg"
+
+
+def test_upsert_biocontext_skips_empty_dict(tmp_path: Path) -> None:
+    """Network failed / response empty -> no row written, no crash."""
+    conn = _open(tmp_path)
+    mms.upsert_biocontext(conn, "alice", {}, now=2_000_000)
+    assert mms.get_model(conn, "alice") is None
+
+
+def test_image_for_row_prefers_photo_set_cover_over_thumb() -> None:
+    """v0.7.24: when biocontext gave us a photo set cover, prefer
+    that over the live-thumb URL -- it's a curated profile image,
+    not a live-stream snapshot, so it stays fresh even when the
+    model has been offline for months."""
+    row = {
+        "slug": "alice",
+        "last_image_url": None,
+        "last_image_url_thumb": None,
+        "last_image_url_legacy": None,
+        "photo_set_cover_url": "https://static-pub.highwebmedia.com/x/cover.jpg",
+        "thumb_available": 1,
+    }
+    assert mms.image_for_row(row) == \
+        "https://static-pub.highwebmedia.com/x/cover.jpg"
+
+
+def test_image_for_row_falls_back_to_synthesized_thumb_no_photoset() -> None:
+    """Without a photo_set_cover but with thumb_available=1 we still
+    synthesize the canonical static URL."""
+    row = {
+        "slug": "model_i",
+        "last_image_url": None, "last_image_url_thumb": None,
+        "last_image_url_legacy": None,
+        "photo_set_cover_url": None,
+        "thumb_available": 1,
+    }
+    assert mms.image_for_row(row) == "https://thumb.live.mmcdn.com/ri/model_i.jpg"
+
+
+def test_image_for_row_no_synth_when_thumb_unavailable() -> None:
+    row = {
+        "slug": "model_i",
+        "last_image_url": None, "last_image_url_thumb": None,
+        "last_image_url_legacy": None,
+        "thumb_available": 0,
+    }
+    assert mms.image_for_row(row) is None
+
+
+def test_image_for_row_cached_url_still_wins() -> None:
+    """A bulk-poll-cached URL ranks above both photo_set_cover and
+    static synth -- it's the freshest live capture available."""
+    row = {
+        "slug": "alice",
+        "last_image_url": "https://example.com/cached.jpg",
+        "photo_set_cover_url": "https://example.com/cover.jpg",
+        "thumb_available": 1,
+    }
+    assert mms.image_for_row(row) == "https://example.com/cached.jpg"
+
+
+def test_plot_for_offline_row_renders_last_broadcast_line() -> None:
+    """v0.7.24: when biocontext gave us last_broadcast_epoch, render
+    a "Last broadcast: Xh ago" line. Works for never-seen-online
+    favs whose ONLY source of last-air info is biocontext.
+    """
+    row = {
+        "slug": "alice",
+        "last_room_status": "offline",
+        "last_broadcast_epoch": 1_000_000,
+        "last_online_epoch": 0,        # never bulk-polled online
+    }
+    plot = mms.plot_for_offline_row(row, now=1_000_000 + 7200)  # 2h
+    assert "Last broadcast:" in plot
+    assert "2h" in plot
+
+
+def test_plot_for_offline_row_uses_last_broadcast_human_when_no_epoch() -> None:
+    """Fallback: if ISO parsing failed (older Python or weird format)
+    we still have the pre-formatted human string from biocontext."""
+    row = {
+        "slug": "alice",
+        "last_room_status": "offline",
+        "last_broadcast_epoch": None,
+        "last_broadcast_human": "3 days ago",
+        "last_online_epoch": 0,
+    }
+    plot = mms.plot_for_offline_row(row, now=1_000_000)
+    assert "Last broadcast:" in plot
+    assert "3 days ago" in plot
+
+
+def test_plot_for_offline_row_real_name_used_as_subject() -> None:
+    """When biocontext gave us a real_name and we don't have a richer
+    subject from the bulk poll, render real_name on the first line."""
+    row = {
+        "slug": "alice",
+        "real_name": "Evelyn",
+        "last_room_status": "offline",
+        "last_online_epoch": 1_000_000,
+    }
+    plot = mms.plot_for_offline_row(row, now=1_000_000 + 60)
+    assert "Evelyn" in plot
+
+
 def test_plot_for_offline_row_uses_8char_alpha_color_tags() -> None:
     """Regression guard: every [COLOR <hex>] in the offline plot
     must use 8-char AARRGGBB. 6-char gets rendered blank by Kodi.

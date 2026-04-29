@@ -412,6 +412,7 @@ def refresh_one_model(
     handle: int,
     *,
     slug: str = "",
+    fetch_biocontext_func: Any = None,
     fetch_status_func: Any = None,
     head_thumb_func: Any = None,
     notify_func: Any = None,
@@ -420,20 +421,23 @@ def refresh_one_model(
     """Single-slug refresh wired to the per-row "Update model info"
     context menu (v0.7.23).
 
-    One per-slug AJAX status + one thumb HEAD; persists to the
-    model_meta DB via upsert_status. Synchronous because one slug
-    is ~2 seconds total and the user clicked an explicit action;
-    no daemon thread needed. Closes the directory handle so the
-    busy spinner clears even though we ran inline.
+    v0.7.24 expanded: prefer biocontext (one HTTP, returns the full
+    profile including last_broadcast + real_name + photo_sets +
+    room_status). Falls back to the cheaper status+thumb-HEAD pair
+    if biocontext is empty (network blip / account gone). Persists
+    to the model_meta DB via upsert_biocontext or upsert_status.
+    Synchronous because one slug is ~2-3 seconds total.
 
-    Available on browse views, favs, TV-list rows -- the user can
-    refresh just one model's state without firing a 20-minute deep
-    crawl.
+    Available on browse views, favs, TV-list rows -- right-click any
+    model anywhere to refresh just that one.
     """
     from resources.lib import logger
 
     if notify_func is None:
         notify_func = _notify
+    if fetch_biocontext_func is None:
+        from resources.lib import cb_client as _cb_client
+        fetch_biocontext_func = _cb_client.fetch_biocontext
     if fetch_status_func is None:
         from resources.lib import cb_client as _cb_client
         fetch_status_func = _cb_client.fetch_room_status_json
@@ -450,34 +454,48 @@ def refresh_one_model(
         return
 
     logger._log(f"refresh_one_model: starting for slug={slug!r}")
+    from resources.lib import model_meta_store as mms
+    import time as _time
     try:
-        data = fetch_status_func(slug)
-        room_status = (data.get("room_status") or "") or "offline"
-        thumb_code = head_thumb_func(slug)
-        thumb_ok = thumb_code == 200
-        # 404 thumb + non-gone status -> mark as gone (account removed).
-        if thumb_code == 404 and room_status not in ("banned", "deleted", "gone"):
-            room_status = "gone"
-        from resources.lib import model_meta_store as mms
-        import time as _time
         conn = mms.open_db(str(_model_meta_db_path()))
         try:
-            mms.upsert_status(
-                conn, slug,
-                room_status=room_status,
-                thumb_available=thumb_ok,
-                now=int(_time.time()),
+            bio = {}
+            try:
+                bio = fetch_biocontext_func(slug)
+            except Exception:
+                bio = {}
+            if bio:
+                mms.upsert_biocontext(conn, slug, bio, now=int(_time.time()))
+                room_status = (bio.get("room_status") or "offline")
+                last_bc_human = bio.get("time_since_last_broadcast") or ""
+                summary = f"{slug}: {room_status}"
+                if last_bc_human:
+                    summary += f" -- last broadcast {last_bc_human}"
+            else:
+                # Fallback to cheap status + thumb HEAD.
+                data = fetch_status_func(slug)
+                room_status = (data.get("room_status") or "") or "offline"
+                thumb_code = head_thumb_func(slug)
+                thumb_ok = thumb_code == 200
+                if thumb_code == 404 and room_status not in (
+                    "banned", "deleted", "gone"
+                ):
+                    room_status = "gone"
+                mms.upsert_status(
+                    conn, slug,
+                    room_status=room_status,
+                    thumb_available=thumb_ok,
+                    now=int(_time.time()),
+                )
+                summary = f"{slug}: {room_status}"
+                if not thumb_ok:
+                    summary += " (no thumb)"
+            notify_func("Chaturbate TV", summary)
+            logger._log(
+                f"refresh_one_model: done slug={slug!r} {summary!r}"
             )
         finally:
             conn.close()
-        notify_func(
-            "Chaturbate TV",
-            f"{slug}: {room_status}" + (" (no thumb)" if not thumb_ok else ""),
-        )
-        logger._log(
-            f"refresh_one_model: done slug={slug!r} status={room_status!r} "
-            f"thumb_code={thumb_code}"
-        )
     except Exception as exc:
         logger._log(f"refresh_one_model: FAIL slug={slug!r} err={exc!r}")
         notify_func("Chaturbate TV", f"{slug}: refresh failed")
@@ -490,10 +508,11 @@ def deep_refresh_offline_meta(
     online_slugs: frozenset[str] | set[str] | None = None,
     fetch_status_func: Any = None,
     head_thumb_func: Any = None,
+    fetch_biocontext_func: Any = None,
     notify_func: Any = None,
     spawn_func: Any = None,
     sleep_func: Any = None,
-    rate_limit_seconds: float = 1.0,
+    rate_limit_seconds: float | None = None,
     **_params: Any,
 ) -> None:
     """v0.7.22 deep refresh: walk every offline fav and per-slug-probe
@@ -539,6 +558,18 @@ def deep_refresh_offline_meta(
     if head_thumb_func is None:
         from resources.lib import cb_client as _cb_client
         head_thumb_func = _cb_client.head_thumb
+    if fetch_biocontext_func is None:
+        from resources.lib import cb_client as _cb_client
+        fetch_biocontext_func = _cb_client.fetch_biocontext
+
+    # Rate limit: read from settings if not explicitly set so the
+    # user can dial it up (lower request rate -> less ban risk).
+    if rate_limit_seconds is None:
+        try:
+            from resources.lib import addon_settings
+            rate_limit_seconds = addon_settings.deep_refresh_rate_seconds()
+        except Exception:
+            rate_limit_seconds = 2.0
 
     # Compute the worklist BEFORE spawning so the user gets immediate
     # feedback on how many slugs we're about to crawl.
@@ -593,23 +624,41 @@ def deep_refresh_offline_meta(
                 import time as _time
                 for i, slug in enumerate(worklist):
                     try:
-                        data = fetch_status_func(slug)
-                        status = (data.get("room_status") or "")
-                        thumb_code = head_thumb_func(slug)
-                        thumb_ok = thumb_code == 200
-                        # If thumb 404 + status anything -- treat as gone.
-                        # CB's static thumb URL serves 200 even for offline,
-                        # so a 404 means the account is truly removed.
-                        if thumb_code == 404 and status not in (
-                            "banned", "deleted", "gone"
-                        ):
-                            status = "gone"
-                        mms.upsert_status(
-                            conn, slug,
-                            room_status=status or "offline",
-                            thumb_available=thumb_ok,
-                            now=int(_time.time()),
-                        )
+                        # v0.7.24: biocontext is the primary source --
+                        # ONE HTTP gives us last_broadcast + real_name +
+                        # photo_sets + room_status + everything else.
+                        # Empty response = network failure or account
+                        # gone; falls through to status+thumb-HEAD as a
+                        # corroboration / liveness check so we still
+                        # detect the "deleted account" case.
+                        bio = {}
+                        try:
+                            bio = fetch_biocontext_func(slug)
+                        except Exception:
+                            bio = {}
+                        if bio:
+                            mms.upsert_biocontext(
+                                conn, slug, bio, now=int(_time.time()),
+                            )
+                            status = (bio.get("room_status") or "offline")
+                        else:
+                            # Biocontext failed -- fall back to the
+                            # cheap status + thumb HEAD path so we
+                            # still record SOMETHING about this slug.
+                            data = fetch_status_func(slug)
+                            status = (data.get("room_status") or "")
+                            thumb_code = head_thumb_func(slug)
+                            thumb_ok = thumb_code == 200
+                            if thumb_code == 404 and status not in (
+                                "banned", "deleted", "gone"
+                            ):
+                                status = "gone"
+                            mms.upsert_status(
+                                conn, slug,
+                                room_status=status or "offline",
+                                thumb_available=thumb_ok,
+                                now=int(_time.time()),
+                            )
                         if status in ("banned", "deleted", "gone"):
                             counts["gone"] += 1
                         else:

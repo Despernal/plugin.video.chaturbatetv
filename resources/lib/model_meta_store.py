@@ -38,7 +38,7 @@ import time
 from typing import Any
 
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 
 # Schema is split into TABLES + INDEXES so we can run an
@@ -122,6 +122,36 @@ _EXPECTED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("last_room_status", "TEXT"),
     ("last_status_check_epoch", "INTEGER"),
     ("thumb_available", "INTEGER"),
+    # v0.7.24 (schema v3) -- the biocontext capture columns. The
+    # /api/biocontext/<slug>/ endpoint returns the model's full
+    # public profile in one shot (including last_broadcast which is
+    # otherwise unobtainable for offline models). We extract the
+    # render-relevant fields into structured columns for fast access
+    # AND keep the full raw response in bio_full_json so future-us
+    # can backfill new fields without a re-crawl.
+    ("last_broadcast_iso", "TEXT"),
+    ("last_broadcast_epoch", "INTEGER"),
+    ("last_broadcast_human", "TEXT"),
+    ("real_name", "TEXT"),
+    ("bio_about_html", "TEXT"),
+    ("bio_wish_list_html", "TEXT"),
+    ("bio_birthday", "TEXT"),
+    ("bio_sex", "TEXT"),
+    ("bio_subgender", "TEXT"),
+    ("bio_interested_in_json", "TEXT"),
+    ("bio_body_type", "TEXT"),
+    ("bio_body_decorations", "TEXT"),
+    ("bio_smoke_drink", "TEXT"),
+    ("bio_fan_club_cost", "INTEGER"),
+    ("bio_performer_has_fanclub", "INTEGER"),
+    ("bio_fan_club_join_url", "TEXT"),
+    ("bio_needs_supporter_to_pm", "INTEGER"),
+    ("bio_is_broadcaster_or_staff", "INTEGER"),
+    ("bio_photo_sets_json", "TEXT"),
+    ("bio_social_medias_json", "TEXT"),
+    ("photo_set_cover_url", "TEXT"),
+    ("bio_full_json", "TEXT"),
+    ("bio_fetched_epoch", "INTEGER"),
 )
 
 _DDL_INDEXES = """
@@ -470,6 +500,171 @@ def upsert_status(
     )
 
 
+def _parse_iso_to_epoch(iso: str | None) -> int | None:
+    """Best-effort parse of an ISO-8601 timestamp into a Unix epoch.
+
+    Biocontext returns ``last_broadcast`` shaped like
+    ``"2026-04-28T19:56:30.950"`` -- assumed UTC, no timezone suffix.
+    datetime.fromisoformat accepts that on Python 3.11+. Failures
+    return None so the caller can fall back to last_broadcast_human.
+    """
+    if not iso:
+        return None
+    try:
+        from datetime import datetime, timezone
+        # No-tz string -> assume UTC. fromisoformat tolerates the
+        # ms fraction.
+        dt = datetime.fromisoformat(iso)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp())
+    except (TypeError, ValueError):
+        return None
+
+
+# Biocontext fields -> column mapping. Source key on the left, target
+# column + converter on the right. Anything not in this map ends up
+# captured only via bio_full_json.
+def _biocontext_row_values(
+    bio: dict[str, Any], slug: str, *, now: int,
+) -> dict[str, Any]:
+    """Extract typed values from a biocontext dict for the upsert
+    INSERT/UPDATE binding. Cross-populates standard columns
+    (age, location, last_followers, last_room_status, last_status_*)
+    with biocontext data so the bio call can stand in for the regular
+    status check.
+    """
+    photo_sets = bio.get("photo_sets") or []
+    cover_url: str | None = None
+    if isinstance(photo_sets, list) and photo_sets:
+        first = photo_sets[0]
+        if isinstance(first, dict):
+            cover_url = _to_str_or_none(first.get("cover_url"))
+
+    interested = bio.get("interested_in")
+    interested_json: str | None = None
+    if isinstance(interested, list) and interested:
+        interested_json = json.dumps([str(x) for x in interested])
+
+    photo_sets_json: str | None = None
+    if isinstance(photo_sets, list) and photo_sets:
+        photo_sets_json = json.dumps(photo_sets, default=str)
+
+    socials = bio.get("social_medias")
+    socials_json: str | None = None
+    if isinstance(socials, list) and socials:
+        socials_json = json.dumps(socials, default=str)
+
+    iso = _to_str_or_none(bio.get("last_broadcast"))
+
+    return {
+        "slug": slug,
+        # Standard cross-populated fields (sticky-COALESCE on update).
+        "age": _to_int_or_none(bio.get("display_age")),
+        "location": _to_str_or_none(bio.get("location")),
+        "last_followers": _to_int_or_none(bio.get("follower_count")),
+        "last_room_status": _to_str_or_none(bio.get("room_status")),
+        "last_status_check_epoch": int(now),
+        "thumb_available": 1 if cover_url else None,
+        # v3 biocontext columns
+        "last_broadcast_iso": iso,
+        "last_broadcast_epoch": _parse_iso_to_epoch(iso),
+        "last_broadcast_human": _to_str_or_none(
+            bio.get("time_since_last_broadcast")
+        ),
+        "real_name": _to_str_or_none(bio.get("real_name")),
+        "bio_about_html": _to_str_or_none(bio.get("about_me")),
+        "bio_wish_list_html": _to_str_or_none(bio.get("wish_list")),
+        "bio_birthday": _to_str_or_none(bio.get("display_birthday")),
+        "bio_sex": _to_str_or_none(bio.get("sex")),
+        "bio_subgender": _to_str_or_none(bio.get("subgender")),
+        "bio_interested_in_json": interested_json,
+        "bio_body_type": _to_str_or_none(bio.get("body_type")),
+        "bio_body_decorations": _to_str_or_none(bio.get("body_decorations")),
+        "bio_smoke_drink": _to_str_or_none(bio.get("smoke_drink")),
+        "bio_fan_club_cost": _to_int_or_none(bio.get("fan_club_cost")),
+        "bio_performer_has_fanclub": _to_bool_int_or_none(
+            bio.get("performer_has_fanclub")
+        ),
+        "bio_fan_club_join_url": _to_str_or_none(bio.get("fan_club_join_url")),
+        "bio_needs_supporter_to_pm": _to_bool_int_or_none(
+            bio.get("needs_supporter_to_pm")
+        ),
+        "bio_is_broadcaster_or_staff": _to_bool_int_or_none(
+            bio.get("is_broadcaster_or_staff")
+        ),
+        "bio_photo_sets_json": photo_sets_json,
+        "bio_social_medias_json": socials_json,
+        "photo_set_cover_url": cover_url,
+        "bio_full_json": json.dumps(bio, default=str),
+        "bio_fetched_epoch": int(now),
+        # Sighting metadata
+        "last_online_epoch": 0,        # biocontext doesn't confirm broadcasting
+        "last_source": "biocontext",
+        "updated_epoch": int(now),
+    }
+
+
+def upsert_biocontext(
+    conn: sqlite3.Connection,
+    slug: str,
+    biocontext: dict[str, Any],
+    *,
+    now: int,
+) -> bool:
+    """Persist a /api/biocontext/<slug>/ response into the meta DB.
+
+    Touches (with COALESCE-on-non-null) every column we extract from
+    biocontext, plus stashes the full raw response in bio_full_json
+    so future-us can pull new fields without a re-crawl.
+
+    Empty / falsy biocontext (network failure, account gone) is a
+    no-op; the deep crawler treats biocontext-empty separately to
+    flag the slug as gone via the dedicated upsert_status path.
+
+    Returns True on write, False on skip.
+    """
+    if not biocontext or not isinstance(biocontext, dict):
+        return False
+    slug = (slug or "").strip()
+    if not slug:
+        return False
+    values = _biocontext_row_values(biocontext, slug, now=now)
+    # Build INSERT ... ON CONFLICT DO UPDATE that COALESCEs every
+    # column except the always-overwrite ones (last_status_check_epoch,
+    # bio_fetched_epoch, last_source, updated_epoch). last_online_epoch
+    # we COALESCE-with-MAX so a higher value already there from a bulk
+    # poll wins (biocontext doesn't confirm broadcasting).
+    cols = list(values.keys())
+    col_list = ",".join(cols)
+    placeholders = ",".join(":" + c for c in cols)
+    always_overwrite = {
+        "last_status_check_epoch", "bio_fetched_epoch",
+        "last_source", "updated_epoch",
+    }
+    parts: list[str] = []
+    for c in cols:
+        if c == "slug":
+            continue
+        if c == "last_online_epoch":
+            # Don't lower a higher existing value -- a bulk poll's
+            # observation wins.
+            parts.append(f"{c}=MAX(COALESCE(excluded.{c},0), COALESCE({c},0))")
+        elif c in always_overwrite:
+            parts.append(f"{c}=excluded.{c}")
+        else:
+            parts.append(f"{c}=COALESCE(excluded.{c}, {c})")
+    # cols/parts/placeholders are all derived from a fixed allowlist
+    # (_EXPECTED_COLUMNS) and never accept user input, so the f-string
+    # SQL build is safe; values bind via parameters.
+    sql = (
+        f"INSERT INTO models ({col_list}) VALUES ({placeholders})\n"  # noqa: S608
+        f"ON CONFLICT(slug) DO UPDATE SET\n  " + ",\n  ".join(parts)
+    )
+    conn.execute(sql, values)
+    return True
+
+
 def label_prefix_for_row(row: dict[str, Any]) -> str:
     """Return a short HALO-red ``[GONE] `` prefix when ``last_room_status``
     is one of {banned, deleted, gone}; empty string otherwise.
@@ -510,15 +705,29 @@ def image_for_row(row: dict[str, Any]) -> str | None:
       2. ``last_image_url_thumb`` -- 360x270 from the affiliate API.
       3. ``last_image_url_legacy`` -- ``img`` field from the per-gender
          roomlist API.
+      4. (v0.7.24) ``photo_set_cover_url`` -- first profile photo set's
+         cover from biocontext. Curated profile image, often higher
+         quality than live thumbs and still meaningful when the model
+         hasn't broadcast in months.
+      5. (v0.7.24) Synthesized canonical static URL when biocontext /
+         deep refresh confirmed the static thumb still serves
+         (``thumb_available=1``). The static URL pattern is
+         ``https://thumb.live.mmcdn.com/ri/<slug>.jpg``.
 
-    Returns None if all three are absent or empty so the caller can
-    omit the image instead of feeding Kodi an empty path.
+    Returns None if nothing is available so the caller can omit the
+    image instead of feeding Kodi an empty path.
     """
     for key in ("last_image_url", "last_image_url_thumb",
-                "last_image_url_legacy"):
+                "last_image_url_legacy", "photo_set_cover_url"):
         v = row.get(key)
         if v:
             return str(v)
+    # Synthesize the static canonical URL when deep refresh confirmed
+    # the thumbnail still resolves. Requires a slug.
+    if row.get("thumb_available") == 1:
+        slug = row.get("slug")
+        if slug:
+            return f"https://thumb.live.mmcdn.com/ri/{slug}.jpg"
     return None
 
 
@@ -585,6 +794,13 @@ def plot_for_offline_row(row: dict[str, Any], now: float | int | None = None) ->
     subject = row.get("last_subject")
     if subject:
         parts.append(str(subject))
+    else:
+        # v0.7.24: when no broadcast subject is cached but we have a
+        # real_name from biocontext, surface that as the heading line
+        # so the offline plot doesn't read empty.
+        real_name = row.get("real_name")
+        if real_name:
+            parts.append(str(real_name))
 
     age = row.get("age")
     if age:
@@ -605,6 +821,40 @@ def plot_for_offline_row(row: dict[str, Any], now: float | int | None = None) ->
     last_seen = last_seen_ago_label(row, now=now)
     if last_seen:
         parts.append(f"[COLOR FF00d4ff]Last seen:[/COLOR] {last_seen}")
+
+    # v0.7.24: Last broadcast (from biocontext last_broadcast). For
+    # never-seen-online favs this is often the only timestamp we
+    # have, so it's our highest-value line for offline rendering.
+    # Prefer the parsed epoch (renders relative time vs the user's
+    # current "now"), fall back to the pre-formatted human string.
+    last_bc_epoch = row.get("last_broadcast_epoch")
+    if last_bc_epoch:
+        bc_label = last_seen_ago_label(
+            {"last_online_epoch": last_bc_epoch}, now=now,
+        )
+        if bc_label:
+            parts.append(
+                f"[COLOR FF00d4ff]Last broadcast:[/COLOR] {bc_label}"
+            )
+    elif row.get("last_broadcast_human"):
+        parts.append(
+            f"[COLOR FF00d4ff]Last broadcast:[/COLOR] "
+            f"{row['last_broadcast_human']}"
+        )
+
+    # v0.7.24: when the deep refresh has touched a slug, render
+    # "Verified: Xh ago" so the user knows how stale the cached
+    # state is. Especially useful for never-seen-online favs whose
+    # only sighting is the status check.
+    check_epoch = row.get("last_status_check_epoch")
+    if check_epoch:
+        verified_label = last_seen_ago_label(
+            {"last_online_epoch": check_epoch}, now=now,
+        )
+        if verified_label:
+            parts.append(
+                f"[COLOR FF00d4ff]Verified:[/COLOR] {verified_label}"
+            )
 
     status = (row.get("last_room_status") or "").strip()
     if status:

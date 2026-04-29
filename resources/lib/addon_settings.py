@@ -30,6 +30,10 @@ _DIALOG_TIMEOUT_DEFAULT = 10
 _DIALOG_TIMEOUT_FLOOR = 5
 _DIALOG_TIMEOUT_CEIL = 60
 
+_DEEP_REFRESH_RATE_DEFAULT = 2
+_DEEP_REFRESH_RATE_FLOOR = 1
+_DEEP_REFRESH_RATE_CEIL = 30
+
 # Friendly name -> 8-char AARRGGBB hex. Kodi's [COLOR] tag rejects 6-char
 # (silently renders blank), so every entry must be 8 chars.
 _SCREENSAVER_COLORS: dict[str, str] = {
@@ -148,6 +152,27 @@ def dialog_timeout_seconds() -> int:
         return _DIALOG_TIMEOUT_DEFAULT
     if v < _DIALOG_TIMEOUT_FLOOR or v > _DIALOG_TIMEOUT_CEIL:
         return _DIALOG_TIMEOUT_DEFAULT
+    return v
+
+
+def deep_refresh_rate_seconds() -> int:
+    """Pause between per-model status checks during the Deep refresh menu action.
+
+    Deep refresh hits Chaturbate once per favorite (biocontext + status +
+    thumb HEAD) -- with a 1228-fav list that's ~3600 requests in one
+    pass. Too aggressive and CB rate-limits or blocks the IP; too slow
+    and the user sits through an hour-long crawl.
+
+    Floor 1s, ceil 30s, default 2s. Out-of-range / Kodi-missing falls
+    back to default (rather than to whatever the slider returned)
+    because a 0 here would hammer the endpoint.
+    """
+    try:
+        v = int(_addon().getSettingInt("deep_refresh_rate_seconds"))
+    except Exception:
+        return _DEEP_REFRESH_RATE_DEFAULT
+    if v < _DEEP_REFRESH_RATE_FLOOR or v > _DEEP_REFRESH_RATE_CEIL:
+        return _DEEP_REFRESH_RATE_DEFAULT
     return v
 
 

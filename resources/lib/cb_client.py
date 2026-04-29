@@ -100,6 +100,62 @@ def _safe_status_default() -> dict[str, Any]:
     }
 
 
+_BIOCONTEXT_URL_TMPL = "https://chaturbate.com/api/biocontext/{slug}/"
+
+
+def fetch_biocontext(slug: str) -> dict[str, Any]:
+    """Pull /api/biocontext/<slug>/ -- the breakthrough endpoint that
+    returns a model's full public profile in one shot.
+
+    Critically requires the ``Referer: https://chaturbate.com/p/<slug>/``
+    header; without it CB returns 404. With it: HTTP 200 and a JSON
+    body shaped like
+    ``{follower_count, location, real_name, last_broadcast,
+    time_since_last_broadcast, display_birthday, about_me, wish_list,
+    fan_club_cost, performer_has_fanclub, interested_in,
+    display_age, sex, subgender, room_status, photo_sets,
+    social_medias, ...}`` -- enough to populate the offline-favs
+    view with rich metadata even for models we've NEVER seen
+    broadcasting.
+
+    Empty dict on any failure (network error, HTTP non-200,
+    non-JSON body) so the caller can tolerate sparseness.
+    """
+    from urllib.request import Request, urlopen
+
+    from resources.lib import logger
+
+    if not slug:
+        return {}
+    url = _BIOCONTEXT_URL_TMPL.format(slug=slug)
+    headers = dict(HTTP_HEADERS_IPAD)
+    headers["Referer"] = f"https://chaturbate.com/p/{slug}/"
+    headers["X-Requested-With"] = "XMLHttpRequest"
+    headers["Accept"] = "application/json"
+    headers["Cookie"] = "cb_legacy=1; agreeterms=1"
+    req = Request(url, headers=headers, method="GET")  # noqa: S310
+    try:
+        with urlopen(req, timeout=12.0) as resp:  # noqa: S310
+            raw: bytes = resp.read()
+    except Exception as exc:
+        logger._log(f"cb_client.fetch_biocontext: FAIL slug={slug!r} err={exc!r}")
+        return {}
+    try:
+        data = json.loads(raw.decode("utf-8", errors="replace"))
+    except (json.JSONDecodeError, ValueError):
+        logger._log(
+            f"cb_client.fetch_biocontext: NON_JSON slug={slug!r} bytes={len(raw)}"
+        )
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    logger._log(
+        f"cb_client.fetch_biocontext: OK slug={slug!r} "
+        f"keys={len(data)} room_status={data.get('room_status')!r}"
+    )
+    return data
+
+
 def head_thumb(slug: str) -> int:
     """HEAD the static thumbnail URL for ``slug``; return the HTTP
     status code, or 0 on network error.

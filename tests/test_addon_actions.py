@@ -733,6 +733,7 @@ def test_deep_refresh_offline_meta_iterates_offline_favs(
                         lambda: Path(db_path))
 
     notifies: list[tuple[str, str]] = []
+    bios_fetched: list[str] = []
     statuses_fetched: list[str] = []
     thumbs_fetched: list[str] = []
     sleeps: list[float] = []
@@ -740,6 +741,12 @@ def test_deep_refresh_offline_meta_iterates_offline_favs(
 
     def fake_notify(heading: str, msg: str) -> None:
         notifies.append((heading, msg))
+
+    def fake_biocontext(slug: str) -> dict[str, Any]:
+        bios_fetched.append(slug)
+        # Empty dict forces fallback to status+thumb path -- exercises
+        # the network-failure / account-gone branch this test covers.
+        return {}
 
     def fake_status(slug: str, fetch_func: Any = None) -> dict[str, Any]:
         statuses_fetched.append(slug)
@@ -768,6 +775,7 @@ def test_deep_refresh_offline_meta_iterates_offline_favs(
         handle=42,
         fav_slugs=fav_slugs,
         online_slugs=online_slugs,
+        fetch_biocontext_func=fake_biocontext,
         fetch_status_func=fake_status,
         head_thumb_func=fake_head,
         notify_func=fake_notify,
@@ -779,7 +787,12 @@ def test_deep_refresh_offline_meta_iterates_offline_favs(
     assert len(spawn_calls) == 1
 
     # Only offline slugs were probed; alice (online) skipped.
+    assert "alice" not in bios_fetched
     assert "alice" not in statuses_fetched
+    # Biocontext is the primary source -- always tried first.
+    assert set(bios_fetched) == {"bob", "ghost"}
+    # When biocontext returns empty (network fail / account gone)
+    # the deep crawl falls back to the cheap status + HEAD path.
     assert set(statuses_fetched) == {"bob", "ghost"}
     assert set(thumbs_fetched) == {"bob", "ghost"}
 
@@ -812,6 +825,74 @@ def test_deep_refresh_offline_meta_iterates_offline_favs(
                for m in msgs), f"missing start toast: {msgs!r}"
     assert any("done" in m.lower() or "complete" in m.lower()
                for m in msgs), f"missing done toast: {msgs!r}"
+
+
+def test_deep_refresh_offline_meta_uses_biocontext_primary_path(
+    kodi_mocks: dict[str, MagicMock],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v0.7.24: when biocontext returns a populated dict, the deep
+    crawl writes via ``upsert_biocontext`` and skips the status+HEAD
+    fallback entirely. Verifies status/thumb funcs are NOT called.
+    """
+    actions = _import()
+    db_path = str(tmp_path / "model_meta.db")
+    monkeypatch.setattr(actions, "_model_meta_db_path",
+                        lambda: Path(db_path))
+
+    bios_fetched: list[str] = []
+    statuses_fetched: list[str] = []
+    thumbs_fetched: list[str] = []
+
+    def fake_biocontext(slug: str) -> dict[str, Any]:
+        bios_fetched.append(slug)
+        # Realistic response: room_status + last_broadcast.
+        return {
+            "room_status": "offline",
+            "last_broadcast": "2026-04-20T10:00:00Z",
+            "real_name": f"Real {slug}",
+            "display_age": 25,
+            "location": "Earth",
+        }
+
+    def fake_status(slug: str, fetch_func: Any = None) -> dict[str, Any]:
+        statuses_fetched.append(slug)
+        return {"success": False, "room_status": "offline", "url": "",
+                "hidden_message": "", "cmaf_edge": False}
+
+    def fake_head(slug: str) -> int:
+        thumbs_fetched.append(slug)
+        return 200
+
+    actions.deep_refresh_offline_meta(
+        handle=42,
+        fav_slugs=["bob", "carol"],
+        online_slugs=frozenset(),
+        fetch_biocontext_func=fake_biocontext,
+        fetch_status_func=fake_status,
+        head_thumb_func=fake_head,
+        notify_func=lambda h, m: None,
+        spawn_func=lambda t: t(),
+        sleep_func=lambda s: None,
+    )
+
+    # Both slugs hit biocontext; status/thumb fallback skipped.
+    assert set(bios_fetched) == {"bob", "carol"}
+    assert statuses_fetched == []
+    assert thumbs_fetched == []
+
+    # Rows were written via upsert_biocontext.
+    import resources.lib.model_meta_store as mms_real
+    conn = mms_real.open_db(db_path)
+    try:
+        bob = mms_real.get_model(conn, "bob")
+        assert bob is not None
+        assert bob["last_room_status"] == "offline"
+        assert bob["real_name"] == "Real bob"
+        assert bob["bio_fetched_epoch"] > 0
+    finally:
+        conn.close()
 
 
 def test_refresh_offline_meta_closes_directory_handle(

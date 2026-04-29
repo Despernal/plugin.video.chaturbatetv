@@ -63,6 +63,14 @@ msgctxt "#32061"
 msgid "How long the Yes/No exit dialog stays up before defaulting to Keep playing; lower means faster auto-resume after an accidental Stop"
 msgstr "How long the Yes/No exit dialog stays up before defaulting to Keep playing; lower means faster auto-resume after an accidental Stop"
 
+msgctxt "#32070"
+msgid "Deep refresh rate (seconds between models)"
+msgstr "Deep refresh rate (seconds between models)"
+
+msgctxt "#32071"
+msgid "Pause between per-model status checks during the Deep refresh menu action; raise this if Chaturbate rate-limits you, lower this if your fav list is huge and you want it done faster"
+msgstr "Pause between per-model status checks during the Deep refresh menu action; raise this if Chaturbate rate-limits you, lower this if your fav list is huge and you want it done faster"
+
 msgctxt "#32100"
 msgid "Genders"
 msgstr "Genders"
