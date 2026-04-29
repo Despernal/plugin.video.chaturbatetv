@@ -510,6 +510,13 @@ def _parse_iso_to_epoch(iso: str | None) -> int | None:
     in PST), not UTC. Treating them as UTC made every "Last broadcast"
     line read 7-8 hours older than reality.
 
+    Note: CB does NOT localize the ISO to the connecting client's
+    geoIP -- v0.7.28 verified the addon fetches biocontext through a
+    Toronto (Eastern) WG exit and the ISO still matched only when
+    interpreted as Pacific. Looks like a server-side ``TZ=US/Pacific``
+    baked into CB's Django settings. Hardcoding America/Los_Angeles
+    is robust regardless of where the user's VPN exits.
+
     Fix: when the parsed datetime has no tzinfo, attach the
     America/Los_Angeles zone before converting to epoch. ISO strings
     that DO carry an explicit ``Z`` or ``+/-HH:MM`` offset are honoured
