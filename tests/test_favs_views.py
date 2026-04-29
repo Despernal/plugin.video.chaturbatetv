@@ -477,13 +477,15 @@ def test_bulk_live_slugs_cache_expires_after_ttl(
     assert fetch_calls["n"] == 2
 
 
-def test_online_favs_view_paginates_at_50_per_page(
+def test_online_favs_view_renders_all_entries_no_pagination(
     tmp_path: Path,
     kodi_mocks: dict[str, MagicMock],
 ) -> None:
-    """A 1224-favorite library renders 50 entries per page with a Next
-    page link. Without this, the directory render blocks the UI for many
-    seconds on Pi-class hardware ( freeze).
+    """v0.7.30 dropped pagination on online/offline favs. A 120-fav
+    library renders ALL 120 entries in one directory and emits NO
+    "Next page" link. Bulk-live cache + meta DB make per-row work
+    cheap enough that the 50/page split from the Pi-era is just
+    extra clicks.
     """
     fv = _import()
     fv._bulk_cache_clear()
@@ -498,26 +500,34 @@ def test_online_favs_view_paginates_at_50_per_page(
         for i in range(120)
     ]
     _write_favs(favs_path, favs)
-    # All 120 are reported live by the bulk fetch.
     fetch = _bulk_fetch([[f"user{i:04d}" for i in range(120)]])
 
     fv.online_favs_view(handle=42, store_path=favs_path, fetch_func=fetch)
 
     urls = _added_urls(kodi_mocks["xbmcplugin"])
     play_urls = [u for u in urls if "mode=playvid" in u]
-    assert len(play_urls) == 50, (
-        f"page 1 should show 50 entries, got {len(play_urls)}"
+    assert len(play_urls) == 120, (
+        f"all 120 favs should render, got {len(play_urls)}"
     )
-    # And a next-page link.
-    next_links = [u for u in urls if "mode=favs_online" in u and "page=2" in u]
-    assert len(next_links) == 1
+    # No "Next page" link on either favs view post-v0.7.30.
+    next_links = [
+        u for u in urls
+        if ("mode=favs_online" in u or "mode=favs_offline" in u)
+        and "page=" in u
+    ]
+    assert next_links == [], (
+        f"no pagination -> no Next-page link, got {next_links!r}"
+    )
 
 
-def test_online_favs_view_page_param_returns_correct_slice(
+def test_online_favs_view_ignores_stale_page_param(
     tmp_path: Path,
     kodi_mocks: dict[str, MagicMock],
 ) -> None:
-    """Page=2 returns favs 50-99; page=3 returns favs 100-119 (no next)."""
+    """Old "Next page" links from pre-0.7.30 builds may still be in
+    Kodi's history -- a click sends ``page=3`` to the handler.
+    Post-removal the param must be silently ignored, NOT crash. All
+    favs still render."""
     fv = _import()
     fv._bulk_cache_clear()
     favs_path = tmp_path / "favs.json"
@@ -528,22 +538,21 @@ def test_online_favs_view_page_param_returns_correct_slice(
             url=f"https://chaturbate.com/user{i:04d}/",
             gender=Gender.FEMALE,
         )
-        for i in range(120)
+        for i in range(40)
     ]
     _write_favs(favs_path, favs)
-    fetch = _bulk_fetch([[f"user{i:04d}" for i in range(120)]])
+    fetch = _bulk_fetch([[f"user{i:04d}" for i in range(40)]])
 
+    # Stray page=3 from a stale link must not crash.
     fv.online_favs_view(handle=42, store_path=favs_path, fetch_func=fetch,
-                        page=3)
+                        page="3")
 
     urls = _added_urls(kodi_mocks["xbmcplugin"])
     play_urls = [u for u in urls if "mode=playvid" in u]
-    assert len(play_urls) == 20, (
-        f"page 3 should show 20 entries (100..119), got {len(play_urls)}"
+    assert len(play_urls) == 40, (
+        f"stale page param must be ignored, all 40 still render, "
+        f"got {len(play_urls)}"
     )
-    # Last page -> no next-page link.
-    next_links = [u for u in urls if "mode=favs_online" in u and "page=" in u]
-    assert next_links == []
 
 
 def test_bulk_live_slugs_drops_legacy_disk_cache_on_entry(

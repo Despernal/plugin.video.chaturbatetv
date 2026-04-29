@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <addon id="plugin.video.chaturbatetv"
        name="Chaturbate TV"
-       version="0.7.29"
+       version="0.7.30"
        provider-name="flux">
     <requires>
         <import addon="xbmc.python" version="3.0.0"/>
@@ -20,7 +20,9 @@
             <icon>icon.png</icon>
             <fanart>fanart.jpg</fanart>
         </assets>
-        <news>0.7.29 HOTFIX: silent-stub black-screen loop on solo-tier offlines.
+        <news>0.7.30 - Pagination removed from online/offline favs views. The 50/page split was a 0.6-era guard for Pi-class hardware; now that the bulk-live cache is one HTTP for all 1228 favs and the meta DB serves enriched offline rows in a single batched IN query, rendering everything in one directory is fast enough on . Less clicking, no scroll-state-loss when going back. Stray ``page=N`` kwargs from old "Next page" links in Kodi history are silently ignored via ``**_params`` -- no crashes. Two new tests cover the all-entries render and the stale-page-kwarg tolerance; the previous two pagination tests were dropped.
+
+0.7.29 HOTFIX: silent-stub black-screen loop on solo-tier offlines.
 
 User reported "looping black" on : TV mode picked a P12 tier with a single offline slug (model_a), played the silent stub, and re-picked the SAME slug forever. The v0.7.21 fix was supposed to mark the slug offline in the local bulk-live cache after the silent stub played, breaking the loop -- but the fix relied on ``xbmc.PlayList(...).getposition()`` which returns -1 once the stub finishes (Kodi has already reset the playlist). The slug-extraction got "" every iteration, the mark-offline silently no-op'd, and the loop never broke.
 

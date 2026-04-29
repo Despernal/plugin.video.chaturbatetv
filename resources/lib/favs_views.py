@@ -59,12 +59,6 @@ _AFFILIATE_WATERMARKS = (
 )
 
 
-# How many favorites to render per directory page. Kodi's directory
-# scroll is fine with thousands of entries, but rendering 1000+ rows
-# with full ctxmenus on a Pi-class device blocks the UI thread for
-# many seconds.
-_FAVS_PER_PAGE = 50
-
 _FetchFn = Callable[..., str]
 
 
@@ -343,19 +337,6 @@ def _render_favs(handle: int, favs: list[Favorite],
         )
 
 
-def _coerce_page(value: Any) -> int:
-    try:
-        return max(1, int(value))
-    except (TypeError, ValueError):
-        return 1
-
-
-def _slice_page(items: list[Favorite], page: int) -> list[Favorite]:
-    """Return the slice of favorites for the requested 1-indexed page."""
-    start = (page - 1) * _FAVS_PER_PAGE
-    return items[start:start + _FAVS_PER_PAGE]
-
-
 def _classify_favs(favs: list[Favorite],
                    fetch_func: _FetchFn | None) -> tuple[list[Favorite], list[Favorite]]:
     """Split the local favorites list into (online, offline) using the
@@ -374,51 +355,45 @@ def _classify_favs(favs: list[Favorite],
 
 def online_favs_view(handle: int, store_path: Path | None = None,
                      fetch_func: _FetchFn | None = None,
-                     page: Any = 1,
                      **_params: Any) -> None:
-    """Currently-live favorites, paginated."""
+    """Currently-live favorites in one shot.
+
+    v0.7.30 dropped pagination: the bulk-live cache + meta DB make
+    rendering all entries cheap enough on  that the 50/page
+    pagination from the Pi-era was just extra clicks. Stray ``page``
+    kwargs from old links are swallowed by ``**_params``.
+    """
     from resources.lib import logger
     path = store_path if store_path is not None else _favs_path()
     favs = favs_store.load(path)
-    p = _coerce_page(page)
     online, _offline = _classify_favs(favs, fetch_func)
-    page_items = _slice_page(online, p)
     logger._log(
-        f"favs_views.online_favs_view: total={len(favs)} live={len(online)} "
-        f"page={p} showing={len(page_items)}"
+        f"favs_views.online_favs_view: total={len(favs)} live={len(online)}"
     )
-    _render_favs(handle, page_items, enrich_with_models=True)
-    if (p * _FAVS_PER_PAGE) < len(online):
-        kodi_helpers.add_dir(handle, f"Next page ({p + 1})",
-                             "favs_online", page=p + 1)
+    _render_favs(handle, online, enrich_with_models=True)
     kodi_helpers.end_directory(handle, content_type="videos")
 
 
 def offline_favs_view(handle: int, store_path: Path | None = None,
                       fetch_func: _FetchFn | None = None,
-                      page: Any = 1,
                       **_params: Any) -> None:
-    """Currently-offline favorites, paginated.
+    """Currently-offline favorites in one shot.
 
-    v0.7.19: enriches each row with cached metadata from the
+    v0.7.19 enriches each row with cached metadata from the
     model_meta sqlite store (thumbnail, viewer count, plot info,
     "Last seen" line). The bulk-refresh poll keeps that DB warm in
-    the background; this view does ONE batched read for just the
-    page's slugs and renders without any per-row HTTP.
+    the background; this view does ONE batched read for ALL offline
+    favs (v0.7.30 -- pagination removed, get_models scales fine to
+    1k+ slugs in a single IN query).
     """
     from resources.lib import logger
     path = store_path if store_path is not None else _favs_path()
     favs = favs_store.load(path)
-    p = _coerce_page(page)
     _online, offline = _classify_favs(favs, fetch_func)
-    page_items = _slice_page(offline, p)
-    meta_map = _load_offline_meta_for([f.slug for f in page_items])
+    meta_map = _load_offline_meta_for([f.slug for f in offline])
     logger._log(
-        f"favs_views.offline_favs_view: total={len(favs)} offline={len(offline)} "
-        f"page={p} showing={len(page_items)} meta_hits={len(meta_map)}"
+        f"favs_views.offline_favs_view: total={len(favs)} "
+        f"offline={len(offline)} meta_hits={len(meta_map)}"
     )
-    _render_favs(handle, page_items, offline_meta=meta_map)
-    if (p * _FAVS_PER_PAGE) < len(offline):
-        kodi_helpers.add_dir(handle, f"Next page ({p + 1})",
-                             "favs_offline", page=p + 1)
+    _render_favs(handle, offline, offline_meta=meta_map)
     kodi_helpers.end_directory(handle, content_type="videos")
