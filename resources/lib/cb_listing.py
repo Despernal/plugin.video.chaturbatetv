@@ -204,17 +204,41 @@ def clean_subject(subject: str | None) -> str:
     return re.sub(r"\s+", " ", no_tags).strip()
 
 
+def _format_seconds_online(seconds: int) -> str:
+    """Render the affiliate API's ``seconds_online`` as a short human
+    string. Empty string for "barely online yet" so the plot omits the
+    line. Hours+minutes when under a day; days+hours when at or above a
+    day (minutes drop because at that scale the user cares about
+    days/hours not the trailing minutes).
+
+    Examples: 0 -> "", 45 -> "", 60 -> "1m", 6697 -> "1h 51m",
+    86400 -> "1d 0h", 3*86400 + 14*3600 + 59*60 -> "3d 14h".
+    """
+    if seconds < 60:
+        return ""
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        h, rem = divmod(seconds, 3600)
+        m = rem // 60
+        return f"{h}h {m}m"
+    d, rem = divmod(seconds, 86400)
+    h = rem // 3600
+    return f"{d}d {h}h"
+
+
 def plot_for(room: dict[str, Any]) -> str:
     """Build a Kodi plot line for a list item from a room dict.
 
     Format mirrors the  layout (Subject / Age / Location /
-    Watching / Followers / Tags) but uses HALO cyan accents instead of
-    's deeppink, and HALO green for the tag line.
+    Watching / Followers / Online / Tags) but uses HALO cyan accents
+    instead of 's deeppink, and HALO green for the tag line.
     """
     age = room.get("display_age") or "Unknown"
     location = room.get("location") or ""
     viewers = _to_int(room.get("num_users"), 0)
     followers = _to_int(room.get("num_followers"), 0)
+    online_str = _format_seconds_online(_to_int(room.get("seconds_online"), 0))
     subject = clean_subject(room.get("subject") or room.get("room_subject"))
     parts: list[str] = []
     if subject:
@@ -224,6 +248,8 @@ def plot_for(room: dict[str, Any]) -> str:
         parts.append(f"[COLOR FF00d4ff]Location:[/COLOR] {location}")
     parts.append(f"[COLOR FF00d4ff]Watching:[/COLOR] {viewers}")
     parts.append(f"[COLOR FF00d4ff]Followers:[/COLOR] {followers}")
+    if online_str:
+        parts.append(f"[COLOR FF00d4ff]Online:[/COLOR] {online_str}")
     tags = room.get("tags") or []
     if isinstance(tags, list) and tags:
         tag_str = ", ".join(f"#{t}" for t in tags)

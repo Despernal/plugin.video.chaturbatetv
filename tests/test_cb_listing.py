@@ -205,6 +205,66 @@ def test_plot_for_omits_location_line_when_blank() -> None:
     assert "Location:" not in plot
 
 
+def test_format_seconds_online_under_one_minute_returns_empty() -> None:
+    """v0.7.16: tiny windows aren't worth a line; the model is hardly
+    online yet. Skip rather than show '0m'.
+    """
+    from resources.lib.cb_listing import _format_seconds_online
+    assert _format_seconds_online(0) == ""
+    assert _format_seconds_online(45) == ""
+
+
+def test_format_seconds_online_minutes_only() -> None:
+    """Less than an hour -> 'Xm'."""
+    from resources.lib.cb_listing import _format_seconds_online
+    assert _format_seconds_online(60) == "1m"
+    assert _format_seconds_online(150) == "2m"
+    assert _format_seconds_online(59 * 60) == "59m"
+
+
+def test_format_seconds_online_hours_and_minutes() -> None:
+    """Less than a day -> 'Xh Ym'."""
+    from resources.lib.cb_listing import _format_seconds_online
+    assert _format_seconds_online(3600) == "1h 0m"
+    assert _format_seconds_online(6697) == "1h 51m"
+    assert _format_seconds_online(23 * 3600 + 59 * 60) == "23h 59m"
+
+
+def test_format_seconds_online_days_and_hours() -> None:
+    """Day or more -> 'Xd Yh'. Minutes dropped at this scale; users
+    care about days vs hours, not minutes after a full day."""
+    from resources.lib.cb_listing import _format_seconds_online
+    assert _format_seconds_online(86400) == "1d 0h"
+    assert _format_seconds_online(86400 + 3 * 3600) == "1d 3h"
+    assert _format_seconds_online(3 * 86400 + 14 * 3600 + 59 * 60) == "3d 14h"
+
+
+def test_plot_for_includes_online_duration_when_seconds_online_present() -> None:
+    """v0.7.16: when the affiliate API returns seconds_online, the
+    plot includes an 'Online:' line so users can see how long the
+    model has been broadcasting before they pick.
+    """
+    plot = plot_for({"username": "alice", "num_users": 100, "num_followers": 1000,
+                     "seconds_online": 6697})
+    assert "Online:" in plot
+    assert "1h 51m" in plot
+
+
+def test_plot_for_omits_online_when_seconds_online_missing() -> None:
+    """If the API doesn't carry seconds_online (e.g. older bulk fetch
+    fallback path), don't add the line."""
+    plot = plot_for({"username": "alice", "num_users": 100, "num_followers": 1000})
+    assert "Online:" not in plot
+
+
+def test_plot_for_omits_online_when_seconds_online_under_a_minute() -> None:
+    """Match _format_seconds_online's empty-string contract: tiny
+    windows don't get a line."""
+    plot = plot_for({"username": "alice", "num_users": 100, "num_followers": 1000,
+                     "seconds_online": 30})
+    assert "Online:" not in plot
+
+
 def test_plot_for_renders_tags_in_green() -> None:
     plot = plot_for({"username": "alice", "tags": ["blonde", "teen"],
                      "num_users": 1, "num_followers": 0})
