@@ -404,6 +404,164 @@ def refresh_offline_meta(
     spawn_func(_bg)
 
 
+def deep_refresh_offline_meta(
+    handle: int,
+    *,
+    fav_slugs: list[str] | None = None,
+    online_slugs: frozenset[str] | set[str] | None = None,
+    fetch_status_func: Any = None,
+    head_thumb_func: Any = None,
+    notify_func: Any = None,
+    spawn_func: Any = None,
+    sleep_func: Any = None,
+    rate_limit_seconds: float = 1.0,
+    **_params: Any,
+) -> None:
+    """v0.7.22 deep refresh: walk every offline fav and per-slug-probe
+    the AJAX status + thumb HEAD, persisting into the model_meta DB.
+
+    Different from ``refresh_offline_meta`` (which only re-fetches
+    the bulk-online feed): this one specifically targets the slugs
+    we DON'T expect to find in any feed. It tells us, for each
+    offline fav, whether the account still exists (status=offline)
+    or is banned/deleted (status=banned/deleted -> rendered with a
+    [GONE] prefix in the offline favs view).
+
+    Cost: ~2 HTTP requests per slug (POST + HEAD), rate-limited at
+    one slug per ``rate_limit_seconds`` (default 1s). For 1228 favs
+    that's ~20 minutes. Polite, well below CB's threshold.
+
+    Lock-shared with the bulk refresh: if a refresh is in progress,
+    we toast "already in progress" and exit. Auto-poll defers while
+    we're crawling (lock semantics). 7-day auto-expire on the spawn.
+    """
+    from resources.lib import logger
+
+    if notify_func is None:
+        notify_func = _notify
+    if spawn_func is None:
+        def _default_spawn(target: Any) -> None:
+            t = threading.Thread(
+                target=target,
+                name="chaturbatetv-deep-refresh",
+                daemon=True,
+            )
+            t.start()
+        spawn_func = _default_spawn
+    if sleep_func is None:
+        import time as _time
+
+        def _default_sleep(s: float) -> None:
+            _time.sleep(s)
+        sleep_func = _default_sleep
+    if fetch_status_func is None:
+        from resources.lib import cb_client as _cb_client
+        fetch_status_func = _cb_client.fetch_room_status_json
+    if head_thumb_func is None:
+        from resources.lib import cb_client as _cb_client
+        head_thumb_func = _cb_client.head_thumb
+
+    # Compute the worklist BEFORE spawning so the user gets immediate
+    # feedback on how many slugs we're about to crawl.
+    if fav_slugs is None:
+        favs = favs_store.load(_favs_path())
+        fav_slugs = [f.slug for f in favs]
+    if online_slugs is None:
+        online_slugs = _TV_BULK_CACHE.get("slugs") or frozenset()
+
+    from resources.lib import model_meta_store as mms
+    worklist = mms.partition_offline_slugs(list(fav_slugs), online_slugs)
+    eta_min = max(1, int(len(worklist) * rate_limit_seconds / 60))
+    logger._log(
+        f"deep_refresh_offline_meta: {len(worklist)} offline favs to crawl "
+        f"(rate={rate_limit_seconds}s, ETA ~{eta_min}min)"
+    )
+
+    def _bg() -> None:
+        # Honour the same lock as the bulk refresh -- we don't want
+        # the auto-poll firing while we're per-slug crawling, and we
+        # don't want a duplicate manual click queueing another crawl.
+        if _BULK_REFRESH_LOCK.locked():
+            notify_func(
+                "Chaturbate TV",
+                "A refresh is already in progress",
+            )
+            logger._log("deep_refresh_offline_meta: skipped (lock held)")
+            return
+        if not _BULK_REFRESH_LOCK.acquire(blocking=False):
+            notify_func(
+                "Chaturbate TV",
+                "A refresh is already in progress",
+            )
+            logger._log("deep_refresh_offline_meta: skipped (lock raced)")
+            return
+        notify_func(
+            "Chaturbate TV",
+            f"Starting deep refresh: {len(worklist)} offline favs "
+            f"(~{eta_min} min)",
+        )
+        counts: dict[str, int] = {"ok": 0, "gone": 0, "error": 0}
+        try:
+            db_path = str(_model_meta_db_path())
+            conn = mms.open_db(db_path)
+            try:
+                import time as _time
+                for i, slug in enumerate(worklist):
+                    try:
+                        data = fetch_status_func(slug)
+                        status = (data.get("room_status") or "")
+                        thumb_code = head_thumb_func(slug)
+                        thumb_ok = thumb_code == 200
+                        # If thumb 404 + status anything -- treat as gone.
+                        # CB's static thumb URL serves 200 even for offline,
+                        # so a 404 means the account is truly removed.
+                        if thumb_code == 404 and status not in (
+                            "banned", "deleted", "gone"
+                        ):
+                            status = "gone"
+                        mms.upsert_status(
+                            conn, slug,
+                            room_status=status or "offline",
+                            thumb_available=thumb_ok,
+                            now=int(_time.time()),
+                        )
+                        if status in ("banned", "deleted", "gone"):
+                            counts["gone"] += 1
+                        else:
+                            counts["ok"] += 1
+                    except Exception as exc:
+                        counts["error"] += 1
+                        logger._log(
+                            f"deep_refresh_offline_meta: slug={slug!r} "
+                            f"FAIL err={exc!r}"
+                        )
+                    # Sleep between iterations, NOT after the last one
+                    # (the user is waiting for the done toast).
+                    if i + 1 < len(worklist):
+                        sleep_func(rate_limit_seconds)
+                    # Progress log every 100 slugs so a very long
+                    # crawl is observable without being noisy.
+                    if (i + 1) % 100 == 0:
+                        logger._log(
+                            f"deep_refresh_offline_meta: progress "
+                            f"{i + 1}/{len(worklist)}"
+                        )
+            finally:
+                conn.close()
+            notify_func(
+                "Chaturbate TV",
+                f"Deep refresh done: {counts['ok']} ok, "
+                f"{counts['gone']} gone, {counts['error']} errors",
+            )
+            logger._log(
+                f"deep_refresh_offline_meta: done counts={counts!r}"
+            )
+        finally:
+            _BULK_REFRESH_LOCK.release()
+
+    spawn_func(_bg)
+
+
 def open_settings(handle: int, **_params: Any) -> None:
     """Open the addon's settings dialog.
 
@@ -814,6 +972,10 @@ def tv_list(handle: int, store_path: Path | None = None,
                 # Suffix on the right of the name -- HALO cyan so it
                 # blends with the existing [P##] tag styling.
                 label = f"{label}  [COLOR FF8899bb]({ago} ago)[/COLOR]"
+            # v0.7.22: prepend [GONE] for banned/deleted/gone accounts.
+            gone_prefix = mms.label_prefix_for_row(meta_row)
+            if gone_prefix:
+                label = gone_prefix + label
             image = mms.image_for_row(meta_row)
             plot_str = mms.plot_for_offline_row(meta_row)
             plot = plot_str or None

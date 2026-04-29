@@ -121,6 +121,7 @@ class _LazyHandlers(dict[str, _Handler]):
         self["refresh_artwork"] = addon_actions.refresh_artwork
         self["restart_kodi"] = addon_actions.restart_kodi
         self["refresh_offline_meta"] = addon_actions.refresh_offline_meta
+        self["deep_refresh_offline_meta"] = addon_actions.deep_refresh_offline_meta
         self["open_settings"] = addon_actions.open_settings
 
     def get(self, key: str, default: Any = None) -> Any:

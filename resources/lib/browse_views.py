@@ -93,6 +93,11 @@ def main_menu(handle: int, **_params: Any) -> None:
     )
     kodi_helpers.add_dir(
         handle,
+        "[COLOR FFc8e8f8]>> Deep refresh: per-fav status check (slow, ~20 min)[/COLOR]",
+        "deep_refresh_offline_meta",
+    )
+    kodi_helpers.add_dir(
+        handle,
         "[COLOR FFff8080]>> Restart Kodi (clears stuck audio buffer)[/COLOR]",
         "restart_kodi",
     )

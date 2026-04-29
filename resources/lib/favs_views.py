@@ -314,6 +314,12 @@ def _render_favs(handle: int, favs: list[Favorite],
             # popular at a glance. Different bracket style so live and
             # last-known are visually distinct.
             label = f"{label} (~{meta_row['last_viewers']})"
+        # v0.7.22: prepend [GONE] for banned/deleted/gone accounts so
+        # the user can see at a glance which favs aren't coming back.
+        if meta_row:
+            gone_prefix = model_meta_store.label_prefix_for_row(meta_row)
+            if gone_prefix:
+                label = gone_prefix + label
         ctx = ctxmenu.build_ctxmenu(
             {"slug": f.slug, "name": f.name, "url": f.url},
             tv_entries=tv_entries,

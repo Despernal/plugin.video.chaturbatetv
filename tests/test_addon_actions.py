@@ -704,6 +704,144 @@ def test_refresh_offline_meta_swallows_refresh_exception(
     assert any("fail" in m.lower() for m in msgs)
 
 
+def test_deep_refresh_offline_meta_iterates_offline_favs(
+    kodi_mocks: dict[str, MagicMock],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v0.7.22 deep crawl: per-slug status check for every fav that
+    isn't currently in the bulk-online cache. Each iteration calls
+    fetch_room_status_json + head_thumb (rate-limited at 1/sec via
+    sleep_func DI) and writes via model_meta_store.upsert_status.
+
+    Verifies: only OFFLINE favs are iterated (online ones already
+    have fresh data); rate-limit sleep is invoked between iterations;
+    a final summary toast shows the count by status.
+    """
+    actions = _import()
+
+    # Stand up a tmp DB for the test.
+    db_path = str(tmp_path / "model_meta.db")
+    monkeypatch.setattr(actions, "_model_meta_db_path",
+                        lambda: Path(db_path))
+
+    notifies: list[tuple[str, str]] = []
+    statuses_fetched: list[str] = []
+    thumbs_fetched: list[str] = []
+    sleeps: list[float] = []
+    spawn_calls: list[Any] = []
+
+    def fake_notify(heading: str, msg: str) -> None:
+        notifies.append((heading, msg))
+
+    def fake_status(slug: str, fetch_func: Any = None) -> dict[str, Any]:
+        statuses_fetched.append(slug)
+        # Return banned for "ghost", offline for the others.
+        if slug == "ghost":
+            return {"success": True, "room_status": "banned", "url": "",
+                    "hidden_message": "", "cmaf_edge": False}
+        return {"success": True, "room_status": "offline", "url": "",
+                "hidden_message": "", "cmaf_edge": False}
+
+    def fake_head(slug: str) -> int:
+        thumbs_fetched.append(slug)
+        return 404 if slug == "ghost" else 200
+
+    def fake_sleep(secs: float) -> None:
+        sleeps.append(secs)
+
+    def fake_spawn(target: Any) -> None:
+        spawn_calls.append(target)
+        target()
+
+    fav_slugs = ["alice", "bob", "ghost"]
+    online_slugs = frozenset({"alice"})  # alice is currently online -> skip
+
+    actions.deep_refresh_offline_meta(
+        handle=42,
+        fav_slugs=fav_slugs,
+        online_slugs=online_slugs,
+        fetch_status_func=fake_status,
+        head_thumb_func=fake_head,
+        notify_func=fake_notify,
+        spawn_func=fake_spawn,
+        sleep_func=fake_sleep,
+    )
+
+    # Spawned exactly once.
+    assert len(spawn_calls) == 1
+
+    # Only offline slugs were probed; alice (online) skipped.
+    assert "alice" not in statuses_fetched
+    assert set(statuses_fetched) == {"bob", "ghost"}
+    assert set(thumbs_fetched) == {"bob", "ghost"}
+
+    # Rate-limit sleep was applied between iterations.
+    assert len(sleeps) >= 1, f"expected at least one sleep, got {sleeps!r}"
+    assert all(s > 0 for s in sleeps), f"sleep durations must be positive: {sleeps!r}"
+
+    # The DB was actually written -- ghost should have status='banned',
+    # bob should have status='offline'.
+    import resources.lib.model_meta_store as mms_real
+    conn = mms_real.open_db(db_path)
+    try:
+        ghost = mms_real.get_model(conn, "ghost")
+        assert ghost is not None
+        assert ghost["last_room_status"] == "banned"
+        assert ghost["thumb_available"] == 0
+        bob = mms_real.get_model(conn, "bob")
+        assert bob is not None
+        assert bob["last_room_status"] == "offline"
+        assert bob["thumb_available"] == 1
+        # alice should NOT have a row written by deep refresh.
+        alice = mms_real.get_model(conn, "alice")
+        assert alice is None
+    finally:
+        conn.close()
+
+    # Notification flow: start + finish toast.
+    msgs = [n[1] for n in notifies]
+    assert any("deep refresh" in m.lower() or "starting" in m.lower()
+               for m in msgs), f"missing start toast: {msgs!r}"
+    assert any("done" in m.lower() or "complete" in m.lower()
+               for m in msgs), f"missing done toast: {msgs!r}"
+
+
+def test_deep_refresh_offline_meta_skips_when_locked(
+    kodi_mocks: dict[str, MagicMock],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If _BULK_REFRESH_LOCK is held, deep-refresh toasts 'in progress'
+    and exits without firing the per-slug fetches."""
+    actions = _import()
+    db_path = str(tmp_path / "x.db")
+    monkeypatch.setattr(actions, "_model_meta_db_path",
+                        lambda: Path(db_path))
+
+    notifies: list[tuple[str, str]] = []
+    fetches: list[str] = []
+
+    actions._BULK_REFRESH_LOCK.acquire()
+    try:
+        actions.deep_refresh_offline_meta(
+            handle=42,
+            fav_slugs=["a", "b"],
+            online_slugs=frozenset(),
+            fetch_status_func=lambda slug, fetch_func=None: fetches.append(slug) or {},
+            head_thumb_func=lambda slug: 200,
+            notify_func=lambda h, m: notifies.append((h, m)),
+            spawn_func=lambda t: t(),
+            sleep_func=lambda s: None,
+        )
+    finally:
+        actions._BULK_REFRESH_LOCK.release()
+
+    assert fetches == [], "must not fetch when lock is held"
+    msgs = [n[1] for n in notifies]
+    assert any("already" in m.lower() or "in progress" in m.lower() for m in msgs)
+
+
 def test_restart_kodi_runs_quit_builtin(
     kodi_mocks: dict[str, MagicMock],
 ) -> None:

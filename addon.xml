@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <addon id="plugin.video.chaturbatetv"
        name="Chaturbate TV"
-       version="0.7.21"
+       version="0.7.22"
        provider-name="flux">
     <requires>
         <import addon="xbmc.python" version="3.0.0"/>
@@ -20,7 +20,9 @@
             <icon>icon.png</icon>
             <fanart>fanart.jpg</fanart>
         </assets>
-        <news>0.7.21 - URGENT loop unblock for the silent-stub path. v0.7.15 introduced the silent stub to suppress Kodi's "playback failed" dialog when a TV-mode slot resolved offline. Worked great for the dialog, but exposed a separate bug: when the silent stub plays, the loop iterates and pick_target re-picks the same offline slug (because the bulk-live cache still has her), so the stub plays again. Forever. Observed today: TV mode looped on a solo P12 tier of 'model_f' for ~6s per cycle, indefinitely. User had to play something else to break out.
+        <news>0.7.22 - Deep per-fav status crawl. New menu entry under Refresh (the regular one): "Deep refresh: per-fav status check (slow, ~20 min)". Spawns a daemon thread that walks every offline fav (= favs not currently in the bulk-online cache) and per-slug probes (1) get_edge_hls_url_ajax/ for room_status, (2) HEAD https://thumb.live.mmcdn.com/ri/&lt;slug&gt;.jpg for thumbnail availability. Rate-limited 1 second per slug = ~20 min for 1228 favs. Polite, well below CB's threshold. Persists into the model_meta DB via new upsert_status helper -- only writes the v2 status columns + updated_epoch, leaving rich data from regular auto-track upserts intact. Schema migration runs automatically on open_db: any DB at v1 gets the three new columns added via ALTER TABLE without losing existing rows. Lock-shared with the bulk refresh: clicking either while one is running toasts "already in progress" and exits cleanly. Final summary toast: "Deep refresh done: N ok, M gone, K errors". Statuses banned/deleted/gone get a HALO-red [GONE] prefix on the offline-favs label and TV-list label so accounts that aren't coming back are visually distinct from temporarily-offline models.
+
+0.7.21 - URGENT loop unblock for the silent-stub path. v0.7.15 introduced the silent stub to suppress Kodi's "playback failed" dialog when a TV-mode slot resolved offline. Worked great for the dialog, but exposed a separate bug: when the silent stub plays, the loop iterates and pick_target re-picks the same offline slug (because the bulk-live cache still has her), so the stub plays again. Forever. Observed today: TV mode looped on a solo P12 tier of 'model_f' for ~6s per cycle, indefinitely. User had to play something else to break out.
 
 Root cause: addon_actions._tv_bulk_mark_offline runs in playvid's process (Kodi spawns a separate default.py to resolve plugin URLs); the TV loop's _TV_BULK_CACHE lives in a DIFFERENT process. So playvid's mark-offline never reached the loop's cache. Cross-process state was the missing piece.
 

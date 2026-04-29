@@ -100,6 +100,37 @@ def _safe_status_default() -> dict[str, Any]:
     }
 
 
+def head_thumb(slug: str) -> int:
+    """HEAD the static thumbnail URL for ``slug``; return the HTTP
+    status code, or 0 on network error.
+
+    Used by the v0.7.22 deep-refresh path to determine whether a
+    model's account still exists and has a cached thumbnail. CB
+    serves the LAST thumbnail at this URL even after the model goes
+    offline, so a 200 means "account is alive" while a 404 means
+    "thumbnail never cached, account likely deleted/banned".
+
+    Network errors return 0 -- caller should treat 0 as "couldn't
+    check, try again next refresh."
+    """
+    from urllib.request import Request, urlopen
+
+    from resources.lib import logger
+
+    if not slug:
+        return 0
+    url = f"https://thumb.live.mmcdn.com/ri/{slug}.jpg"
+    headers = dict(HTTP_HEADERS_IPAD)
+    req = Request(url, headers=headers, method="HEAD")  # noqa: S310
+    try:
+        with urlopen(req, timeout=10.0) as resp:  # noqa: S310
+            status = int(getattr(resp, "status", 0) or 0)
+    except Exception as exc:
+        logger._log(f"cb_client.head_thumb: FAIL slug={slug!r} err={exc!r}")
+        return 0
+    return status
+
+
 def fetch_room_status_json(slug: str, fetch_func: _FetchFn | None = None) -> dict[str, Any]:
     """Hit ``get_edge_hls_url_ajax`` for a cheap is_live + hls_source.
 

@@ -38,14 +38,14 @@ import time
 from typing import Any
 
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
 
-# Affiliate-API field shape uses ``image_url`` and ``image_url_360x270``.
-# Roomlist-API field shape uses ``img``. We persist both into separate
-# columns so neither overwrites the other and the renderer can prefer
-# whichever it has.
-_DDL = """
+# Schema is split into TABLES + INDEXES so we can run an
+# add-missing-columns step between them. CREATE INDEX on a column
+# that doesn't exist (because the DB is at an older schema) would
+# fail otherwise.
+_DDL_TABLES = """
 CREATE TABLE IF NOT EXISTS models (
     slug                 TEXT PRIMARY KEY,
     display_name         TEXT,
@@ -80,18 +80,80 @@ CREATE TABLE IF NOT EXISTS models (
     last_source          TEXT,
     updated_epoch        INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_models_last_online ON models(last_online_epoch);
-CREATE INDEX IF NOT EXISTS idx_models_gender ON models(gender);
 CREATE TABLE IF NOT EXISTS schema_meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
 """
 
+# Columns that may be missing on older DBs; ALTER TABLE adds them in
+# place without dropping data. Format: "col_name DDL_FRAGMENT".
+_EXPECTED_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("display_name", "TEXT"),
+    ("gender", "TEXT"),
+    ("age", "INTEGER"),
+    ("country", "TEXT"),
+    ("location", "TEXT"),
+    ("spoken_languages", "TEXT"),
+    ("birthday", "TEXT"),
+    ("is_hd", "INTEGER"),
+    ("is_age_verified", "INTEGER"),
+    ("is_gaming", "INTEGER"),
+    ("is_new", "INTEGER"),
+    ("has_password", "INTEGER"),
+    ("recorded", "INTEGER"),
+    ("private_price", "INTEGER"),
+    ("spy_show_price", "INTEGER"),
+    ("last_subject", "TEXT"),
+    ("last_tags_json", "TEXT"),
+    ("last_viewers", "INTEGER"),
+    ("last_followers", "INTEGER"),
+    ("last_image_url", "TEXT"),
+    ("last_image_url_thumb", "TEXT"),
+    ("last_image_url_legacy", "TEXT"),
+    ("block_from_countries", "TEXT"),
+    ("block_from_states", "TEXT"),
+    ("last_start_epoch", "INTEGER"),
+    ("last_start_iso", "TEXT"),
+    ("first_online_epoch", "INTEGER"),
+    ("last_seconds_online", "INTEGER"),
+    ("last_source", "TEXT"),
+    # v0.7.21 (schema v2):
+    ("last_room_status", "TEXT"),
+    ("last_status_check_epoch", "INTEGER"),
+    ("thumb_available", "INTEGER"),
+)
+
+_DDL_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_models_last_online ON models(last_online_epoch);
+CREATE INDEX IF NOT EXISTS idx_models_gender ON models(gender);
+CREATE INDEX IF NOT EXISTS idx_models_status ON models(last_room_status);
+"""
+
+
+def _ensure_columns(conn: sqlite3.Connection) -> None:
+    """ALTER TABLE for any column missing on the existing DB. Older
+    DBs created before a column was added end up with the new column
+    set to NULL on existing rows -- callers tolerate NULL (the upsert
+    code uses COALESCE, the renderer guards every read).
+    """
+    cur = conn.execute("PRAGMA table_info(models)")
+    existing = {row[1] for row in cur.fetchall()}
+    for col, type_ in _EXPECTED_COLUMNS:
+        if col not in existing:
+            # col + type_ come from a fixed module-level tuple; no
+            # user input lands in the SQL string.
+            conn.execute(f"ALTER TABLE models ADD COLUMN {col} {type_}")
+
 
 def open_db(path: str) -> sqlite3.Connection:
     """Open (or create) the meta DB at ``path``. Schema is applied
     idempotently so this is safe to call on every addon startup.
+
+    Migration semantics: any column listed in ``_EXPECTED_COLUMNS``
+    that's missing on the existing DB gets added via ALTER TABLE.
+    Existing rows keep all their data; new columns default to NULL
+    until populated by a subsequent upsert.
 
     The connection is configured with WAL journal mode for read/write
     concurrency (TV loop polls write to it while a render thread reads)
@@ -101,9 +163,13 @@ def open_db(path: str) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
-    conn.executescript(_DDL)
+    conn.executescript(_DDL_TABLES)
+    _ensure_columns(conn)
+    conn.executescript(_DDL_INDEXES)
+    # Stamp the version regardless of upgrade path -- INSERT OR
+    # REPLACE so we move from v1 to v2 cleanly.
     conn.execute(
-        "INSERT OR IGNORE INTO schema_meta(key, value) VALUES('version', ?)",
+        "INSERT OR REPLACE INTO schema_meta(key, value) VALUES('version', ?)",
         (str(_SCHEMA_VERSION),),
     )
     return conn
@@ -355,6 +421,84 @@ def count(conn: sqlite3.Connection) -> int:
     return int(conn.execute("SELECT COUNT(*) FROM models").fetchone()[0])
 
 
+# v0.7.22 deep status crawl ---------------------------------------------- #
+
+
+_STATUS_GONE = ("banned", "deleted", "gone")
+
+
+def upsert_status(
+    conn: sqlite3.Connection,
+    slug: str,
+    *,
+    room_status: str | None,
+    thumb_available: bool | None,
+    now: int,
+) -> None:
+    """Persist a per-slug status check (deep refresh path).
+
+    Touches only the v2 status columns + ``updated_epoch``. Rich data
+    from the bulk-track upserts (display_name, age, image_url, last_subject,
+    last_viewers, etc) stays intact; this helper does NOT advance
+    ``last_online_epoch`` because a status check doesn't confirm the
+    model is broadcasting -- it just confirms account state.
+
+    If the row doesn't exist yet (we deep-refresh a slug we've never
+    polled online), creates a sparse row with just the status fields
+    populated. ``last_online_epoch`` defaults to 0 since we've never
+    seen them online; the renderer's last_seen_ago_label() returns ""
+    in that case so no misleading "0s ago" appears.
+    """
+    slug = (slug or "").strip()
+    if not slug:
+        return
+    rs = room_status if room_status is not None else None
+    ta = (1 if thumb_available else 0) if thumb_available is not None else None
+    conn.execute(
+        """
+        INSERT INTO models (slug, last_room_status, last_status_check_epoch,
+                            thumb_available, last_online_epoch, updated_epoch)
+        VALUES (:slug, :rs, :checked, :ta, 0, :now)
+        ON CONFLICT(slug) DO UPDATE SET
+          last_room_status = COALESCE(excluded.last_room_status, last_room_status),
+          last_status_check_epoch = excluded.last_status_check_epoch,
+          thumb_available = COALESCE(excluded.thumb_available, thumb_available),
+          updated_epoch = excluded.updated_epoch
+        """,
+        {"slug": slug, "rs": rs, "ta": ta,
+         "checked": int(now), "now": int(now)},
+    )
+
+
+def label_prefix_for_row(row: dict[str, Any]) -> str:
+    """Return a short HALO-red ``[GONE] `` prefix when ``last_room_status``
+    is one of {banned, deleted, gone}; empty string otherwise.
+
+    The prefix gets prepended to the offline-fav list label so accounts
+    that are unlikely to ever come back are visually distinct from
+    just-temporarily-offline models the user might want to keep
+    waiting on.
+    """
+    status = (row.get("last_room_status") or "").strip().lower()
+    if status in _STATUS_GONE:
+        return "[COLOR FFff8080][GONE][/COLOR] "
+    return ""
+
+
+def partition_offline_slugs(
+    slugs: list[str],
+    online_slugs: frozenset[str] | set[str],
+) -> list[str]:
+    """Return the subset of ``slugs`` that aren't currently in the
+    online cache. Order-preserving so a UI showing progress reflects
+    the user's fav order.
+
+    The deep-refresh handler walks this list at one slug per second
+    or so, hitting per-slug AJAX + thumb HEAD for each.
+    """
+    return [s for s in slugs if s not in online_slugs]
+
+
 # Render helpers (consumed by favs_views, addon_actions.tv_list) ---------- #
 
 
@@ -461,6 +605,18 @@ def plot_for_offline_row(row: dict[str, Any], now: float | int | None = None) ->
     last_seen = last_seen_ago_label(row, now=now)
     if last_seen:
         parts.append(f"[COLOR FF00d4ff]Last seen:[/COLOR] {last_seen}")
+
+    status = (row.get("last_room_status") or "").strip()
+    if status:
+        # Banned / deleted / gone get the warning red so the user sees
+        # at a glance which favs aren't coming back. Other statuses
+        # (offline, private, hidden, away, password_protected) use the
+        # cyan accent so they read as ordinary metadata.
+        status_color = ("FFff8080" if status.lower() in _STATUS_GONE
+                        else "FF00d4ff")
+        parts.append(
+            f"[COLOR FF00d4ff]Status:[/COLOR] [COLOR {status_color}]{status}[/COLOR]"
+        )
 
     tags_raw = row.get("last_tags_json")
     if tags_raw:

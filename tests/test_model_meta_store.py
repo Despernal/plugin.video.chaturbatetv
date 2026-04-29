@@ -450,6 +450,168 @@ def test_plot_for_offline_row_partial_omits_missing_lines() -> None:
     assert "1m" in plot
 
 
+def test_v1_db_migrates_to_v2_preserving_data(tmp_path: Path) -> None:
+    """v0.7.21 added three columns (last_room_status,
+    last_status_check_epoch, thumb_available) for the deep status
+    crawl. Production DBs already exist at v1 -- migration must add
+    the columns without dropping the rows we already have."""
+    db = tmp_path / "meta.db"
+    # Create a v1 DB by hand: the v1 schema is the ORIGINAL columns
+    # plus schema_meta(version=1).
+    import sqlite3
+    conn = sqlite3.connect(str(db))
+    conn.executescript("""
+        CREATE TABLE models (
+            slug TEXT PRIMARY KEY,
+            display_name TEXT,
+            last_subject TEXT,
+            last_viewers INTEGER,
+            last_image_url TEXT,
+            last_image_url_thumb TEXT,
+            last_image_url_legacy TEXT,
+            last_online_epoch INTEGER NOT NULL,
+            first_online_epoch INTEGER,
+            updated_epoch INTEGER NOT NULL
+        );
+        CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        INSERT INTO schema_meta (key, value) VALUES ('version', '1');
+        INSERT INTO models (slug, display_name, last_subject, last_viewers,
+            last_image_url, last_online_epoch, first_online_epoch, updated_epoch)
+        VALUES ('alice', 'Alice', 'old subject', 99,
+                'https://example.com/x.jpg', 1000, 1000, 1000);
+    """)
+    conn.commit()
+    conn.close()
+
+    # Open with current code - migration must run.
+    conn = mms.open_db(str(db))
+    cur = conn.execute("SELECT value FROM schema_meta WHERE key='version'")
+    assert cur.fetchone()[0] == str(mms._SCHEMA_VERSION)
+
+    # Existing row must still be readable.
+    row = mms.get_model(conn, "alice")
+    assert row is not None
+    assert row["display_name"] == "Alice"
+    assert row["last_subject"] == "old subject"
+    assert row["last_viewers"] == 99
+    # New columns present, NULL for the existing row (haven't been
+    # populated yet -- that happens via deep refresh).
+    assert "last_room_status" in row
+    assert row["last_room_status"] is None
+    assert "last_status_check_epoch" in row
+    assert "thumb_available" in row
+
+
+def test_upsert_status_updates_status_columns_only(tmp_path: Path) -> None:
+    """v0.7.21: deep refresh writes per-slug status data via
+    upsert_status -- it touches only last_room_status,
+    last_status_check_epoch, thumb_available, and updated_epoch.
+    Rich data from earlier auto-track upserts (display_name, age,
+    image_url, last_subject, last_viewers, etc) MUST stay intact.
+    """
+    conn = _open(tmp_path)
+    # Seed with rich data via the regular auto-track upsert.
+    mms.upsert_room(conn, _AFFILIATE_ROOM, now=1_000_000, source="affiliate")
+
+    # Now hit upsert_status as the deep refresh would.
+    mms.upsert_status(
+        conn, "alice",
+        room_status="banned",
+        thumb_available=False,
+        now=2_000_000,
+    )
+
+    row = mms.get_model(conn, "alice")
+    assert row is not None
+    # Status columns updated.
+    assert row["last_room_status"] == "banned"
+    assert row["thumb_available"] == 0
+    assert row["last_status_check_epoch"] == 2_000_000
+    # Rich data PRESERVED.
+    assert row["display_name"] == "Alice"
+    assert row["last_subject"] == "first day on cam"
+    assert row["last_viewers"] == 1234
+    assert row["last_image_url"] == "https://example.com/alice.jpg"
+    # last_online_epoch stays at the original value (we did NOT see
+    # them online during a status check; only the status changed).
+    assert row["last_online_epoch"] == 1_000_000
+
+
+def test_upsert_status_creates_row_for_unknown_slug(tmp_path: Path) -> None:
+    """If we deep-refresh a slug we've never seen online (= no row in
+    the DB), upsert_status creates the row with just the status
+    fields populated. last_online_epoch ends up as 0 since we've
+    never confirmed them online."""
+    conn = _open(tmp_path)
+    mms.upsert_status(
+        conn, "ghost",
+        room_status="offline",
+        thumb_available=True,
+        now=2_000_000,
+    )
+    row = mms.get_model(conn, "ghost")
+    assert row is not None
+    assert row["slug"] == "ghost"
+    assert row["last_room_status"] == "offline"
+    assert row["thumb_available"] == 1
+    assert row["last_status_check_epoch"] == 2_000_000
+    # No rich data since we've never seen them.
+    assert row["display_name"] is None
+    assert row["last_image_url"] is None
+
+
+def test_plot_for_offline_row_includes_status_line_when_present() -> None:
+    """v0.7.21: render the status pulled from the deep refresh."""
+    row = {
+        "slug": "alice",
+        "last_subject": "test",
+        "last_room_status": "offline",
+        "last_online_epoch": 1_000_000,
+    }
+    plot = mms.plot_for_offline_row(row, now=1_000_000 + 60)
+    assert "Status:" in plot
+    assert "offline" in plot
+
+
+def test_plot_for_offline_row_omits_status_line_when_missing() -> None:
+    row = {
+        "slug": "alice",
+        "last_online_epoch": 1_000_000,
+    }
+    plot = mms.plot_for_offline_row(row, now=1_000_000 + 60)
+    assert "Status:" not in plot
+
+
+def test_label_prefix_for_row_marks_gone_models() -> None:
+    """v0.7.21: banned / deleted / gone account states get a [GONE]
+    prefix in the label so the user can see at a glance which favs
+    aren't coming back."""
+    for status in ("banned", "deleted", "gone"):
+        prefix = mms.label_prefix_for_row({"last_room_status": status})
+        assert "GONE" in prefix, f"status={status} should get GONE prefix"
+
+
+def test_label_prefix_for_row_is_empty_for_alive_states() -> None:
+    """Statuses that still represent an alive account get no prefix
+    -- they're just temporarily not broadcasting."""
+    for status in ("public", "private", "offline", "hidden", "away",
+                   "password_protected", None, ""):
+        prefix = mms.label_prefix_for_row({"last_room_status": status})
+        assert prefix == "", f"status={status!r} should not be flagged: {prefix!r}"
+
+
+def test_get_offline_fav_slugs_excludes_currently_online(tmp_path: Path) -> None:
+    """The deep refresh only re-checks slugs that aren't currently
+    online (the auto-track already has fresh data for those). This
+    helper takes the full fav-slug list + the bulk-cache live set
+    and returns the offline subset.
+    """
+    online_slugs = frozenset({"alice", "bob"})
+    fav_slugs = ["alice", "bob", "carol", "dave"]
+    out = mms.partition_offline_slugs(fav_slugs, online_slugs)
+    assert out == ["carol", "dave"]
+
+
 def test_plot_for_offline_row_uses_8char_alpha_color_tags() -> None:
     """Regression guard: every [COLOR <hex>] in the offline plot
     must use 8-char AARRGGBB. 6-char gets rendered blank by Kodi.
