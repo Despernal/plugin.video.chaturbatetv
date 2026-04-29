@@ -36,6 +36,17 @@ def _tv_path() -> Path:
     return _addon_data_dir() / "tv.json"
 
 
+def _model_meta_db_path() -> Path:
+    """Path to the sqlite DB that accumulates per-model metadata.
+
+    Lives under addon_data so it survives addon upgrades and Kodi
+    profile copies. Auto-track in ``_tv_bulk_refresh`` writes every
+    room dict it sees from any poll into this DB; the favs/TV/browse
+    views read from it to render rich info for offline models.
+    """
+    return _addon_data_dir() / "model_meta.db"
+
+
 def _notify(heading: str, msg: str) -> None:
     try:
         import xbmcgui
@@ -466,7 +477,15 @@ def _tv_bulk_refresh() -> bool:
 
     Network failure preserves the stale set so a transient 5xx doesn't
     silently mark every model offline.
+
+    v0.7.18: also persists every room we see into the model_meta sqlite
+    DB so offline favs / TV-list / browse views can render with last-
+    known thumbnail, subject, viewers, etc. The DB is append-overlay
+    (sticky-on-non-null) so partial polls never wipe richer data
+    collected earlier. Meta-store failure is swallowed -- TV mode
+    keeps running even if sqlite is wedged.
     """
+    import json as _json
     import random
     import time as _time
     from resources.lib import cb_client, cb_listing, logger
@@ -483,13 +502,43 @@ def _tv_bulk_refresh() -> bool:
             f"(stale set has {len(_TV_BULK_CACHE['slugs'])} slugs)"
         )
         return False
-    models = cb_listing.parse_affiliate_onlinerooms(body)
+    # Parse once into raw rooms; pass to both the Model converter (for
+    # the cache) and the meta-store upsert (for offline rendering).
+    try:
+        parsed = _json.loads(body) if isinstance(body, (str, bytes)) else body
+    except Exception:  # pragma: no cover - parse_affiliate_onlinerooms also handles
+        parsed = []
+    raw_rooms: list[Any] = parsed if isinstance(parsed, list) else []
+    models = cb_listing.parse_affiliate_onlinerooms(raw_rooms)
     new_slugs = frozenset(m.slug for m in models)
     _TV_BULK_CACHE["slugs"] = new_slugs
     _TV_BULK_CACHE["ts"] = _time.time()
     logger._log(
         f"addon_actions._tv_bulk_refresh: refreshed slugs={len(new_slugs)}"
     )
+    if raw_rooms:
+        try:
+            from resources.lib import model_meta_store as mms
+            db_path = str(_model_meta_db_path())
+            conn = mms.open_db(db_path)
+            try:
+                wrote = mms.upsert_rooms(
+                    conn, raw_rooms, now=int(_time.time()), source="affiliate",
+                )
+                logger._log(
+                    f"addon_actions._tv_bulk_refresh: meta upsert "
+                    f"wrote={wrote} db={db_path}"
+                )
+            finally:
+                conn.close()
+        except Exception as exc:
+            # Meta-store is non-critical; swallow so TV mode doesn't
+            # break if sqlite is wedged or the DB file is briefly
+            # unwritable.
+            logger._log(
+                f"addon_actions._tv_bulk_refresh: meta upsert FAIL "
+                f"err={exc!r}"
+            )
     return True
 
 
