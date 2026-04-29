@@ -9,6 +9,7 @@ public Chaturbate endpoints without authentication.
 """
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -347,8 +348,6 @@ def refresh_offline_meta(
     if notify_func is None:
         notify_func = _notify
     if spawn_func is None:
-        import threading
-
         def _default_spawn(target: Any) -> None:
             t = threading.Thread(
                 target=target,
@@ -359,12 +358,26 @@ def refresh_offline_meta(
         spawn_func = _default_spawn
 
     logger._log("refresh_offline_meta: kicking off background refresh")
-    notify_func(
-        "Chaturbate TV",
-        "Refreshing model info... (will toast when done)",
-    )
 
     def _bg() -> None:
+        # If another refresh (auto-poll, favs view fetch, or a previous
+        # click) is already running, don't start a duplicate. Toast the
+        # user so they know their click was acknowledged but a no-op.
+        # Race window: another caller could acquire between this check
+        # and refresh_func()'s own acquire; in that case refresh_func
+        # returns False and the user sees "failed", which is acceptable
+        # noise vs the much worse "double-fetch the 12 MB JSON" outcome.
+        if _BULK_REFRESH_LOCK.locked():
+            notify_func(
+                "Chaturbate TV",
+                "A refresh is already in progress",
+            )
+            logger._log("refresh_offline_meta: skipped (lock held)")
+            return
+        notify_func(
+            "Chaturbate TV",
+            "Refreshing model info... (will toast when done)",
+        )
         try:
             ok = refresh_func()
         except Exception as exc:
@@ -539,6 +552,19 @@ _TV_BULK_CACHE: dict[str, Any] = {
     "ttl_s": 0.0,
 }
 
+# Non-blocking lock that serializes _tv_bulk_refresh() callers.
+# Multiple call sites converge on this function: the TV loop's
+# ``_make_bulk_is_live_func`` (auto-poll on TTL), favs_views' bulk
+# refresh, and the v0.7.20 manual "Refresh offline model info" menu
+# entry. Without coordination they could race and double-fetch a 12 MB
+# response. Lock semantics: try-acquire only -- never block. Any caller
+# that fails to acquire treats it as "another refresh just claimed
+# this cycle" and falls back to the stale cache. The user-clicked
+# manual handler additionally checks ``locked()`` before kicking off
+# the bg worker so it can show a friendly "already refreshing" toast
+# instead of misleadingly toasting "failed".
+_BULK_REFRESH_LOCK = threading.Lock()
+
 # Affiliate watermarks ('s rotating array; same set favs_views uses).
 _TV_BULK_WATERMARKS = (
     "C9m5N", "tfZSl", "jQrKO", "5XO2a", "WXomN",
@@ -565,55 +591,71 @@ def _tv_bulk_refresh() -> bool:
     from resources.lib import cb_client, cb_listing, logger
     from resources.lib.cb_endpoints import online_rooms_affiliate_url
 
-    wm = random.choice(_TV_BULK_WATERMARKS)
-    url = online_rooms_affiliate_url(wm)
-    logger._log(f"addon_actions._tv_bulk_refresh: url={url}")
-    try:
-        body = cb_client.fetch_browse_page(url)
-    except OSError as exc:
+    if not _BULK_REFRESH_LOCK.acquire(blocking=False):
+        # Another caller is mid-fetch -- bail out without making a
+        # duplicate request. The cache will be fresh once that one
+        # completes. Returning False is what callers already do for
+        # transient failures, so existing callers keep working.
         logger._log(
-            f"addon_actions._tv_bulk_refresh: FAIL err={exc!r} "
-            f"(stale set has {len(_TV_BULK_CACHE['slugs'])} slugs)"
+            "addon_actions._tv_bulk_refresh: another refresh in flight, "
+            "skipping (cache stays at "
+            f"{len(_TV_BULK_CACHE['slugs'])} slugs)"
         )
         return False
-    # Parse once into raw rooms; pass to both the Model converter (for
-    # the cache) and the meta-store upsert (for offline rendering).
+
     try:
-        parsed = _json.loads(body) if isinstance(body, (str, bytes)) else body
-    except Exception:  # pragma: no cover - parse_affiliate_onlinerooms also handles
-        parsed = []
-    raw_rooms: list[Any] = parsed if isinstance(parsed, list) else []
-    models = cb_listing.parse_affiliate_onlinerooms(raw_rooms)
-    new_slugs = frozenset(m.slug for m in models)
-    _TV_BULK_CACHE["slugs"] = new_slugs
-    _TV_BULK_CACHE["ts"] = _time.time()
-    logger._log(
-        f"addon_actions._tv_bulk_refresh: refreshed slugs={len(new_slugs)}"
-    )
-    if raw_rooms:
+        wm = random.choice(_TV_BULK_WATERMARKS)
+        url = online_rooms_affiliate_url(wm)
+        logger._log(f"addon_actions._tv_bulk_refresh: url={url}")
         try:
-            from resources.lib import model_meta_store as mms
-            db_path = str(_model_meta_db_path())
-            conn = mms.open_db(db_path)
-            try:
-                wrote = mms.upsert_rooms(
-                    conn, raw_rooms, now=int(_time.time()), source="affiliate",
-                )
-                logger._log(
-                    f"addon_actions._tv_bulk_refresh: meta upsert "
-                    f"wrote={wrote} db={db_path}"
-                )
-            finally:
-                conn.close()
-        except Exception as exc:
-            # Meta-store is non-critical; swallow so TV mode doesn't
-            # break if sqlite is wedged or the DB file is briefly
-            # unwritable.
+            body = cb_client.fetch_browse_page(url)
+        except OSError as exc:
             logger._log(
-                f"addon_actions._tv_bulk_refresh: meta upsert FAIL "
-                f"err={exc!r}"
+                f"addon_actions._tv_bulk_refresh: FAIL err={exc!r} "
+                f"(stale set has {len(_TV_BULK_CACHE['slugs'])} slugs)"
             )
-    return True
+            return False
+        # Parse once into raw rooms; pass to both the Model converter
+        # (for the cache) and the meta-store upsert (for offline
+        # rendering).
+        try:
+            parsed = _json.loads(body) if isinstance(body, (str, bytes)) else body
+        except Exception:  # pragma: no cover - parse_affiliate_onlinerooms also handles
+            parsed = []
+        raw_rooms: list[Any] = parsed if isinstance(parsed, list) else []
+        models = cb_listing.parse_affiliate_onlinerooms(raw_rooms)
+        new_slugs = frozenset(m.slug for m in models)
+        _TV_BULK_CACHE["slugs"] = new_slugs
+        _TV_BULK_CACHE["ts"] = _time.time()
+        logger._log(
+            f"addon_actions._tv_bulk_refresh: refreshed slugs={len(new_slugs)}"
+        )
+        if raw_rooms:
+            try:
+                from resources.lib import model_meta_store as mms
+                db_path = str(_model_meta_db_path())
+                conn = mms.open_db(db_path)
+                try:
+                    wrote = mms.upsert_rooms(
+                        conn, raw_rooms, now=int(_time.time()), source="affiliate",
+                    )
+                    logger._log(
+                        f"addon_actions._tv_bulk_refresh: meta upsert "
+                        f"wrote={wrote} db={db_path}"
+                    )
+                finally:
+                    conn.close()
+            except Exception as exc:
+                # Meta-store is non-critical; swallow so TV mode doesn't
+                # break if sqlite is wedged or the DB file is briefly
+                # unwritable.
+                logger._log(
+                    f"addon_actions._tv_bulk_refresh: meta upsert FAIL "
+                    f"err={exc!r}"
+                )
+        return True
+    finally:
+        _BULK_REFRESH_LOCK.release()
 
 
 def _tv_bulk_mark_offline(slug: str) -> None:

@@ -585,6 +585,94 @@ def test_refresh_offline_meta_failure_notifies_user(
     )
 
 
+def test_refresh_offline_meta_skipped_when_another_refresh_in_flight(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """v0.7.20: a non-blocking module-level lock guards
+    _tv_bulk_refresh. If a refresh is already in flight (auto poll
+    or a previous manual click still running), a manual click toasts
+    "already in progress" and exits cleanly without firing a duplicate
+    fetch.
+
+    Tested by simulating the lock being held: refresh_func is invoked
+    only when the lock is free, so we capture the lock and watch the
+    handler skip the call.
+    """
+    actions = _import()
+    notifies: list[tuple[str, str]] = []
+    refresh_calls: list[int] = []
+
+    def fake_notify(heading: str, msg: str) -> None:
+        notifies.append((heading, msg))
+
+    def fake_refresh() -> bool:
+        refresh_calls.append(1)
+        return True
+
+    def fake_spawn(target: Any) -> None:
+        target()
+
+    # Acquire the production lock to simulate "already in flight".
+    actions._BULK_REFRESH_LOCK.acquire()
+    try:
+        actions.refresh_offline_meta(
+            handle=42,
+            refresh_func=fake_refresh,
+            notify_func=fake_notify,
+            spawn_func=fake_spawn,
+        )
+    finally:
+        actions._BULK_REFRESH_LOCK.release()
+
+    # No fetch was attempted while the lock was held.
+    assert refresh_calls == [], (
+        f"manual refresh fired despite lock held: {refresh_calls!r}"
+    )
+    msgs = [n[1] for n in notifies]
+    assert any("already" in m.lower() or "in progress" in m.lower() for m in msgs), (
+        f"expected an 'already refreshing' message, got {msgs!r}"
+    )
+
+
+def test_tv_bulk_refresh_returns_false_when_lock_held(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """The lock acquire is non-blocking. If a fetch is already in
+    flight, _tv_bulk_refresh returns False without making a network
+    call -- callers (TV loop, favs view) treat False the same as a
+    stale cache and continue.
+    """
+    actions = _import()
+    actions._BULK_REFRESH_LOCK.acquire()
+    try:
+        result = actions._tv_bulk_refresh()
+    finally:
+        actions._BULK_REFRESH_LOCK.release()
+    assert result is False
+
+
+def test_tv_bulk_refresh_releases_lock_after_completion(
+    kodi_mocks: dict[str, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lock must be released on both success and failure paths so
+    a transient network 5xx doesn't permanently lock out future
+    refreshes."""
+    actions = _import()
+
+    # Stub the fetch to raise OSError (the path that returns False).
+    def boom(*a: Any, **kw: Any) -> str:
+        raise OSError("network down")
+
+    import resources.lib.cb_client as cb_client_mod
+    monkeypatch.setattr(cb_client_mod, "fetch_browse_page", boom)
+
+    actions._tv_bulk_refresh()  # returns False on OSError
+    assert not actions._BULK_REFRESH_LOCK.locked(), (
+        "lock must be released even when fetch fails"
+    )
+
+
 def test_refresh_offline_meta_swallows_refresh_exception(
     kodi_mocks: dict[str, MagicMock],
 ) -> None:
