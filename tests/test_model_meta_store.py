@@ -692,6 +692,81 @@ def test_v2_db_migrates_to_v3_with_biocontext_columns(tmp_path: Path) -> None:
         assert col in row, f"v3 column {col!r} missing from schema"
 
 
+def test_parse_iso_naive_treated_as_pacific_time() -> None:
+    """v0.7.28: biocontext returns last_broadcast as a naive ISO
+    string in America/Los_Angeles. Treating it as UTC made every
+    Last broadcast line 7-8h stale (PDT vs PST). The parser must
+    attach the Pacific zone before computing epoch.
+
+    Reference: 2026-04-29 was during PDT (UTC-7). Naive
+    "2026-04-29T05:00:00" is 12:00:00 UTC -> epoch 1777464000.
+    """
+    epoch = mms._parse_iso_to_epoch("2026-04-29T05:00:00")
+    # 2026-04-29T05:00:00 PDT = 2026-04-29T12:00:00 UTC.
+    # 2026-04-29T12:00:00 UTC epoch = 1777464000.
+    expected = 1777464000
+    # Allow +/- 1h slack for PST-vs-PDT in the static-offset fallback
+    # path on hosts without zoneinfo bundled.
+    assert abs((epoch or 0) - expected) <= 3600, (
+        f"Pacific-naive ISO parsed to epoch {epoch}, "
+        f"expected ~{expected} (+/-1h DST slack)"
+    )
+
+
+def test_parse_iso_explicit_z_honored_as_utc() -> None:
+    """An ISO with an explicit ``Z`` (or ``+HH:MM``) suffix is
+    honoured as written. The Pacific default kicks in only when no
+    tzinfo is present."""
+    epoch = mms._parse_iso_to_epoch("2026-04-29T12:00:00Z")
+    # 12:00 UTC = 1777464000.
+    assert epoch == 1777464000
+
+
+def test_parse_iso_with_negative_offset_honored() -> None:
+    """Same time as the Z test, expressed with explicit -07:00 offset
+    (Pacific Time form). Result must equal the UTC version, proving
+    we honour explicit offsets rather than blindly re-attaching
+    America/Los_Angeles."""
+    epoch_utc = mms._parse_iso_to_epoch("2026-04-29T12:00:00Z")
+    epoch_pdt = mms._parse_iso_to_epoch("2026-04-29T05:00:00-07:00")
+    assert epoch_utc == epoch_pdt
+
+
+def test_upsert_biocontext_overwrites_last_broadcast_epoch(
+    tmp_path: Path,
+) -> None:
+    """v0.7.28: re-fetching biocontext after the v0.7.27 UTC bug must
+    replace the stale epoch, not COALESCE-preserve it. last_broadcast_*
+    is freshness data driven solely by biocontext, so the latest read
+    wins."""
+    conn = _open(tmp_path)
+    # First upsert: imagine the v0.7.27 buggy parse stored an epoch
+    # 7h earlier than reality.
+    bad = dict(_BIOCONTEXT_SAMPLE)
+    bad["last_broadcast"] = "2026-04-28T19:00:00.000"  # naive
+    mms.upsert_biocontext(conn, "alice", bad, now=1_000_000)
+    row1 = mms.get_model(conn, "alice")
+    assert row1 is not None
+    epoch1 = row1["last_broadcast_epoch"]
+    assert epoch1 is not None and epoch1 > 0
+
+    # Second upsert with a CHANGED last_broadcast string -- the new
+    # epoch must win even though the old value is non-null.
+    fresh = dict(_BIOCONTEXT_SAMPLE)
+    fresh["last_broadcast"] = "2026-04-29T01:00:00.000"  # later naive
+    mms.upsert_biocontext(conn, "alice", fresh, now=2_000_000)
+    row2 = mms.get_model(conn, "alice")
+    assert row2 is not None
+    epoch2 = row2["last_broadcast_epoch"]
+    assert epoch2 != epoch1, (
+        f"last_broadcast_epoch must be overwritten, got {epoch2} == {epoch1}"
+    )
+    # The fresher ISO is 6 hours later.
+    assert epoch2 - epoch1 == 6 * 3600, (
+        f"new epoch should be 6h after old, got delta {epoch2 - epoch1}s"
+    )
+
+
 def test_upsert_biocontext_writes_all_known_fields(tmp_path: Path) -> None:
     """upsert_biocontext extracts every useful field from the
     /api/biocontext/<slug>/ response into typed columns AND stashes

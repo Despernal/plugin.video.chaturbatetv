@@ -1208,6 +1208,119 @@ def test_view_model_info_skips_with_empty_slug(
     assert any(c.args and c.args[0] == 42 for c in end_calls)
 
 
+def test_refresh_one_model_marks_404_as_gone(
+    kodi_mocks: dict[str, MagicMock],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v0.7.28: when biocontext returns the {'_http_404': True}
+    sentinel (profile page literally doesn't exist), the row is
+    stamped last_room_status='gone' so the [GONE] prefix surfaces
+    in offline favs without a thumb-HEAD round trip."""
+    actions = _import()
+    db_path = str(tmp_path / "meta.db")
+    monkeypatch.setattr(actions, "_model_meta_db_path",
+                        lambda: Path(db_path))
+
+    statuses_called: list[str] = []
+    thumbs_called: list[str] = []
+
+    actions.refresh_one_model(
+        handle=42, slug="ghost",
+        fetch_biocontext_func=lambda s: {"_http_404": True},
+        fetch_status_func=lambda s, **kw: statuses_called.append(s) or {},
+        head_thumb_func=lambda s: thumbs_called.append(s) or 200,
+        notify_func=lambda h, m: None,
+    )
+
+    # 404 short-circuits the status+thumb fallback path.
+    assert statuses_called == [], (
+        f"404 path must not hit AJAX status: {statuses_called!r}"
+    )
+    assert thumbs_called == [], (
+        f"404 path must not hit thumb HEAD: {thumbs_called!r}"
+    )
+
+    import resources.lib.model_meta_store as mms_real
+    conn = mms_real.open_db(db_path)
+    try:
+        row = mms_real.get_model(conn, "ghost")
+    finally:
+        conn.close()
+    assert row is not None
+    assert row["last_room_status"] == "gone", (
+        f"404 must stamp 'gone', got {row.get('last_room_status')!r}"
+    )
+
+
+def test_deep_refresh_marks_404_as_gone(
+    kodi_mocks: dict[str, MagicMock],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same 404-as-gone behaviour applies to the bulk deep crawl.
+    A 404'd slug counts as gone in the summary toast and gets the
+    [GONE] prefix on offline favs without falling through to the
+    cheap status+thumb path."""
+    actions = _import()
+    db_path = str(tmp_path / "meta.db")
+    monkeypatch.setattr(actions, "_model_meta_db_path",
+                        lambda: Path(db_path))
+
+    statuses: list[str] = []
+    thumbs: list[str] = []
+    bios: list[str] = []
+    notifies: list[tuple[str, str]] = []
+
+    def fake_bio(slug: str) -> dict[str, Any]:
+        bios.append(slug)
+        if slug == "ghost":
+            return {"_http_404": True}
+        if slug == "alive":
+            return {"room_status": "offline", "real_name": "A"}
+        return {}  # blip
+
+    actions.deep_refresh_offline_meta(
+        handle=42,
+        fav_slugs=["ghost", "alive", "blip"],
+        online_slugs=frozenset(),
+        fetch_biocontext_func=fake_bio,
+        fetch_status_func=lambda s, **kw: statuses.append(s) or
+            {"room_status": "offline"},
+        head_thumb_func=lambda s: thumbs.append(s) or 200,
+        notify_func=lambda h, m: notifies.append((h, m)),
+        spawn_func=lambda t: t(),
+        sleep_func=lambda s: None,
+    )
+
+    # ghost -> bio path (404 fast-path)
+    # alive -> bio path (real data)
+    # blip  -> empty {} -> falls through to status + thumb
+    assert "ghost" in bios and "alive" in bios and "blip" in bios
+    assert "ghost" not in statuses, (
+        f"404 must short-circuit status: {statuses!r}"
+    )
+    assert "ghost" not in thumbs, (
+        f"404 must short-circuit thumb HEAD: {thumbs!r}"
+    )
+    assert "blip" in statuses, "blip should fall back to status"
+
+    import resources.lib.model_meta_store as mms_real
+    conn = mms_real.open_db(db_path)
+    try:
+        ghost = mms_real.get_model(conn, "ghost")
+    finally:
+        conn.close()
+    assert ghost is not None
+    assert ghost["last_room_status"] == "gone"
+
+    # Done toast should reflect 1 gone in the count.
+    msgs = [n[1] for n in notifies]
+    assert any("1 gone" in m for m in msgs), (
+        f"summary toast must report 1 gone: {msgs!r}"
+    )
+
+
 def test_show_profile_opens_textviewer_dialog(
     kodi_mocks: dict[str, MagicMock],
     tmp_path: Path,
@@ -2048,6 +2161,113 @@ def test_tv_add_clamps_priority_to_1_20(
                    priority="999", store_path=tv_path)
     entries = tv_store.load(tv_path)
     assert entries[0].priority == 20
+
+
+def test_tv_add_confirm_no_aborts_without_writing(
+    tmp_path: Path,
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """v0.7.28: when no priority is preset (the ctxmenu path) tv_add
+    fires a yes/no confirm dialog FIRST. The user pressing No or
+    Back must abort cleanly -- no entry written, no priority numpad
+    fired. Bulletproof back-out for accidental clicks.
+    """
+    from resources.lib import tv_store
+
+    actions = _import()
+    tv_path = tmp_path / "tv.json"
+    confirm_calls: list[str] = []
+
+    def fake_confirm(name: str) -> bool:
+        confirm_calls.append(name)
+        return False  # user said No / Back
+
+    actions.tv_add(
+        handle=42, slug="alice", name="alice",
+        url="https://chaturbate.com/alice/",
+        priority="",  # ctxmenu path -- no preset priority
+        store_path=tv_path,
+        confirm_func=fake_confirm,
+    )
+    assert confirm_calls == ["alice"], (
+        f"confirm dialog must fire once, got {confirm_calls!r}"
+    )
+    entries = tv_store.load(tv_path)
+    assert entries == [], (
+        f"No-on-confirm must NOT add an entry, got {entries!r}"
+    )
+
+
+def test_tv_add_confirm_yes_proceeds_to_priority_prompt(
+    tmp_path: Path,
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """When the confirm dialog returns Yes, the priority numpad still
+    fires and the entry gets added with whatever priority the user
+    enters (or the default if Kodi's numpad returned the default)."""
+    from resources.lib import tv_store
+
+    actions = _import()
+    tv_path = tmp_path / "tv.json"
+
+    # Simulate Kodi's numpad returning '12'.
+    captured: dict[str, Any] = {}
+
+    class _D:
+        def yesno(self, h: str, m: str, **kw: Any) -> bool:
+            captured["yesno"] = (h, m)
+            return True
+        def numeric(self, t: int, h: str, d: str = "") -> str:
+            return "12"
+        def notification(self, *a: Any, **kw: Any) -> None: ...
+        def input(self, *a: Any, **kw: Any) -> str:
+            return ""
+        def ok(self, *a: Any, **kw: Any) -> bool:
+            return True
+
+    kodi_mocks["xbmcgui"].Dialog = _D
+    actions.tv_add(
+        handle=42, slug="alice", name="alice",
+        url="https://chaturbate.com/alice/",
+        priority="",
+        store_path=tv_path,
+    )
+    entries = tv_store.load(tv_path)
+    assert len(entries) == 1
+    assert entries[0].priority == 12
+
+
+def test_tv_add_with_preset_priority_skips_confirm(
+    tmp_path: Path,
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """When priority is passed via query string (the verb is invoked
+    from somewhere that already knows the priority -- e.g., a
+    pre-baked button), the confirm dialog is skipped. Backward-compat
+    with explicit-priority callers."""
+    from resources.lib import tv_store
+
+    actions = _import()
+    tv_path = tmp_path / "tv.json"
+    confirm_calls: list[str] = []
+
+    def fake_confirm(name: str) -> bool:
+        confirm_calls.append(name)
+        return False
+
+    actions.tv_add(
+        handle=42, slug="alice", name="alice",
+        url="https://chaturbate.com/alice/",
+        priority="9",
+        store_path=tv_path,
+        confirm_func=fake_confirm,
+    )
+    assert confirm_calls == [], (
+        f"explicit-priority path must skip confirm: {confirm_calls!r}"
+    )
+    entries = tv_store.load(tv_path)
+    assert len(entries) == 1
+    assert entries[0].priority == 9
 
 
 def test_tv_remove_drops_entry(

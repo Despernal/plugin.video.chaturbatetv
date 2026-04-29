@@ -118,9 +118,19 @@ def fetch_biocontext(slug: str) -> dict[str, Any]:
     view with rich metadata even for models we've NEVER seen
     broadcasting.
 
-    Empty dict on any failure (network error, HTTP non-200,
-    non-JSON body) so the caller can tolerate sparseness.
+    Return shapes:
+
+    - HTTP 200 + valid JSON: the populated profile dict.
+    - HTTP 404: ``{"_http_404": True}`` -- the profile page literally
+      doesn't exist, which means the account was deleted or banned.
+      Callers (deep_refresh, refresh_one_model) treat this as a hard
+      "gone" signal and stamp last_room_status accordingly.
+    - HTTP 401 / network error / non-JSON / non-dict: ``{}`` -- the
+      account may exist (private models 401, edge timeouts blip),
+      so callers fall back to the cheap AJAX status + thumb HEAD
+      path instead of marking gone.
     """
+    import urllib.error
     from urllib.request import Request, urlopen
 
     from resources.lib import logger
@@ -137,6 +147,13 @@ def fetch_biocontext(slug: str) -> dict[str, Any]:
     try:
         with urlopen(req, timeout=12.0) as resp:  # noqa: S310
             raw: bytes = resp.read()
+    except urllib.error.HTTPError as exc:
+        logger._log(
+            f"cb_client.fetch_biocontext: FAIL slug={slug!r} err={exc!r}"
+        )
+        if exc.code == 404:
+            return {"_http_404": True}
+        return {}
     except Exception as exc:
         logger._log(f"cb_client.fetch_biocontext: FAIL slug={slug!r} err={exc!r}")
         return {}

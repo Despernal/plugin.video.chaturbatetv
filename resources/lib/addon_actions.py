@@ -464,7 +464,17 @@ def refresh_one_model(
                 bio = fetch_biocontext_func(slug)
             except Exception:
                 bio = {}
-            if bio:
+            if bio.get("_http_404"):
+                # Profile page is gone -- account deleted or banned.
+                # Stamp last_room_status='gone' so the [GONE] prefix
+                # surfaces in the offline favs view.
+                mms.upsert_status(
+                    conn, slug, room_status="gone",
+                    thumb_available=False, now=int(_time.time()),
+                )
+                room_status = "gone"
+                summary = f"{slug}: gone (profile 404)"
+            elif bio:
                 mms.upsert_biocontext(conn, slug, bio, now=int(_time.time()))
                 room_status = (bio.get("room_status") or "offline")
                 last_bc_human = bio.get("time_since_last_broadcast") or ""
@@ -925,15 +935,29 @@ def deep_refresh_offline_meta(
                             bio = fetch_biocontext_func(slug)
                         except Exception:
                             bio = {}
-                        if bio:
+                        if bio.get("_http_404"):
+                            # v0.7.28: profile page literally
+                            # doesn't exist -> account banned/deleted.
+                            # Hard-stamp gone so the [GONE] prefix
+                            # surfaces in offline favs without a
+                            # thumb-HEAD round trip.
+                            mms.upsert_status(
+                                conn, slug, room_status="gone",
+                                thumb_available=False,
+                                now=int(_time.time()),
+                            )
+                            status = "gone"
+                        elif bio:
                             mms.upsert_biocontext(
                                 conn, slug, bio, now=int(_time.time()),
                             )
                             status = (bio.get("room_status") or "offline")
                         else:
-                            # Biocontext failed -- fall back to the
-                            # cheap status + thumb HEAD path so we
-                            # still record SOMETHING about this slug.
+                            # Biocontext failed (401, network blip,
+                            # non-JSON) -- the account may still
+                            # exist. Fall back to the cheap status
+                            # + thumb HEAD path so we still record
+                            # SOMETHING about this slug.
                             data = fetch_status_func(slug)
                             status = (data.get("room_status") or "")
                             thumb_code = head_thumb_func(slug)
@@ -1423,11 +1447,22 @@ def tv_add(handle: int, slug: str = "", name: str = "",
            url: str = "",
            priority: str = "",
            store_path: Path | None = None,
+           confirm_func: Any = None,
            **_params: Any) -> None:
     """Add a model to the TV list. Idempotent: existing url -> no-op.
 
+    v0.7.28: when ``priority`` isn't preset (the common ctxmenu path),
+    a yes/no confirm dialog fires BEFORE the priority numpad. Kodi's
+    numpad cancel is unreliable across versions -- pressing Back
+    sometimes returns the default value, leaving the user stuck with
+    an accidental Add. The yes/no in front gives a clean back-out
+    path: Back/No on the confirm = no add, no numpad.
+
     Priority: if not provided as a query param, prompts via
     ``Dialog().numeric``. Clamps to 1..20.
+
+    ``confirm_func`` is a DI seam so tests can supply a fake
+    yes/no without xbmcgui.
     """
     from resources.lib import logger
     if not slug:
@@ -1446,6 +1481,12 @@ def tv_add(handle: int, slug: str = "", name: str = "",
             f"{slug} already in TV list (priority {existing_priority})",
         )
         return
+    if not priority:
+        if confirm_func is None:
+            confirm_func = _confirm_add_to_tv
+        if not confirm_func(name or slug):
+            logger._log(f"addon_actions.tv_add: cancelled by user slug={slug!r}")
+            return
     p = _resolve_priority(priority, name or slug)
     if p is None:
         return
@@ -1453,6 +1494,22 @@ def tv_add(handle: int, slug: str = "", name: str = "",
     tv_store.save(path, entries)
     logger._log(f"addon_actions.tv_add: added {slug!r} P{p}")
     _notify("Chaturbate TV", f"Added {slug} (priority {p})")
+
+
+def _confirm_add_to_tv(name: str) -> bool:
+    """Yes/no dialog asking the user to confirm before tv_add prompts
+    for a priority. Returns True on Yes, False on No / Back / dialog
+    failure (defensive default = cancel to avoid surprise adds)."""
+    from resources.lib import logger
+    try:
+        import xbmcgui
+        return bool(xbmcgui.Dialog().yesno(
+            "Add to TV",
+            f"Add [B]{name}[/B] to the TV priority list?",
+        ))
+    except Exception as exc:
+        logger._log(f"_confirm_add_to_tv: dialog failed err={exc!r}")
+        return False
 
 
 def tv_remove(handle: int, slug: str = "", url: str = "",

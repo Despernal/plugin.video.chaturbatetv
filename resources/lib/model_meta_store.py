@@ -504,19 +504,36 @@ def _parse_iso_to_epoch(iso: str | None) -> int | None:
     """Best-effort parse of an ISO-8601 timestamp into a Unix epoch.
 
     Biocontext returns ``last_broadcast`` shaped like
-    ``"2026-04-28T19:56:30.950"`` -- assumed UTC, no timezone suffix.
-    datetime.fromisoformat accepts that on Python 3.11+. Failures
-    return None so the caller can fall back to last_broadcast_human.
+    ``"2026-04-28T19:56:30.950"`` with NO timezone marker. v0.7.27
+    spot-check vs ``time_since_last_broadcast`` in the same response
+    proved CB serves these in Pacific Time (UTC-7 during PDT, UTC-8
+    in PST), not UTC. Treating them as UTC made every "Last broadcast"
+    line read 7-8 hours older than reality.
+
+    Fix: when the parsed datetime has no tzinfo, attach the
+    America/Los_Angeles zone before converting to epoch. ISO strings
+    that DO carry an explicit ``Z`` or ``+/-HH:MM`` offset are honoured
+    as written.
+
+    datetime.fromisoformat accepts the ms fraction on Python 3.11+.
+    Failures return None so the caller can fall back to
+    last_broadcast_human.
     """
     if not iso:
         return None
     try:
-        from datetime import datetime, timezone
-        # No-tz string -> assume UTC. fromisoformat tolerates the
-        # ms fraction.
+        from datetime import datetime, timedelta, timezone
+        try:
+            from zoneinfo import ZoneInfo
+            cb_tz: Any = ZoneInfo("America/Los_Angeles")
+        except (ImportError, KeyError):
+            # tzdata not bundled (rare on LibreELEC). Fall back to a
+            # static -7 offset; correct during PDT (~Mar-Nov) and
+            # 1h off during PST. Better than 7-8h off via UTC.
+            cb_tz = timezone(timedelta(hours=-7))
         dt = datetime.fromisoformat(iso)
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.replace(tzinfo=cb_tz)
         return int(dt.timestamp())
     except (TypeError, ValueError):
         return None
@@ -638,9 +655,16 @@ def upsert_biocontext(
     cols = list(values.keys())
     col_list = ",".join(cols)
     placeholders = ",".join(":" + c for c in cols)
+    # last_broadcast_* are freshness data driven solely by biocontext.
+    # We want the latest reading to win, including over an existing
+    # value that may have been parsed under the v0.7.27 UTC bug. Same
+    # rationale for last_room_status: biocontext is more authoritative
+    # than the AJAX status endpoint when it's available.
     always_overwrite = {
         "last_status_check_epoch", "bio_fetched_epoch",
         "last_source", "updated_epoch",
+        "last_broadcast_epoch", "last_broadcast_iso",
+        "last_broadcast_human",
     }
     parts: list[str] = []
     for c in cols:
