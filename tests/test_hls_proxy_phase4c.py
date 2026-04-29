@@ -123,6 +123,108 @@ def _chunklist_body(seg_url: str = "seg_1_video.m4s") -> bytes:
 
 
 # --------------------------------------------------------------------------- #
+# 0. v0.7.36 backfill: _force_player_stop must actually fire
+#    PlayerControl(Stop) and respect the rate-limit. Lesson 30 mandates
+#    this from three call sites; pre-backfill, NO test patched
+#    xbmc.executebuiltin to verify the builtin actually got invoked.
+# --------------------------------------------------------------------------- #
+
+
+def test_force_player_stop_invokes_player_control_stop_builtin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Direct unit test on _force_player_stop. Patch xbmc.executebuiltin
+    via sys.modules and assert the call lands on PlayerControl(Stop).
+    Pre-backfill: a typo (PlayerControl(Stop) -> PlayerControl(stop)
+    or PlayerControls(Stop)) would have shipped green because no test
+    asserted the builtin.
+    """
+    import sys
+    from unittest.mock import MagicMock
+
+    fake_xbmc = MagicMock()
+    monkeypatch.setitem(sys.modules, "xbmc", fake_xbmc)
+
+    from resources.lib import hls_proxy
+    state = hls_proxy._State(stream_url="https://x", headers={})
+    state.last_force_stop = 0.0
+
+    hls_proxy._force_player_stop(state)
+
+    builtin_calls = [
+        c.args[0] for c in fake_xbmc.executebuiltin.call_args_list
+        if c.args
+    ]
+    assert "PlayerControl(Stop)" in builtin_calls, (
+        f"expected PlayerControl(Stop) builtin, got {builtin_calls!r}"
+    )
+
+
+def test_force_player_stop_rate_limited_within_throttle_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lesson 30: the chunklist handler can fire force-stop on every
+    request when ISA hammers us at 30+/sec. _FORCE_STOP_THROTTLE_S
+    (1.0s) gates repeated calls. Pre-backfill, NO test verified the
+    rate-limit -- a regression flipping the comparison would either
+    flood Kodi's event queue or never fire at all.
+    """
+    import sys
+    from unittest.mock import MagicMock
+
+    fake_xbmc = MagicMock()
+    monkeypatch.setitem(sys.modules, "xbmc", fake_xbmc)
+
+    from resources.lib import hls_proxy
+    state = hls_proxy._State(stream_url="https://x", headers={})
+    state.last_force_stop = 0.0
+
+    # Two back-to-back calls inside the 1s window.
+    hls_proxy._force_player_stop(state)
+    hls_proxy._force_player_stop(state)
+
+    builtin_calls = [
+        c.args[0] for c in fake_xbmc.executebuiltin.call_args_list
+        if c.args and c.args[0] == "PlayerControl(Stop)"
+    ]
+    assert len(builtin_calls) == 1, (
+        f"rate-limit should suppress the second call, "
+        f"got {len(builtin_calls)} PlayerControl(Stop) firings"
+    )
+
+
+def test_force_player_stop_fires_again_after_throttle_window_elapses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The flip-side: once the throttle window (1s) elapses, a second
+    call should fire. Test by manually rewinding state.last_force_stop
+    to simulate elapsed time."""
+    import sys
+    from unittest.mock import MagicMock
+
+    fake_xbmc = MagicMock()
+    monkeypatch.setitem(sys.modules, "xbmc", fake_xbmc)
+
+    from resources.lib import hls_proxy
+    state = hls_proxy._State(stream_url="https://x", headers={})
+    state.last_force_stop = 0.0
+
+    hls_proxy._force_player_stop(state)
+    # Pretend 2 seconds passed (more than the 1s throttle).
+    state.last_force_stop -= 2.0
+    hls_proxy._force_player_stop(state)
+
+    builtin_calls = [
+        c.args[0] for c in fake_xbmc.executebuiltin.call_args_list
+        if c.args and c.args[0] == "PlayerControl(Stop)"
+    ]
+    assert len(builtin_calls) == 2, (
+        f"second call after throttle window should fire; "
+        f"got {len(builtin_calls)} firings"
+    )
+
+
+# --------------------------------------------------------------------------- #
 # 1. Chunklist proxying (commit 47ccca1)
 # --------------------------------------------------------------------------- #
 
@@ -279,6 +381,118 @@ def test_segment_endpoint_fetches_upstream_with_iPad_headers(
     norm = {k.lower(): v for k, v in seg_hits[0][1].items()}
     assert "ipad" in norm.get("user-agent", "").lower()
     assert norm.get("referer") == "https://chaturbate.com/alice/"
+
+
+def test_segment_tier2_fallback_uses_seg_cdn_urls(
+    stub_cdn: tuple[str, _StubState],
+) -> None:
+    """v0.7.36 backfill (audit pass #2 HIGH): segment Tier-2 fallback
+    is the meat of three-tier segment proxying (commit ba44c62 /
+    Lesson 12). Tier-1 (the URL ISA asked for) fails -- tier 2 looks
+    up state.seg_cdn_urls[basename] and serves that. Pre-backfill,
+    only the all-tiers-fail-502 path was tested. A regression in the
+    seg_cdn_urls key shape would have shipped green; ISA would have
+    started 502'ing during real CDN rotation.
+    """
+    from urllib.parse import quote
+
+    from resources.lib import hls_proxy
+
+    cdn_base, state = stub_cdn
+    state.set_response("/hls/abc/master.m3u8", _master_body())
+    # Tier-2 destination: serves real segment bytes.
+    state.set_response("/hls/cdn-rotated/seg_video_0_42.m4s",
+                       b"TIER2-BYTES",
+                       content_type="video/mp4")
+    # Tier-1 path will fail (we never define it -> 404 by stub).
+    state.fail_path("/hls/cdn-original/seg_video_0_42.m4s")
+
+    handle = hls_proxy.start_proxy(
+        stream_url=f"{cdn_base}/hls/abc/master.m3u8",
+        room_url="https://chaturbate.com/alice/",
+    )
+    try:
+        # Pre-populate tier-2 lookup as if a chunklist response had
+        # been parsed and seeded the basename->canonical mapping. Also
+        # set ``reconnecting=True`` so the trigger_reconnect path
+        # (which fires on tier-1 failure) doesn't race
+        # _refresh_session into clearing seg_cdn_urls before tier-2
+        # gets a chance to read it.
+        with handle._state.lock:
+            handle._state.seg_cdn_urls["seg_video_0_42.m4s"] = (
+                f"{cdn_base}/hls/cdn-rotated/seg_video_0_42.m4s"
+            )
+            handle._state.reconnecting = True
+
+        tier1_url = f"{cdn_base}/hls/cdn-original/seg_video_0_42.m4s"
+        proxy_seg_url = (
+            f"http://{handle.host}:{handle.port}/segment?"
+            f"url={quote(tier1_url, safe='')}"
+        )
+        with urlopen(proxy_seg_url, timeout=5) as resp:
+            body = resp.read()
+        assert body == b"TIER2-BYTES", (
+            f"tier-2 fallback should serve seg_cdn_urls bytes, "
+            f"got {body!r}"
+        )
+    finally:
+        handle.stop()
+
+
+def test_segment_tier3_fallback_uses_latest_seg(
+    stub_cdn: tuple[str, _StubState],
+) -> None:
+    """v0.7.36 backfill: segment Tier-3 fallback regex-matches
+    ``(video|audio)_(\\d+)`` and searches ``state.latest_seg`` for a
+    matching kind+idx track. A regression in the regex or the search
+    loop would have shipped green pre-backfill; ISA gets 502s during
+    real CDN rotation when neither Tier-1 nor Tier-2 has a hit.
+    """
+    from urllib.parse import quote
+
+    from resources.lib import hls_proxy
+
+    cdn_base, state = stub_cdn
+    state.set_response("/hls/abc/master.m3u8", _master_body())
+    # Tier-3 destination.
+    state.set_response("/hls/cdn-emergency/last_video_3.m4s",
+                       b"TIER3-BYTES",
+                       content_type="video/mp4")
+
+    handle = hls_proxy.start_proxy(
+        stream_url=f"{cdn_base}/hls/abc/master.m3u8",
+        room_url="https://chaturbate.com/alice/",
+    )
+    try:
+        # Tier-1 will fail (path not defined). Tier-2 has no match for
+        # this seg_name. Tier-3 will match because latest_seg has a
+        # key containing both 'video' and '3' AND a value to use.
+        # Set ``reconnecting=True`` so the trigger_reconnect path
+        # (fires on tier-1 fail) doesn't race _refresh_session into
+        # clearing latest_seg before tier-3 reads it.
+        with handle._state.lock:
+            handle._state.latest_seg["chunklist_video_3"] = (
+                f"{cdn_base}/hls/cdn-emergency/last_video_3.m4s"
+            )
+            handle._state.reconnecting = True
+
+        # seg_name = "seg_xxx_video_3_42.m4s" -> regex matches kind=
+        # 'video', idx='3'.
+        tier1_url = (
+            f"{cdn_base}/hls/cdn-original/seg_xxx_video_3_42.m4s"
+        )
+        proxy_seg_url = (
+            f"http://{handle.host}:{handle.port}/segment?"
+            f"url={quote(tier1_url, safe='')}"
+        )
+        with urlopen(proxy_seg_url, timeout=5) as resp:
+            body = resp.read()
+        assert body == b"TIER3-BYTES", (
+            f"tier-3 fallback should serve latest_seg bytes, "
+            f"got {body!r}"
+        )
+    finally:
+        handle.stop()
 
 
 def test_segment_endpoint_returns_502_on_upstream_failure(

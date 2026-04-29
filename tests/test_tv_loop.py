@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -187,6 +188,67 @@ def test_slug_from_playlist_path_extracts_slug(kodi_mods: dict[str, Any]) -> Non
     ) == ""
     assert tl._slug_from_playlist_path(None) == ""
     assert tl._slug_from_playlist_path("") == ""
+
+
+def test_should_attempt_silent_stub_mark_fires_on_natural_end(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """v0.7.36 backfill (audit pass #2 HIGH): the v0.7.33 widening
+    drops ``not user_stopped`` from the gate. On Kodi versions where
+    natural-end fires onPlayBackStopped (instead of onPlayBackEnded),
+    user_stopped becomes True for stub plays -- the pre-0.7.33 gate
+    skipped the mark and the loop re-picked the offline slug forever.
+    Pin the relaxed contract: stub played + not switched = mark, even
+    when user_stopped=True."""
+    tl = _import()
+
+    class _State:
+        # silent stub just finished playing
+        tracked_file = (
+            "/storage/.kodi/addons/plugin.video.chaturbatetv/"
+            "resources/media/silent.mp4"
+        )
+        switched = False
+        # Kodi flagged onPlayBackStopped on natural-end (the bug shape)
+        user_stopped = True
+
+    assert tl._should_attempt_silent_stub_mark(_State()) is True, (
+        "v0.7.33 widened gate must mark even when user_stopped=True"
+    )
+
+
+def test_should_attempt_silent_stub_mark_skips_on_takeover(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """User pressed 'Play' on a different model mid-iteration: switched
+    flag fires. Marking offline in that case would over-mark whatever
+    we WERE playing as if it had stub-failed -- skip."""
+    tl = _import()
+
+    class _State:
+        tracked_file = (
+            "/storage/.kodi/addons/plugin.video.chaturbatetv/"
+            "resources/media/silent.mp4"
+        )
+        switched = True  # takeover happened
+        user_stopped = False
+
+    assert tl._should_attempt_silent_stub_mark(_State()) is False
+
+
+def test_should_attempt_silent_stub_mark_skips_on_real_playback(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """Tracked file is the localhost proxy URL (live HLS playing), not
+    the silent stub. No mark."""
+    tl = _import()
+
+    class _State:
+        tracked_file = "http://127.0.0.1:42327/master.m3u8"
+        switched = False
+        user_stopped = False
+
+    assert tl._should_attempt_silent_stub_mark(_State()) is False
 
 
 def test_resolve_silent_stub_slug_uses_live_path_when_present(
@@ -370,6 +432,77 @@ def test_tvplayer_user_direct_play_fires_takeover(
     )
 
 
+def _patch_playlist_with_queued(
+    kodi_mods: dict[str, Any], size: int, pos: int, queued_url: str,
+) -> None:
+    """Like _patch_playlist but also makes pl[pos].getPath() return a
+    real string so onAVStarted can capture current_queued_plugin_url
+    (v0.7.34). The default MagicMock returned more MagicMocks, which
+    failed the ``"slug=" in queued_url`` check silently.
+    """
+    fake_item = MagicMock()
+    fake_item.getPath.return_value = queued_url
+    fake_pl = MagicMock()
+    fake_pl.size.return_value = size
+    fake_pl.getposition.return_value = pos
+    fake_pl.__getitem__ = lambda _self, _i: fake_item
+    kodi_mods["xbmc"].PlayList = MagicMock(return_value=fake_pl)
+
+
+def test_tvplayer_captures_current_queued_plugin_url_with_slug(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """v0.7.36 backfill (audit pass #2 HIGH): the v0.7.34 capture branch
+    in onAVStarted populates ``current_queued_plugin_url`` from
+    ``pl[pos].getPath()`` so _classify_after_stop can compute model_live
+    against the actual queued slug. Existing tests use a MagicMock
+    playlist where pl[pos].getPath() returns a MagicMock (no string),
+    so the capture branch never actually fired; a regression making it
+    skip the assignment would silently revert the Lesson-17
+    disambiguator to dead code (v0.7.21 - v0.7.34 era).
+    """
+    tl = _import()
+    p = tl._TVPlayer()
+    queued = (
+        "plugin://plugin.video.chaturbatetv/"
+        "?mode=playvid&slug=alice&name=alice"
+    )
+    p.queued_paths = {queued}
+    _patch_playlist_with_queued(
+        kodi_mods, size=1, pos=0, queued_url=queued,
+    )
+    p.getPlayingFile = lambda: "http://127.0.0.1:42327/master.m3u8"  # type: ignore[method-assign]
+
+    p.onAVStarted()
+
+    assert p.current_queued_plugin_url == queued, (
+        f"queued plugin URL should round-trip into the player state; "
+        f"got {p.current_queued_plugin_url!r}"
+    )
+
+
+def test_tvplayer_skips_queued_capture_for_paths_without_slug(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """A playlist item that doesn't carry ``slug=`` (e.g., legacy
+    queued shape, MagicMock from older tests) leaves
+    current_queued_plugin_url empty rather than recording a useless
+    value. Defensive contract."""
+    tl = _import()
+    p = tl._TVPlayer()
+    p.queued_paths = set()
+    _patch_playlist_with_queued(
+        kodi_mods, size=1, pos=0, queued_url="some/random/path",
+    )
+    p.getPlayingFile = lambda: "http://127.0.0.1:42327/master.m3u8"  # type: ignore[method-assign]
+
+    p.onAVStarted()
+
+    assert p.current_queued_plugin_url == "", (
+        "non-slug path must not be recorded as the queued plugin URL"
+    )
+
+
 def test_inner_loop_queues_urls_with_slug_not_name(
     kodi_mods: dict[str, Any],
 ) -> None:
@@ -422,6 +555,159 @@ def test_inner_loop_queues_urls_with_slug_not_name(
 def _entries(*specs: tuple[str, int]) -> list[TVEntry]:
     return [TVEntry(name=n, url=f"https://chaturbate.com/{n}/", priority=p)
             for n, p in specs]
+
+
+def test_silent_stub_mark_offline_excludes_slug_from_next_iter_pick(
+    kodi_mods: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    """v0.7.36 backfill (audit pass #2 HIGH): the iter-N-marks /
+    iter-N+1-skips transition. Pre-backfill, _was_silent_stub_played
+    + _resolve_silent_stub_slug + _tv_bulk_mark_offline each had unit
+    tests, but the chain that wires them in tv_play was untested
+    (run_once_for_test pre-extension didn't exercise it). A regression
+    breaking the wiring would have shipped green and re-paid for the
+    v0.7.21 / v0.7.29 / v0.7.33 wedges.
+
+    Strategy: drive run_once_for_test with a fixed alice + bob tier.
+    iter 1 plays the silent stub on alice; harness calls our
+    silent_stub_mark_func with 'alice'. Our fake mark records the
+    slug AND removes it from a fake online set so iter 2's
+    is_live_func reports alice as offline. We assert iter 2 picks bob,
+    not alice.
+    """
+    tl = _import()
+    rt = MockKodiRuntime()
+
+    online = {"alice", "bob"}
+    iter_picks: list[str] = []
+
+    def is_live(url: str) -> bool:
+        slug = url.rstrip("/").rsplit("/", 1)[-1]
+        return slug in online
+
+    def fake_mark(slug: str) -> None:
+        online.discard(slug)
+
+    silent_stub = (
+        "/storage/.kodi/addons/plugin.video.chaturbatetv/"
+        "resources/media/silent.mp4"
+    )
+
+    iters = {"n": 0}
+
+    def play_call(pl: Any) -> None:
+        iters["n"] += 1
+        # Track which slug got picked this iteration via the queued
+        # playlist path.
+        first_path = pl[0].getPath()
+        iter_picks.append(first_path)
+        if iters["n"] == 1:
+            # iter 1: alice resolves to silent stub.
+            rt.player.simulate_av_started(silent_stub)
+            rt.player.simulate_stopped()
+        else:
+            # iter 2 onward: real playback (bob).
+            rt.player.simulate_av_started(
+                "http://127.0.0.1:42327/master.m3u8"
+            )
+            rt.player.simulate_stopped()
+
+    tl.run_once_for_test(
+        runtime=rt,
+        entries=[
+            TVEntry(name="alice", url="https://chaturbate.com/alice/",
+                    priority=10),
+            TVEntry(name="bob", url="https://chaturbate.com/bob/",
+                    priority=10),
+        ],
+        is_live_func=is_live,
+        play_func=play_call,
+        idle_func=lambda: 30,
+        max_iterations=2,
+        silent_stub_mark_func=fake_mark,
+    )
+
+    # iter 1's pick may be alice OR bob (random within tier); iter 2's
+    # pick MUST be the survivor. After fake_mark removed whoever played
+    # the stub, the next iter's pick_target excludes them.
+    assert len(iter_picks) >= 2, (
+        f"expected at least 2 iterations, got {iter_picks!r}"
+    )
+    iter1_slug = iter_picks[0].split("slug=")[1].split("&")[0]
+    iter2_slug = iter_picks[1].split("slug=")[1].split("&")[0]
+    assert iter1_slug != iter2_slug, (
+        f"iter 2 picked the same slug as iter 1 ({iter1_slug}); the "
+        f"silent-stub mark-offline + cache eviction chain didn't "
+        f"prevent re-pick. picks={iter_picks!r}"
+    )
+
+
+def test_tv_loop_reloads_tv_json_each_iter_for_cross_process_edits(
+    kodi_mods: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    """v0.7.36 backfill (audit pass #2 HIGH): tv_add / tv_remove /
+    tv_edit run in a separate Kodi-spawned default.py process from
+    tv_play. Pre-v0.7.34 the loop snapshot the entries list at session
+    start and never re-read tv.json -- mid-session edits were
+    invisible until restart. Post-fix, entries_path triggers a reload
+    each outer iter. Pre-backfill, no test exercised the reload, so a
+    regression dropping the reload (or moving it past the active-key
+    check) would have shipped green.
+
+    Strategy: write tv.json with [alice]; spin one iter with a fake
+    is_live that reports alice live; mid-iter rewrite tv.json to
+    include bob at higher priority; spin another iter; assert the
+    queued playlist now includes bob.
+    """
+    tl = _import()
+    from resources.lib import tv_store
+
+    tv_json = tmp_path / "tv.json"
+    tv_store.save(tv_json, [
+        TVEntry(name="alice", url="https://chaturbate.com/alice/",
+                priority=10),
+    ])
+
+    rt = MockKodiRuntime()
+
+    iter_idx = {"n": 0}
+
+    def play_call(_pl: Any) -> None:
+        iter_idx["n"] += 1
+        if iter_idx["n"] == 1:
+            # Mid-session, a sibling process adds bob at P15.
+            tv_store.save(tv_json, [
+                TVEntry(name="alice",
+                        url="https://chaturbate.com/alice/",
+                        priority=10),
+                TVEntry(name="bob",
+                        url="https://chaturbate.com/bob/",
+                        priority=15),
+            ])
+        rt.player.simulate_av_started(
+            "http://127.0.0.1:42327/master.m3u8"
+        )
+        rt.player.simulate_stopped()
+
+    tl.run_once_for_test(
+        runtime=rt,
+        entries=tv_store.load(tv_json),
+        is_live_func=lambda u: True,
+        play_func=play_call,
+        idle_func=lambda: 30,
+        max_iterations=2,
+        entries_path=tv_json,
+    )
+
+    # iter 2 should have queued bob (higher priority) -- verifies the
+    # reload picked up the mid-session write.
+    queued_paths = rt.playlist.paths()
+    assert any("slug=bob" in p for p in queued_paths), (
+        f"iter 2 should have queued bob after mid-session tv.json "
+        f"rewrite; queued_paths={queued_paths!r}"
+    )
 
 
 def test_tv_play_exits_immediately_when_already_active(

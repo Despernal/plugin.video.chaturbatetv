@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <addon id="plugin.video.chaturbatetv"
        name="Chaturbate TV"
-       version="0.7.35"
+       version="0.7.36"
        provider-name="flux">
     <requires>
         <import addon="xbmc.python" version="3.0.0"/>
@@ -20,7 +20,29 @@
             <icon>icon.png</icon>
             <fanart>fanart.jpg</fanart>
         </assets>
-        <news>0.7.35 - Defensive polish from the audit: fetch_room_status_json now passes the FULL response through (whitelist drop) so a future "banned"/"deleted" marker won't be silently discarded; is_model_live drops the ``success`` flag check so it agrees with cb_resolve.resolve_ajax (was inconsistent, could mark a live model offline -> mark-offline-loop symptom); 404-thumb-overrides-status protect-set narrowed to {"", "offline"} so a transient thumb-CDN miss can't clobber a hidden/private/away status with "gone"; _model_from_room dropped the wrong-type ``label`` fallback (label is a UI badge, not a state enum) -- room-list parser now classifies symmetric to the affiliate parser.
+        <news>0.7.36 - Test coverage backfill from audit pass #2 (test fragility audit). 9 new HIGH tests pinning bug classes that prior coverage missed despite 669 passing tests. Net: 684 tests.
+
+(1) ``_NON_PUBLIC_PREFIXES`` per-status mapping: pre-fix, only routing was asserted; a typo swapping `[HIDDEN]` and `[AWAY]` colors would have shipped green. Now parametrized over all 4 statuses + the unknown-state fallback, plus AARRGGBB color regression guards.
+
+(2) ``upsert_biocontext`` ``last_room_status`` overwrite: mirror of the bulk-track test added in v0.7.32. Without this, a regression flipping last_room_status back to COALESCE on the biocontext path would silently re-promote a hidden model.
+
+(3) ``onAVStarted`` ``current_queued_plugin_url`` capture (v0.7.34): pre-fix, existing tests used MagicMock playlists where pl[pos].getPath() returned MagicMock (not a string), so the capture branch never fired. Two new tests pin the capture path AND its skip-on-no-slug defensive behavior.
+
+(4) ``_should_attempt_silent_stub_mark`` predicate (extracted v0.7.33 gate logic into a testable helper). Three tests pin: marks even when user_stopped=True (the v0.7.33 widening), skips on takeover, skips on real playback.
+
+(5) ``_render_favs`` offline-meta prefix integration: seeds the meta DB with rows in distinct states (gone/hidden/away/offline), drives offline_favs_view, asserts each label carries the right decoration. Pre-fix, the prefix wiring (line 326-328) was unit-tested in isolation but never integrated.
+
+(6) ``_force_player_stop`` invocation + rate-limit (Lesson 30, three-call-site mandate): three tests now pin (a) PlayerControl(Stop) builtin actually fires, (b) repeated calls within the throttle window are suppressed, (c) the throttle releases when the window elapses. Pre-fix, NO test patched xbmc.executebuiltin so a typo in the builtin name would have shipped.
+
+(7) Segment Tier-2 / Tier-3 fallback (Lesson 12, three-tier proxy chain): two tests stand up a stub CDN with Tier-1 failing and pre-populate ``state.seg_cdn_urls`` (Tier-2) or ``state.latest_seg`` (Tier-3) directly via the ProxyHandle's _state. Each tier is now exercised end-to-end. Set ``state.reconnecting=True`` to keep the trigger-on-tier-1-fail reconnect from racing _refresh_session into clearing the cache before the tier lookup completes.
+
+(8) Silent-stub mark-offline → next-iter pick_target transition: extended ``run_once_for_test`` with a ``silent_stub_mark_func`` hook so the harness exercises the v0.7.21/v0.7.29/v0.7.33 wedge-fix chain end-to-end. iter 1 plays the silent stub, the harness calls our fake mark which removes the slug from a fake online set, iter 2 must pick a different slug. Pre-fix, this wiring was untestable -- broke on  three times before being fully fixed.
+
+(9) Mid-session tv.json reload (v0.7.34 cross-process): extended ``run_once_for_test`` with an ``entries_path`` parameter mirroring production. Test writes tv.json with [alice], spins iter 1 (during which a "sibling process" rewrites tv.json to [alice, bob@P15]), spins iter 2, asserts the higher-priority bob ended up queued. Without this hook, the loop snapshot bug would have been invisible to the harness.
+
+Plus the production ``_should_attempt_silent_stub_mark`` extraction (was inline gate, now a testable predicate) and ``run_once_for_test`` extensions to support the two HIGH transitions. Code surface unchanged otherwise.
+
+0.7.35 - Defensive polish from the audit: fetch_room_status_json now passes the FULL response through (whitelist drop) so a future "banned"/"deleted" marker won't be silently discarded; is_model_live drops the ``success`` flag check so it agrees with cb_resolve.resolve_ajax (was inconsistent, could mark a live model offline -> mark-offline-loop symptom); 404-thumb-overrides-status protect-set narrowed to {"", "offline"} so a transient thumb-CDN miss can't clobber a hidden/private/away status with "gone"; _model_from_room dropped the wrong-type ``label`` fallback (label is a UI badge, not a state enum) -- room-list parser now classifies symmetric to the affiliate parser.
 
 0.7.34 - TV state machine + UX (audit agent 2 MED + agent 3 MED). The Lesson-17 disambiguator branch in _classify_after_stop has been dead code since v0.7.21: ``current_playlist_path`` is the post-resolution path (localhost proxy URL or silent stub) and never has ``slug=``, so the model_live check always fell through to the dialog. Added ``current_queued_plugin_url`` captured in onAVStarted from the playlist position (Kodi keeps the original queued URL accessible there); _classify_after_stop now reads it, so a single Stop press on a still-live model exits cleanly without the Yes/No dialog.
 

@@ -41,6 +41,9 @@ def kodi_mocks(monkeypatch: pytest.MonkeyPatch) -> dict[str, MagicMock]:
 
     def make_listitem(*args: Any, **kwargs: Any) -> MagicMock:
         li = MagicMock()
+        # v0.7.36 backfill: capture the label so tests can verify
+        # label-prefix decoration on offline favs ([GONE], [SHOW], etc.)
+        li.label = kwargs.get("label") or (args[0] if args else "")
         li._props: dict[str, str] = {}
         li._art: dict[str, str] = {}
         li.setProperty = lambda k, v: li._props.update({k: v})
@@ -597,6 +600,98 @@ def test_bulk_live_slugs_drops_legacy_disk_cache_on_entry(
     assert out == {"fresh"}
     # And the legacy cache file got cleaned up.
     assert not cache_path.exists()
+
+
+def test_offline_favs_view_renders_status_prefixes_on_labels(
+    tmp_path: Path,
+    kodi_mocks: dict[str, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v0.7.36 backfill (audit pass #2 HIGH): the [GONE] / [SHOW] /
+    [PRIV] / [AWAY] / [PW] label prefixes are wired through
+    ``_render_favs`` via ``model_meta_store.label_prefix_for_row``.
+    Each prefix is unit-tested in isolation, but no test verifies the
+    integration into the offline favs label until now -- a regression
+    that drops the ``label = gone_prefix + label`` line in
+    favs_views._render_favs would have shipped green.
+
+    Seeds the model_meta DB with rows in distinct states, drives
+    offline_favs_view, and asserts each label carries the right
+    decoration.
+    """
+    fv = _import()
+    fv._bulk_cache_clear()
+    favs_path = tmp_path / "favs.json"
+    favs = [
+        Favorite(name="ghost", slug="ghost",
+                 url="https://chaturbate.com/ghost/",
+                 gender=Gender.FEMALE),
+        Favorite(name="ms", slug="ms",
+                 url="https://chaturbate.com/ms/",
+                 gender=Gender.FEMALE),
+        Favorite(name="afk", slug="afk",
+                 url="https://chaturbate.com/afk/",
+                 gender=Gender.FEMALE),
+        Favorite(name="alice", slug="alice",
+                 url="https://chaturbate.com/alice/",
+                 gender=Gender.FEMALE),  # plain offline, no prefix
+    ]
+    _write_favs(favs_path, favs)
+
+    # Seed the meta DB with state-ful rows for those slugs.
+    db_path = tmp_path / "model_meta.db"
+    import resources.lib.model_meta_store as mms_real
+    monkeypatch.setattr(fv, "_model_meta_db_path", lambda: db_path)
+    conn = mms_real.open_db(str(db_path))
+    try:
+        # Use upsert_status to set last_room_status without going
+        # through the full bulk-track path.
+        for slug, status in (
+            ("ghost", "gone"),
+            ("ms", "hidden"),
+            ("afk", "away"),
+            ("alice", "offline"),
+        ):
+            mms_real.upsert_status(
+                conn, slug, room_status=status,
+                thumb_available=True, now=1_000_000,
+            )
+    finally:
+        conn.close()
+
+    # Empty bulk-live response so all four favs land in the offline bucket.
+    fetch = _bulk_fetch([[]])
+
+    fv.offline_favs_view(handle=42, store_path=favs_path,
+                         fetch_func=fetch)
+
+    listitems = []
+    for c in kodi_mocks["xbmcplugin"].addDirectoryItem.call_args_list:
+        li = c.kwargs.get("listitem") or (
+            c.args[2] if len(c.args) >= 3 else None
+        )
+        if li is not None and hasattr(li, "label"):
+            listitems.append(li.label)
+
+    # Each prefix appears on the matching slug's label.
+    assert any("[GONE]" in lbl and "ghost" in lbl for lbl in listitems), (
+        f"ghost (gone) should carry [GONE] prefix: {listitems!r}"
+    )
+    assert any("[SHOW]" in lbl and "ms" in lbl for lbl in listitems), (
+        f"ms (hidden) should carry [SHOW] prefix: {listitems!r}"
+    )
+    assert any("[AWAY]" in lbl and "afk" in lbl for lbl in listitems), (
+        f"afk (away) should carry [AWAY] prefix: {listitems!r}"
+    )
+    # Plain offline gets NO prefix.
+    alice_lbl = next(
+        lbl for lbl in listitems if "alice" in lbl
+    )
+    for prefix in ("[GONE]", "[SHOW]", "[PRIV]", "[AWAY]", "[PW]"):
+        assert prefix not in alice_lbl, (
+            f"plain offline must not carry {prefix} prefix: "
+            f"{alice_lbl!r}"
+        )
 
 
 def test_bulk_live_slugs_filters_non_public_rooms(

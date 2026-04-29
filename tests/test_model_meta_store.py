@@ -185,6 +185,37 @@ def test_upsert_room_overwrites_last_room_status_on_state_change(
     )
 
 
+def test_upsert_biocontext_overwrites_last_room_status(
+    tmp_path: Path,
+) -> None:
+    """v0.7.36 backfill (audit pass #2 HIGH): mirror of
+    test_upsert_room_overwrites_last_room_status_on_state_change but
+    on the biocontext upsert variant. ``last_room_status`` was added
+    to upsert_biocontext's always_overwrite at v0.7.32; without this
+    test, a regression that drops it back to COALESCE would silently
+    re-promote a hidden model to TV-pickable on the biocontext path."""
+    conn = _open(tmp_path)
+
+    # Seed with a public reading.
+    public_bio = dict(_BIOCONTEXT_SAMPLE)
+    public_bio["room_status"] = "public"
+    mms.upsert_biocontext(conn, "alice", public_bio, now=1_000_000)
+    row1 = mms.get_model(conn, "alice")
+    assert row1 is not None
+    assert row1["last_room_status"] == "public"
+
+    # Re-fetch reports hidden -- the latest read must win.
+    hidden_bio = dict(_BIOCONTEXT_SAMPLE)
+    hidden_bio["room_status"] = "hidden"
+    mms.upsert_biocontext(conn, "alice", hidden_bio, now=1_500_000)
+    row2 = mms.get_model(conn, "alice")
+    assert row2 is not None
+    assert row2["last_room_status"] == "hidden", (
+        "biocontext re-fetch must overwrite, not COALESCE-preserve a "
+        "stale public after the model went hidden"
+    )
+
+
 def test_upsert_writes_all_roomlist_fields(tmp_path: Path) -> None:
     conn = _open(tmp_path)
     mms.upsert_room(conn, _ROOMLIST_ROOM, now=2_000_000, source="roomlist")

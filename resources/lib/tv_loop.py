@@ -276,6 +276,29 @@ def _slug_from_playlist_path(path: str | None) -> str:
         return ""
 
 
+def _should_attempt_silent_stub_mark(player_state: Any) -> bool:
+    """v0.7.33: gate for the silent-stub-mark-offline branch.
+
+    Returns True when the inner monitor loop just finished playing the
+    silent stub and we should treat it as a "this slug is offline"
+    signal. Two conditions: the silent stub actually played AND the
+    user didn't switch to something else (which would have populated
+    a different ``tracked_file``).
+
+    Notably does NOT gate on ``player.user_stopped``: on Kodi versions
+    where the last item of a playlist ending fires
+    ``onPlayBackStopped`` instead of ``onPlayBackEnded``,
+    ``user_stopped`` is True for natural-end stub plays. The pre-0.7.33
+    gate skipped the mark in those cases, leaving the loop to re-pick
+    the same offline slug forever (audit agent 2 HIGH #1, exact shape
+    of the v0.7.21 wedge). Mark-offline is idempotent so widening is
+    safe.
+    """
+    if getattr(player_state, "switched", False):
+        return False
+    return _was_silent_stub_played(getattr(player_state, "tracked_file", None))
+
+
 def _resolve_silent_stub_slug(
     queued_path: str | None,
     queued_paths: set[str] | frozenset[str] | None,
@@ -445,11 +468,29 @@ def run_once_for_test(
     now_func: Callable[[], float] = time.time,
     max_iterations: int = 5,
     poll_seconds: float = 600.0,
+    entries_path: Any = None,
+    silent_stub_mark_func: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Drive the TV loop with the kodi_mock harness for unit tests.
 
     ``runtime`` is a ``tests.kodi_mock.MockKodiRuntime`` (not imported
     here so this module stays importable in the production Kodi env).
+
+    v0.7.36 backfill hooks:
+
+    - ``entries_path`` (mirrors production tv_play): when provided,
+      reload tv.json at the top of each outer iteration so tests can
+      simulate mid-session ``tv_add`` / ``tv_remove`` /
+      ``tv_edit`` from a sibling process. Without this hook, the
+      harness used the constructor's snapshot forever, mirroring the
+      pre-v0.7.34 cross-process bug shape.
+    - ``silent_stub_mark_func`` (mirrors prod silent-stub branch):
+      when the player's tracked_file is the silent stub after
+      play_func, this callback receives the resolved slug. Tests
+      typically pass ``addon_actions._tv_bulk_mark_offline`` so the
+      bulk cache mutates the same way it would in production.
+      Without this hook, the iter-N-marks / iter-N+1-skips
+      transition was untestable.
     """
     if runtime.window.getProperty(_ACTIVE_KEY) == "1":
         _safe_log("tv_loop.run_once_for_test: already active, decline")
@@ -464,6 +505,19 @@ def run_once_for_test(
         promotions = 0
         for it in range(1, max_iterations + 1):
             _safe_log(f"tv_loop.run_once_for_test: iter={it}")
+            # v0.7.36: mirror prod's mid-session tv.json reload so the
+            # harness exercises the cross-process refresh path.
+            if entries_path is not None:
+                try:
+                    from resources.lib import tv_store as _ts
+                    fresh = _ts.load(entries_path)
+                    if fresh:
+                        entries = fresh
+                except Exception as exc:
+                    _safe_log(
+                        f"tv_loop.run_once_for_test: entries reload "
+                        f"failed err={exc!r}"
+                    )
             sorted_entries = tv_select.priority_sort(entries)
             target = tv_select.pick_target(sorted_entries, is_live_func)
             if target is None:
@@ -573,6 +627,24 @@ def run_once_for_test(
             # + stopped on the mock player.
             if play_func is not None:
                 play_func(runtime.playlist)
+
+            # v0.7.36: mirror prod's silent-stub mark-offline branch
+            # (the v0.7.21/v0.7.29/v0.7.33 wedge-fix chain).
+            if (silent_stub_mark_func is not None
+                    and _should_attempt_silent_stub_mark(player)):
+                queued_path = ""
+                try:
+                    pos = runtime.playlist.getposition()
+                    size = runtime.playlist.size()
+                    if 0 <= pos < size:
+                        queued_path = runtime.playlist[pos].getPath()
+                except Exception:
+                    queued_path = ""
+                skip_slug, _ = _resolve_silent_stub_slug(
+                    queued_path, player.queued_paths,
+                )
+                if skip_slug:
+                    silent_stub_mark_func(skip_slug)
 
             if player.switched:
                 _safe_log("tv_loop.run_once_for_test: TAKEOVER, release")
@@ -889,8 +961,7 @@ def tv_play(
                 # 2 HIGH #1, identical shape to the v0.7.21 wedge).
                 # Guard now widened: any silent-stub playback where we
                 # didn't switch is fair game to mark.
-                if (not player.switched
-                        and _was_silent_stub_played(player.tracked_file)):
+                if _should_attempt_silent_stub_mark(player):
                     queued_path = ""
                     try:
                         pl = xbmc.PlayList(xbmc.PLAYLIST_VIDEO)

@@ -543,6 +543,78 @@ def test_top_cams_view_attaches_ctxmenu_per_row(
         assert any("Add to Favorites" in lab for lab in labels)
 
 
+def test_browse_non_public_prefix_per_status(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """v0.7.36 backfill (audit pass #2): pin _NON_PUBLIC_PREFIXES so a
+    typo / accidental swap (`[HIDDEN]` color landing on `[AWAY]`, or
+    `password protected` silently falling through to the generic
+    [NON-PUBLIC]) ships RED instead of green. Pre-fix only routing was
+    asserted; a label-prefix regression would have slipped through.
+    """
+    bv = _import()
+    body = json.dumps({
+        "rooms": [
+            {"username": "h", "gender": "f", "num_users": 1,
+             "current_show": "hidden"},
+            {"username": "p", "gender": "f", "num_users": 1,
+             "current_show": "private"},
+            {"username": "a", "gender": "f", "num_users": 1,
+             "current_show": "away"},
+            {"username": "w", "gender": "f", "num_users": 1,
+             "current_show": "password protected"},
+            {"username": "x", "gender": "f", "num_users": 1,
+             "current_show": "some-future-state-cb-might-add"},
+        ],
+        "total_count": 5, "all_rooms_count": 5,
+    })
+
+    def fetch(*_a: Any, **_kw: Any) -> str:
+        return body
+
+    bv.top_cams_view(handle=42, fetch_func=fetch)
+
+    listitems = [
+        c.kwargs.get("listitem") or c.args[2]
+        for c in kodi_mocks["xbmcplugin"].addDirectoryItem.call_args_list
+        if (c.kwargs.get("listitem") or
+            (len(c.args) >= 3 and c.args[2]))
+    ]
+    labels = [li.label for li in listitems if hasattr(li, "label")]
+
+    # Status-specific prefix substring + color; one entry per status.
+    expected_substr = {
+        "h": "[HIDDEN]",
+        "p": "[PRIVATE]",
+        "a": "[AWAY]",
+        "w": "[PW]",
+        "x": "[NON-PUBLIC]",  # generic fallback for unknown states
+    }
+    for slug, expected in expected_substr.items():
+        # Each per-slug label format:
+        #   "[COLOR <bg>][<KIND>][/COLOR] [COLOR <fg>]<slug>[/COLOR] [1]"
+        # Match the whole tuple in a single label.
+        matches = [
+            lbl for lbl in labels
+            if expected in lbl and f"]{slug}[" in lbl
+        ]
+        assert matches, (
+            f"slug={slug!r} expected prefix {expected!r} in some label, "
+            f"got labels={labels!r}"
+        )
+
+    # Color regression guards: hidden/private use amber FFff8000;
+    # away/pw use pale-cyan FFc8e8f8.
+    hidden_lbl = next(lbl for lbl in labels if "[HIDDEN]" in lbl)
+    assert "FFff8000" in hidden_lbl, (
+        f"hidden should be amber FFff8000, got: {hidden_lbl!r}"
+    )
+    away_lbl = next(lbl for lbl in labels if "[AWAY]" in lbl)
+    assert "FFc8e8f8" in away_lbl, (
+        f"away should be pale-cyan FFc8e8f8, got: {away_lbl!r}"
+    )
+
+
 def test_browse_renders_non_public_as_view_model_info(
     kodi_mocks: dict[str, MagicMock],
 ) -> None:
