@@ -680,6 +680,62 @@ def test_tv_bulk_refresh_releases_lock_after_completion(
     )
 
 
+def test_tv_bulk_refresh_filters_non_public_from_cache(
+    kodi_mocks: dict[str, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """v0.7.31: hidden / private / paid-show rooms appear in the
+    affiliate-onlinerooms feed but the AJAX endpoint refuses HLS for
+    them, so the TV loop chases them forever (silent-stub loop). The
+    bulk cache must filter ``current_show != 'public'`` out of the
+    pickable slug set. Non-public rooms STILL get persisted to the
+    meta DB so the favs view sees their thumb / status info.
+    """
+    import json as _json
+    actions = _import()
+
+    rooms = [
+        {"username": "alice", "current_show": "public", "num_users": 50,
+         "gender": "f", "image_url": "", "room_subject": ""},
+        {"username": "model_a", "current_show": "hidden",
+         "num_users": 546, "gender": "f", "image_url": "",
+         "room_subject": "550 tkns full show"},
+        {"username": "bob", "current_show": "private", "num_users": 1,
+         "gender": "m", "image_url": "", "room_subject": ""},
+    ]
+
+    def fake_fetch(url: str, *a: Any, **kw: Any) -> str:
+        return _json.dumps(rooms)
+
+    import resources.lib.cb_client as cb_client_mod
+    monkeypatch.setattr(cb_client_mod, "fetch_browse_page", fake_fetch)
+
+    monkeypatch.setattr(actions, "_model_meta_db_path",
+                        lambda: tmp_path / "meta.db")
+
+    actions._TV_BULK_CACHE["slugs"] = frozenset()
+    ok = actions._tv_bulk_refresh()
+    assert ok is True
+
+    # Only the public room makes the cache.
+    assert actions._TV_BULK_CACHE["slugs"] == frozenset({"alice"})
+
+    # But the meta DB sees ALL three -- offline/favs view still has
+    # their thumb, location, viewer count to render.
+    import resources.lib.model_meta_store as mms_real
+    conn = mms_real.open_db(str(tmp_path / "meta.db"))
+    try:
+        for slug in ("alice", "model_a", "bob"):
+            row = mms_real.get_model(conn, slug)
+            assert row is not None, (
+                f"meta-store should still have all broadcasting "
+                f"rooms persisted, missing {slug!r}"
+            )
+    finally:
+        conn.close()
+
+
 def test_refresh_offline_meta_swallows_refresh_exception(
     kodi_mocks: dict[str, MagicMock],
 ) -> None:
@@ -1834,9 +1890,13 @@ def test_make_bulk_is_live_func_uses_affiliate_endpoint(
     def fake_fetch(url: str, **_kw: Any) -> str:
         fetch_calls.append(url)
         return _json.dumps([
+            # current_show='public' is required post-0.7.31 for the
+            # bulk cache to consider these rooms TV-pickable.
             {"username": "alice", "slug": "alice", "gender": "f",
+             "current_show": "public",
              "num_users": 100, "image_url": "", "room_subject": ""},
             {"username": "bob", "slug": "bob", "gender": "m",
+             "current_show": "public",
              "num_users": 50, "image_url": "", "room_subject": ""},
         ])
 
@@ -1909,6 +1969,7 @@ def test_make_bulk_is_live_keeps_stale_set_on_network_failure(
         if state["call"] == 1:
             return _json.dumps([
                 {"username": "alice", "slug": "alice", "gender": "f",
+                 "current_show": "public",
                  "num_users": 1, "image_url": "", "room_subject": ""},
             ])
         raise OSError("server hiccup")

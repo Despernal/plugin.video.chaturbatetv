@@ -1229,11 +1229,18 @@ def _tv_bulk_refresh() -> bool:
             parsed = []
         raw_rooms: list[Any] = parsed if isinstance(parsed, list) else []
         models = cb_listing.parse_affiliate_onlinerooms(raw_rooms)
-        new_slugs = frozenset(m.slug for m in models)
+        # v0.7.31: only public rooms make it into the bulk-live cache
+        # so the TV loop never picks a hidden/private/paid-show slug
+        # that resolves offline forever (the silent-stub-loop trigger
+        # from v0.7.29). Non-public rooms still get persisted to the
+        # meta DB below so favs view sees their thumb / status.
+        new_slugs = frozenset(m.slug for m in models if m.is_live)
+        skipped = sum(1 for m in models if not m.is_live)
         _TV_BULK_CACHE["slugs"] = new_slugs
         _TV_BULK_CACHE["ts"] = _time.time()
         logger._log(
-            f"addon_actions._tv_bulk_refresh: refreshed slugs={len(new_slugs)}"
+            f"addon_actions._tv_bulk_refresh: refreshed slugs={len(new_slugs)} "
+            f"(filtered {skipped} non-public from {len(models)} broadcasting)"
         )
         if raw_rooms:
             try:

@@ -81,18 +81,27 @@ def _model_from_affiliate_room(room: dict[str, Any]) -> Model | None:
     """Convert one affiliate-API room dict to a Model.
 
     Field shape differs from the room-list endpoint: ``image_url`` not
-    ``img``, ``room_subject`` not ``subject``, no ``current_show`` flag
-    on the public payload (every entry IS by definition online here),
-    ``num_users`` is the same.
+    ``img``, ``room_subject`` not ``subject``, ``num_users`` is the
+    same.
+
+    v0.7.31 correction: the affiliate endpoint returns rooms in EVERY
+    broadcasting state -- public, hidden (paid show), private (1-on-1),
+    away, password_protected. The previous comment ("only returns live
+    rooms") was wrong. ``current_show`` carries the actual state. We
+    parse it the same way as the room-list endpoint and only flag
+    ``is_live=True`` when ``current_show == 'public'`` so the TV loop
+    doesn't keep promoting hidden/private models we can't actually
+    watch (they fall through to silent stub forever).
     """
     slug = (room.get("username") or room.get("slug") or "").strip()
     if not slug:
         return None
+    label = (room.get("current_show") or "").lower()
     return Model(
         name=slug,
         slug=slug,
         url=f"{BASE_URL}/{slug}/",
-        is_live=True,  # affiliate-onlinerooms endpoint only returns live rooms
+        is_live=label == "public",
         viewers=_to_int(room.get("num_users"), 0),
         gender=Gender.from_str(room.get("gender")),
         image=str(room.get("image_url") or ""),

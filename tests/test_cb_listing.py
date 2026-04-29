@@ -13,6 +13,7 @@ from pathlib import Path
 from resources.lib.cb_listing import (
     RoomListPage,
     clean_subject,
+    parse_affiliate_onlinerooms,
     parse_roomlist,
     plot_for,
 )
@@ -377,3 +378,77 @@ def test_plot_for_subject_strips_hashtags_even_when_tags_empty() -> None:
                      "num_users": 1, "num_followers": 0})
     assert "#blonde" not in plot
     assert "cum show" in plot
+
+
+# --------------------------------------------------------------------------- #
+# v0.7.31: parse_affiliate_onlinerooms must honor current_show. The
+# affiliate endpoint returns rooms in EVERY broadcasting state -- public,
+# hidden, private, away, password_protected. Pre-0.7.31 we tagged them
+# all is_live=True, which sent the TV loop chasing slugs that resolve
+# offline forever (silent-stub-loop trigger).
+# --------------------------------------------------------------------------- #
+
+
+def test_affiliate_parser_marks_public_room_live() -> None:
+    """The default broadcasting state. is_live=True so it gets queued
+    by the TV loop."""
+    rooms = [
+        {"username": "alice", "current_show": "public", "num_users": 50,
+         "gender": "f", "image_url": "https://x/alice.jpg",
+         "room_subject": "hi"},
+    ]
+    models = parse_affiliate_onlinerooms(rooms)
+    assert len(models) == 1
+    assert models[0].slug == "alice"
+    assert models[0].is_live is True
+
+
+def test_affiliate_parser_marks_hidden_room_NOT_live() -> None:
+    """model_a's actual state on : hidden show (paid). The
+    affiliate feed includes her, but the AJAX endpoint returns
+    room_status='hidden' with no HLS, so the TV loop can't actually
+    play her stream. is_live must be False so she stays out of the
+    bulk-live cache and out of TV-pickable slugs."""
+    rooms = [
+        {"username": "model_a", "current_show": "hidden",
+         "num_users": 546, "gender": "f",
+         "image_url": "https://x/ms.jpg",
+         "room_subject": "550 tkns full show"},
+    ]
+    models = parse_affiliate_onlinerooms(rooms)
+    assert len(models) == 1
+    assert models[0].slug == "model_a"
+    assert models[0].is_live is False
+
+
+def test_affiliate_parser_other_non_public_states_NOT_live() -> None:
+    """Same treatment for private 1-on-1, away, password_protected."""
+    rooms = [
+        {"username": "a", "current_show": "private", "num_users": 1,
+         "gender": "f", "image_url": "", "room_subject": ""},
+        {"username": "b", "current_show": "away", "num_users": 5,
+         "gender": "f", "image_url": "", "room_subject": ""},
+        {"username": "c", "current_show": "password protected",
+         "num_users": 0, "gender": "f", "image_url": "",
+         "room_subject": ""},
+    ]
+    models = parse_affiliate_onlinerooms(rooms)
+    assert {m.slug: m.is_live for m in models} == {
+        "a": False, "b": False, "c": False,
+    }
+
+
+def test_affiliate_parser_missing_current_show_NOT_live() -> None:
+    """Defensive: if CB ever drops the current_show field on a room
+    we'd rather treat it as not-playable than over-promote and trigger
+    another silent-stub loop. Empty / missing -> is_live=False."""
+    rooms = [
+        {"username": "x", "num_users": 1, "gender": "f",
+         "image_url": "", "room_subject": "no current_show key"},
+        {"username": "y", "current_show": "", "num_users": 1,
+         "gender": "f", "image_url": "", "room_subject": ""},
+    ]
+    models = parse_affiliate_onlinerooms(rooms)
+    assert {m.slug: m.is_live for m in models} == {
+        "x": False, "y": False,
+    }

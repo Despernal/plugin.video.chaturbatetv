@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <addon id="plugin.video.chaturbatetv"
        name="Chaturbate TV"
-       version="0.7.30"
+       version="0.7.31"
        provider-name="flux">
     <requires>
         <import addon="xbmc.python" version="3.0.0"/>
@@ -20,7 +20,15 @@
             <icon>icon.png</icon>
             <fanart>fanart.jpg</fanart>
         </assets>
-        <news>0.7.30 - Pagination removed from online/offline favs views. The 50/page split was a 0.6-era guard for Pi-class hardware; now that the bulk-live cache is one HTTP for all 1228 favs and the meta DB serves enriched offline rows in a single batched IN query, rendering everything in one directory is fast enough on . Less clicking, no scroll-state-loss when going back. Stray ``page=N`` kwargs from old "Next page" links in Kodi history are silently ignored via ``**_params`` -- no crashes. Two new tests cover the all-entries render and the stale-page-kwarg tolerance; the previous two pagination tests were dropped.
+        <news>0.7.31 - Bulk-live cache filters non-public rooms (the second half of the silent-stub-loop fix).
+
+User noticed TV mode kept promoting tier P12 (model_a) even after v0.7.29's silent-stub mark-offline fix. Root cause: model_a was running a HIDDEN paid show ("550 tkns full show"). The affiliate-onlinerooms feed includes her -- she IS broadcasting -- but the AJAX endpoint returns ``room_status='hidden'`` with no HLS, so playvid falls through to silent stub. v0.7.29 marked her offline in-process, but the next periodic bulk-poll refresh re-added her because parse_affiliate_onlinerooms hard-coded ``is_live=True`` on every entry regardless of state.
+
+Probed the affiliate feed and confirmed every room carries ``current_show`` (values: public, hidden, private, away, password protected). The room-list parser already honors this field correctly; only the affiliate parser was broken. Fixed: ``is_live = current_show == 'public'`` in _model_from_affiliate_room. Bulk cache builder filters by ``m.is_live`` so non-public rooms stay out of the TV-pickable slug set entirely. Non-public rooms STILL get persisted to the meta DB (favs view shows their thumb / location / viewer count etc) -- they're just not eligible for TV-mode promotion.
+
+Five new tests: parser flags public, hidden, private/away/password-protected, missing current_show as defensive False; bulk-cache filter integration that asserts only public makes the cache while all three states get persisted to the meta DB. Two existing tests updated to include ``current_show='public'`` in their fixtures. 653 tests pass.
+
+0.7.30 - Pagination removed from online/offline favs views. The 50/page split was a 0.6-era guard for Pi-class hardware; now that the bulk-live cache is one HTTP for all 1228 favs and the meta DB serves enriched offline rows in a single batched IN query, rendering everything in one directory is fast enough on . Less clicking, no scroll-state-loss when going back. Stray ``page=N`` kwargs from old "Next page" links in Kodi history are silently ignored via ``**_params`` -- no crashes. Two new tests cover the all-entries render and the stale-page-kwarg tolerance; the previous two pagination tests were dropped.
 
 0.7.29 HOTFIX: silent-stub black-screen loop on solo-tier offlines.
 
