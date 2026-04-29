@@ -159,11 +159,23 @@ def _bulk_live_slugs(
         )
         return None
     models = cb_listing.parse_affiliate_onlinerooms(body)
+    # v0.7.32: only public rooms count as "online favs" -- the
+    # affiliate feed includes hidden / private / paid-show / away
+    # broadcasters but the AJAX endpoint refuses HLS for non-public
+    # statuses, so clicking those silent-stub-loops. Mirrors the
+    # v0.7.31 fix in addon_actions._tv_bulk_refresh which was missed
+    # on the favs side originally.
+    skipped_non_public = 0
     for m in models:
+        if not m.is_live:
+            skipped_non_public += 1
+            continue
         slugs.add(m.slug)
         models_by_slug[m.slug] = m
     logger._log(
-        f"favs_views._bulk_live_slugs: single-call got={len(slugs)}"
+        f"favs_views._bulk_live_slugs: single-call got={len(slugs)} "
+        f"(filtered {skipped_non_public} non-public from "
+        f"{len(models)} broadcasting)"
     )
     if not slugs:
         logger._log("favs_views._bulk_live_slugs: bulk returned 0 slugs")

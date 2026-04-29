@@ -241,8 +241,15 @@ def fetch_room_status_json(slug: str, fetch_func: _FetchFn | None = None) -> dic
             f"cb_client.fetch_room_status_json: NOT_DICT slug={slug!r}"
         )
         return _safe_status_default()
+    # v0.7.35 (audit agent 1 MED): drop the whitelist filter --
+    # ``out.update({k: v for k, v in data.items() if k in out})``
+    # silently discarded any field CB added past the original five
+    # default keys. Future state-classification (e.g., a new
+    # ``banned`` or ``deleted`` marker) would have hit the same
+    # "field not present" foot-gun that bit v0.7.31. Pass the full
+    # response through; only fall back to defaults for missing keys.
     out = _safe_status_default()
-    out.update({k: v for k, v in data.items() if k in out})
+    out.update(data)
     logger._log(
         f"cb_client.fetch_room_status_json: slug={slug!r} success={out.get('success')} "
         f"status={out.get('room_status')!r} hls_present={bool(out.get('url'))}"
@@ -276,14 +283,19 @@ def is_model_live(slug: str, fetch_func: _FetchFn | None = None) -> bool:
     Treats any failure (timeout, blocked, malformed JSON, missing url,
     non-public room_status) as "not live". The TV loop's behaviour
     around offline targets is the same regardless of the cause.
+
+    v0.7.35 (audit agent 1 MED): dropped the ``success`` field check.
+    ``cb_resolve.resolve_ajax`` already classifies live by
+    ``room_status == 'public' and bool(hls)`` and not the ``success``
+    flag -- the inconsistency could mask a live model in
+    ``is_model_live`` while ``resolve_ajax`` saw it as live, leading
+    to mark-offline-loop symptoms. Now the two functions agree.
     """
     try:
         data = fetch_room_status_json(slug, fetch_func=fetch_func)
     except ValueError:
         raise
     except OSError:
-        return False
-    if not data.get("success"):
         return False
     if data.get("room_status") != "public":
         return False

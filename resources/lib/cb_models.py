@@ -60,6 +60,13 @@ class Gender(Enum):
 class Model:
     """One model snapshot. ``frozen`` because we treat these as values; if a
     fact about the room changes, we build a fresh Model.
+
+    ``status`` carries the lowercase Chaturbate state ("public", "hidden",
+    "private", "away", "password protected", "offline" -- empty when the
+    parser couldn't determine it). ``is_live`` is the playable derivative:
+    only "public" with a real HLS gets True. Two fields rather than one
+    so views can render non-public broadcasters with a state-prefix
+    label (`[HIDDEN]` etc) rather than dropping them silently.
     """
 
     name: str
@@ -70,21 +77,24 @@ class Model:
     gender: Gender = Gender.UNKNOWN
     image: str = ""
     plot: str = ""
+    status: str = ""
 
     @classmethod
     def from_dossier(cls, dossier: dict[str, Any]) -> Model:
         """Build a Model from a parsed ``initialRoomDossier`` dict.
 
         Tolerates missing keys; missing ``username`` defaults to empty
-        string (caller can decide whether that's an error). ``is_live`` is
-        true when ``hls_source`` is present and non-empty (matches what
-         uses, since ``room_status`` alone has 'public',
-        'private', 'away', 'offline' and we only treat public+hls as
-        playable).
+        string (caller can decide whether that's an error). ``is_live``
+        requires BOTH ``room_status == "public"`` AND a non-empty
+        ``hls_source``. The HLS-only check we used pre-v0.7.32 was the
+        sibling of the v0.7.31 affiliate-parser bug -- a stale or
+        cached HLS URL on a now-private/away room would have flagged
+        the model live and triggered the same silent-stub-loop family.
         """
         username = str(dossier.get("username") or "")
         hls = dossier.get("hls_source") or ""
-        is_live = bool(hls)
+        room_status = str(dossier.get("room_status") or "").lower()
+        is_live = (room_status == "public") and bool(hls)
         viewers_raw = dossier.get("num_users")
         try:
             viewers = int(viewers_raw) if viewers_raw is not None else 0
@@ -98,6 +108,7 @@ class Model:
             is_live=is_live,
             viewers=viewers,
             gender=gender,
+            status=room_status,
         )
 
 

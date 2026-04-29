@@ -106,6 +106,52 @@ def test_model_from_dossier_trans_gender() -> None:
     assert m.gender is Gender.TRANS
 
 
+def test_model_from_dossier_hidden_status_NOT_live() -> None:
+    """v0.7.32: pre-fix, ``from_dossier`` flagged ``is_live`` purely on
+    a non-empty ``hls_source``. A stale or cached HLS URL on a
+    now-private/away/hidden room would pass the check, exposing the
+    silent-stub-loop family the v0.7.31 affiliate fix neutralized.
+    Now requires ``room_status == 'public'`` AND non-empty hls."""
+    m = Model.from_dossier({
+        "username": "ms",
+        "room_status": "hidden",
+        "hls_source": "https://edge.chaturbate.com/.../playlist.m3u8",
+        "num_users": 100,
+        "broadcaster_gender": "f",
+    })
+    assert m.is_live is False
+    assert m.status == "hidden"
+
+
+def test_model_from_dossier_public_no_hls_NOT_live() -> None:
+    """Both conditions required: public AND non-empty HLS. Public
+    without HLS (transient broadcasting blip) is not playable."""
+    m = Model.from_dossier({
+        "username": "x",
+        "room_status": "public",
+        "hls_source": "",
+        "broadcaster_gender": "f",
+    })
+    assert m.is_live is False
+    assert m.status == "public"
+
+
+def test_model_from_dossier_records_status_field() -> None:
+    """v0.7.32: ``status`` carries the lowercase room_status so views
+    can render non-public broadcasters with state-prefix labels
+    instead of dropping them silently."""
+    for raw_status in ("public", "hidden", "private", "away",
+                       "password protected", "offline"):
+        m = Model.from_dossier({
+            "username": "x", "room_status": raw_status,
+            "hls_source": "irrelevant",
+        })
+        assert m.status == raw_status, (
+            f"Model.status should round-trip room_status, "
+            f"got {m.status!r} for input {raw_status!r}"
+        )
+
+
 def test_model_serialize_round_trip_via_asdict() -> None:
     m = Model(
         name="alice", slug="alice", url="u", is_live=True, viewers=10, gender=Gender.FEMALE,

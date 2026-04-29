@@ -315,6 +315,7 @@ def tv_play(handle: int, store_path: Path | None = None,
         entries=entries,
         is_live_func=is_live,
         poll_minutes=pm,
+        entries_path=path,  # v0.7.34: re-read each outer iter
     )
 
 
@@ -487,9 +488,14 @@ def refresh_one_model(
                 room_status = (data.get("room_status") or "") or "offline"
                 thumb_code = head_thumb_func(slug)
                 thumb_ok = thumb_code == 200
-                if thumb_code == 404 and room_status not in (
-                    "banned", "deleted", "gone"
-                ):
+                # v0.7.35 (audit agent 3 LOW): only override status to
+                # "gone" when AJAX gave us no real signal. A transient
+                # thumb-CDN miss (404) on a hidden / private / away
+                # model used to clobber the more accurate state with
+                # "gone" until the next deep refresh corrected her.
+                # Now we only fall back to "gone" when AJAX status is
+                # empty or plain offline.
+                if thumb_code == 404 and room_status in ("", "offline"):
                     room_status = "gone"
                 mms.upsert_status(
                     conn, slug,
@@ -962,9 +968,10 @@ def deep_refresh_offline_meta(
                             status = (data.get("room_status") or "")
                             thumb_code = head_thumb_func(slug)
                             thumb_ok = thumb_code == 200
-                            if thumb_code == 404 and status not in (
-                                "banned", "deleted", "gone"
-                            ):
+                            # v0.7.35: same protect-set narrowing as
+                            # refresh_one_model. Only fall back to gone
+                            # when AJAX gave no real signal.
+                            if thumb_code == 404 and status in ("", "offline"):
                                 status = "gone"
                             mms.upsert_status(
                                 conn, slug,
@@ -1157,6 +1164,18 @@ _TV_BULK_CACHE: dict[str, Any] = {
     "ttl_s": 0.0,
 }
 
+# v0.7.33: slugs we've discovered un-playable during the current TV
+# session (silent stub played, AJAX refused HLS, etc). The bulk-cache
+# refresh wholesale-overwrites ``_TV_BULK_CACHE['slugs']`` from the
+# affiliate feed every TTL window -- if a slug is broadcasting but
+# unwatchable from us (geo-block, region wall, transient cmaf, or a
+# v0.7.31-style hidden show that briefly toggled public mid-poll), it
+# would get re-added to the cache and the TV loop would chase it
+# again. Subtracting this set after each refresh stops the bounce.
+# Cleared when TV mode exits (``tv_stop`` flips chaturbatetv_active
+# off) so a session-long quirk doesn't permanently hide a model.
+_OFFLINE_SESSION_SLUGS: set[str] = set()
+
 # Non-blocking lock that serializes _tv_bulk_refresh() callers.
 # Multiple call sites converge on this function: the TV loop's
 # ``_make_bulk_is_live_func`` (auto-poll on TTL), favs_views' bulk
@@ -1234,13 +1253,21 @@ def _tv_bulk_refresh() -> bool:
         # that resolves offline forever (the silent-stub-loop trigger
         # from v0.7.29). Non-public rooms still get persisted to the
         # meta DB below so favs view sees their thumb / status.
-        new_slugs = frozenset(m.slug for m in models if m.is_live)
+        public_slugs = frozenset(m.slug for m in models if m.is_live)
         skipped = sum(1 for m in models if not m.is_live)
+        # v0.7.33: subtract any slug we marked offline during this TV
+        # session (silent-stub played, AJAX refused HLS) so a wholesale
+        # cache refresh doesn't re-add a known-unplayable slug. The
+        # affiliate feed flips so often we'd otherwise chase the same
+        # bad slug every TTL window for the rest of the session.
+        new_slugs = public_slugs - _OFFLINE_SESSION_SLUGS
+        session_blocked = len(public_slugs) - len(new_slugs)
         _TV_BULK_CACHE["slugs"] = new_slugs
         _TV_BULK_CACHE["ts"] = _time.time()
         logger._log(
             f"addon_actions._tv_bulk_refresh: refreshed slugs={len(new_slugs)} "
-            f"(filtered {skipped} non-public from {len(models)} broadcasting)"
+            f"(filtered {skipped} non-public from {len(models)} broadcasting; "
+            f"session-blocked {session_blocked})"
         )
         if raw_rooms:
             try:
@@ -1271,18 +1298,21 @@ def _tv_bulk_refresh() -> bool:
 
 
 def _tv_bulk_mark_offline(slug: str) -> None:
-    """Remove ``slug`` from the cached live set.
+    """Remove ``slug`` from the cached live set AND record it in the
+    session-long offline blocklist.
 
-    Called from playvid when the per-slug AJAX confirms a model is
-    offline despite the bulk cache saying live. Without this, the TV
-    loop's next iteration would re-pick the same model (cache still
-    fresh per its TTL), playvid would offline-Action(Next) again, and
-    the loop would tightly cycle on the same dead model for the full
-    poll-cycle TTL (~9.5 min default).
+    Called from playvid (when per-slug AJAX confirms offline) and from
+    the tv_loop silent-stub branch (when the playvid resolver fell
+    through to the silent stub). The session blocklist stops the next
+    bulk-cache refresh from re-adding a slug we just discovered to be
+    un-playable. Without it, ``_tv_bulk_refresh`` wholesale-overwrites
+    the cache every TTL window and a broadcasting-but-unwatchable
+    model (audit agent 2 HIGH #2) would silently re-promote.
 
-    Idempotent: if slug isn't in the set, no-op.
+    Idempotent for cache eviction; always records to the session set.
     """
     from resources.lib import logger
+    _OFFLINE_SESSION_SLUGS.add(slug)
     current = _TV_BULK_CACHE["slugs"]
     if slug not in current:
         return
@@ -1344,8 +1374,14 @@ def tv_stop(handle: int, **_params: Any) -> None:
 
     Equivalent to 's ResetTVMode - if the loop self-locked
     due to a glitch, this is the user-facing recovery path.
+
+    v0.7.33: also clears _OFFLINE_SESSION_SLUGS so a session-long
+    block doesn't permanently hide a slug. Next TV-mode start is a
+    fresh blocklist; a slug that was unwatchable an hour ago gets a
+    fresh bulk-cache reading at next start.
     """
     from resources.lib import logger, tv_state
+    _OFFLINE_SESSION_SLUGS.clear()
     try:
         import xbmcgui
         win = xbmcgui.Window(10000)

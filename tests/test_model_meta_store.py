@@ -141,6 +141,50 @@ def test_upsert_writes_all_affiliate_fields(tmp_path: Path) -> None:
     assert row["last_source"] == "affiliate"
 
 
+def test_upsert_persists_last_room_status_from_current_show(
+    tmp_path: Path,
+) -> None:
+    """v0.7.32: bulk-track upsert must persist current_show to
+    last_room_status so the offline favs view can distinguish a
+    hidden / private / paid-show fav from a plain-offline one
+    without waiting for a deep refresh."""
+    conn = _open(tmp_path)
+    hidden_room = dict(_AFFILIATE_ROOM)
+    hidden_room["username"] = "ms"
+    hidden_room["slug"] = "ms"
+    hidden_room["current_show"] = "hidden"
+    mms.upsert_room(conn, hidden_room, now=1_000_000, source="affiliate")
+    row = mms.get_model(conn, "ms")
+    assert row is not None
+    assert row["last_room_status"] == "hidden"
+
+
+def test_upsert_room_overwrites_last_room_status_on_state_change(
+    tmp_path: Path,
+) -> None:
+    """v0.7.32: status is volatile freshness data -- the model toggles
+    public <-> hidden as paid shows start/end. Latest poll wins
+    (always-overwrite, NOT COALESCE) so a stale "public" never lingers
+    after the model went hidden, which would silently re-promote her
+    to TV-pickable."""
+    conn = _open(tmp_path)
+    public = dict(_AFFILIATE_ROOM)
+    public["current_show"] = "public"
+    mms.upsert_room(conn, public, now=1_000_000, source="affiliate")
+    row1 = mms.get_model(conn, "alice")
+    assert row1 is not None
+    assert row1["last_room_status"] == "public"
+
+    hidden = dict(_AFFILIATE_ROOM)
+    hidden["current_show"] = "hidden"
+    mms.upsert_room(conn, hidden, now=1_500_000, source="affiliate")
+    row2 = mms.get_model(conn, "alice")
+    assert row2 is not None
+    assert row2["last_room_status"] == "hidden", (
+        "status must overwrite, not COALESCE-preserve a stale public"
+    )
+
+
 def test_upsert_writes_all_roomlist_fields(tmp_path: Path) -> None:
     conn = _open(tmp_path)
     mms.upsert_room(conn, _ROOMLIST_ROOM, now=2_000_000, source="roomlist")
@@ -591,13 +635,40 @@ def test_label_prefix_for_row_marks_gone_models() -> None:
         assert "GONE" in prefix, f"status={status} should get GONE prefix"
 
 
-def test_label_prefix_for_row_is_empty_for_alive_states() -> None:
-    """Statuses that still represent an alive account get no prefix
-    -- they're just temporarily not broadcasting."""
-    for status in ("public", "private", "offline", "hidden", "away",
-                   "password_protected", None, ""):
+def test_label_prefix_for_row_is_empty_for_neutral_states() -> None:
+    """v0.7.34: ``public`` (model is on and freely watchable elsewhere
+    from the user's POV when they later refresh) and ``offline`` get
+    no prefix; only the broadcasting-but-paywalled or no-account
+    states pick up a label decoration."""
+    for status in ("public", "offline", None, ""):
         prefix = mms.label_prefix_for_row({"last_room_status": status})
         assert prefix == "", f"status={status!r} should not be flagged: {prefix!r}"
+
+
+def test_label_prefix_for_row_marks_hidden_and_private_amber() -> None:
+    """v0.7.34: hidden paid-show and private 1-on-1 broadcasters get
+    an amber state prefix so the user fast-scanning offline favs can
+    spot the ones that are actually live (just not freely viewable)
+    vs the "not on right now" majority."""
+    hidden = mms.label_prefix_for_row({"last_room_status": "hidden"})
+    assert "SHOW" in hidden
+    assert "FFff8000" in hidden, "hidden should be amber-colored"
+
+    private = mms.label_prefix_for_row({"last_room_status": "private"})
+    assert "PRIV" in private
+    assert "FFff8000" in private, "private should be amber-colored"
+
+
+def test_label_prefix_for_row_marks_away_and_password_neutral() -> None:
+    """v0.7.34: away and password-protected get a neutral pale-cyan
+    prefix -- they're broadcasting too, but with no token-gate value
+    proposition like hidden/private."""
+    away = mms.label_prefix_for_row({"last_room_status": "away"})
+    assert "AWAY" in away
+    pw = mms.label_prefix_for_row(
+        {"last_room_status": "password protected"}
+    )
+    assert "PW" in pw
 
 
 def test_get_offline_fav_slugs_excludes_currently_online(tmp_path: Path) -> None:

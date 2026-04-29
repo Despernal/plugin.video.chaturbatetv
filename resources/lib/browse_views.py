@@ -121,6 +121,14 @@ def _addon_data_dir() -> Path:
             "plugin.video.chaturbatetv"
 
 
+_NON_PUBLIC_PREFIXES: dict[str, str] = {
+    "hidden": "[COLOR FFff8000][HIDDEN][/COLOR]",
+    "private": "[COLOR FFff8000][PRIVATE][/COLOR]",
+    "away": "[COLOR FFc8e8f8][AWAY][/COLOR]",
+    "password protected": "[COLOR FFc8e8f8][PW][/COLOR]",
+}
+
+
 def _render_models(handle: int, models: list[Model]) -> None:
     """Add Model entries as playable items, color-tagged by gender, with
     each room's actual thumb URL (not a hardcoded pattern - Chaturbate's
@@ -132,25 +140,45 @@ def _render_models(handle: int, models: list[Model]) -> None:
     Add to Favorites / Remove from Favorites) per :func:`ctxmenu.build_ctxmenu`.
     Loads tv.json + favs.json once per render so the membership lookup is
     cheap regardless of model count (Lesson 13 from -patches).
+
+    v0.7.32: non-public broadcasters (hidden, private, away,
+    password-protected) get an amber prefix and route to
+    ``view_model_info`` instead of ``playvid``. Clicking them used to
+    silent-stub-loop (the playvid resolver hits the AJAX endpoint, gets
+    no HLS, falls through to the silent stub). Routing to view_model_info
+    lets the user still browse profile / photo sets without the trap.
     """
     data_dir = _addon_data_dir()
     tv_entries = tv_store.load(data_dir / "tv.json")
     favs = favs_store.load(data_dir / "favs.json")
     for m in models:
-        label = _color_label(m.name, m.gender)
+        base_label = _color_label(m.name, m.gender)
         if m.viewers:
-            label = f"{label} [{m.viewers}]"
+            base_label = f"{base_label} [{m.viewers}]"
         ctx = ctxmenu.build_ctxmenu(
             {"slug": m.slug, "name": m.name, "url": m.url},
             tv_entries=tv_entries,
             favs=favs,
         )
-        kodi_helpers.add_play_item(
-            handle, label, m.slug,
-            image=m.image or None,
-            plot=m.plot or None,
-            ctx_items=ctx,
-        )
+        if m.is_live:
+            kodi_helpers.add_play_item(
+                handle, base_label, m.slug,
+                image=m.image or None,
+                plot=m.plot or None,
+                ctx_items=ctx,
+            )
+        else:
+            prefix = _NON_PUBLIC_PREFIXES.get(
+                m.status, "[COLOR FFff8000][NON-PUBLIC][/COLOR]"
+            )
+            label = f"{prefix} {base_label}"
+            kodi_helpers.add_dir(
+                handle, label, "view_model_info",
+                slug=m.slug,
+                image=m.image or None,
+                plot=m.plot or None,
+                ctx_items=ctx,
+            )
 
 
 def _coerce_page(value: Any) -> int:

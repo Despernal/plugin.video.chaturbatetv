@@ -605,6 +605,53 @@ def test_classify_yesno_keep_playing_returns_fall_through(
     assert decision == "fall_through"
 
 
+def test_classify_after_stop_uses_queued_plugin_url_for_slug(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """v0.7.34: ``current_playlist_path`` is the post-resolution path
+    (localhost proxy URL or silent stub) and never has ``slug=`` in
+    production -- the v0.7.21+ disambiguator branch was dead code.
+    Fix captures ``current_queued_plugin_url`` (slug-bearing) in
+    ``onAVStarted`` and ``_classify_after_stop`` reads that. Verify a
+    user-stop on a still-live model exits cleanly (no dialog) per
+    Lesson 17, which is what the disambiguator was for.
+    """
+    tl = _import()
+
+    class _State:
+        user_stopped = True
+        idle_at_stop = 1
+        # Resolved path (what production sets via getPlayingFile()):
+        current_playlist_path = "http://127.0.0.1:54321/edge/proxied.m3u8"
+        # Queued plugin URL (what we now also capture):
+        current_queued_plugin_url = (
+            "plugin://plugin.video.chaturbatetv/"
+            "?mode=playvid&slug=alice&name=alice"
+        )
+        playlist_ended_naturally = False
+        previous_user_stop_time = 0.0
+
+    s = _State()
+
+    # is_live should be queried for alice's URL specifically. Capture
+    # the call to verify the slug round-trips through.
+    queried: list[str] = []
+
+    def fake_is_live(url: str) -> bool:
+        queried.append(url)
+        return True  # alice is still live -> Lesson 17 says exit
+
+    decision = tl._classify_after_stop(s, fake_is_live)
+    assert "https://chaturbate.com/alice/" in queried, (
+        f"is_live must be queried with the queued slug's room URL, "
+        f"got {queried!r}"
+    )
+    assert decision == "user_stopped", (
+        "user-stop on a still-live model should exit cleanly (no "
+        "dialog), but the disambiguator was dead code pre-0.7.34"
+    )
+
+
 def test_classify_no_double_stop_fast_path_v0_7_13(
     kodi_mods: dict[str, Any],
 ) -> None:

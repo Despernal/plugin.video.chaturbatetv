@@ -60,20 +60,27 @@ def _to_int(v: Any, default: int = 0) -> int:
 
 
 def _model_from_room(room: dict[str, Any]) -> Model | None:
-    """Convert one room dict to a Model. Returns None on a missing slug."""
+    """Convert one room dict to a Model. Returns None on a missing slug.
+
+    v0.7.35 dropped the ``label`` fallback for liveness -- ``label`` is
+    a UI badge ("HD", "New", "Hot") not a state enum, and the affiliate
+    parser doesn't fall back to it either. Symmetric handling now: only
+    ``current_show`` decides liveness; missing/unknown -> not live.
+    """
     slug = (room.get("username") or "").strip()
     if not slug:
         return None
-    label = (room.get("current_show") or room.get("label") or "").lower()
+    status = (room.get("current_show") or "").strip().lower()
     return Model(
         name=slug,
         slug=slug,
         url=f"{BASE_URL}/{slug}/",
-        is_live=label == "public",
+        is_live=status == "public",
         viewers=_to_int(room.get("num_users"), 0),
         gender=Gender.from_str(room.get("gender")),
         image=str(room.get("img") or ""),
         plot=plot_for(room),
+        status=status,
     )
 
 
@@ -96,16 +103,17 @@ def _model_from_affiliate_room(room: dict[str, Any]) -> Model | None:
     slug = (room.get("username") or room.get("slug") or "").strip()
     if not slug:
         return None
-    label = (room.get("current_show") or "").lower()
+    status = (room.get("current_show") or "").strip().lower()
     return Model(
         name=slug,
         slug=slug,
         url=f"{BASE_URL}/{slug}/",
-        is_live=label == "public",
+        is_live=status == "public",
         viewers=_to_int(room.get("num_users"), 0),
         gender=Gender.from_str(room.get("gender")),
         image=str(room.get("image_url") or ""),
         plot=plot_for(room),
+        status=status,
     )
 
 

@@ -303,10 +303,13 @@ def _bulk_fetch(live_slugs_per_page: list[list[str]]) -> Any:
               method: str = "GET") -> str:
         if "/affiliates/api/onlinerooms/" in url:
             # Single-call affiliate endpoint: flatten all pages into
-            # one JSON array.
+            # one JSON array. v0.7.32: current_show='public' is
+            # required for the parser's is_live=True classification
+            # (and therefore for the favs bulk-cache filter).
             all_slugs = [s for page in live_slugs_per_page for s in page]
             return json.dumps([
                 {"username": s, "slug": s, "gender": "f",
+                 "current_show": "public",
                  "num_users": 100, "image_url": f"https://thumb/{s}.jpg",
                  "room_subject": f"hi from {s}"}
                 for s in all_slugs
@@ -327,7 +330,7 @@ def _bulk_fetch(live_slugs_per_page: list[list[str]]) -> Any:
         return json.dumps({
             "rooms": [
                 {"username": s, "gender": "f", "num_users": 100,
-                 "label": "public"}
+                 "current_show": "public", "label": "public"}
                 for s in slugs
             ],
             "total_count": sum(len(p) for p in live_slugs_per_page),
@@ -442,9 +445,12 @@ def test_bulk_live_slugs_caches_results_for_60s(
 
     def fetch(url: str, **_kw: Any) -> str:
         fetch_calls["n"] += 1
-        # Affiliate endpoint shape: flat JSON array.
+        # Affiliate endpoint shape: flat JSON array. v0.7.32 requires
+        # current_show='public' for the parser to flag is_live, which
+        # the bulk-cache filter now requires.
         return json.dumps([
             {"username": "alice", "slug": "alice", "gender": "f",
+             "current_show": "public",
              "num_users": 1, "image_url": "https://thumb/alice.jpg",
              "room_subject": "hi"}
         ])
@@ -582,6 +588,7 @@ def test_bulk_live_slugs_drops_legacy_disk_cache_on_entry(
     def fetch(url: str, **_kw: Any) -> str:
         return json.dumps([
             {"username": "fresh", "slug": "fresh", "gender": "f",
+             "current_show": "public",
              "num_users": 1, "image_url": "", "room_subject": ""}
         ])
 
@@ -590,6 +597,42 @@ def test_bulk_live_slugs_drops_legacy_disk_cache_on_entry(
     assert out == {"fresh"}
     # And the legacy cache file got cleaned up.
     assert not cache_path.exists()
+
+
+def test_bulk_live_slugs_filters_non_public_rooms(
+    tmp_path: Path,
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """v0.7.32: hidden / private / paid-show rooms appear in the
+    affiliate-onlinerooms feed but their AJAX status returns no HLS,
+    so clicking them silent-stub-loops. _bulk_live_slugs must filter
+    them out the same way _tv_bulk_refresh in addon_actions does
+    (the v0.7.31 fix that was missed on the favs side originally)."""
+    fv = _import()
+    fv._bulk_cache_clear()
+
+    def fetch(url: str, **_kw: Any) -> str:
+        return json.dumps([
+            {"username": "alice", "slug": "alice", "gender": "f",
+             "current_show": "public",
+             "num_users": 100, "image_url": "", "room_subject": ""},
+            {"username": "model_a", "slug": "model_a",
+             "gender": "f", "current_show": "hidden",
+             "num_users": 546, "image_url": "",
+             "room_subject": "550 tkns full show"},
+            {"username": "bob", "slug": "bob", "gender": "m",
+             "current_show": "private",
+             "num_users": 1, "image_url": "", "room_subject": ""},
+            {"username": "afk", "slug": "afk", "gender": "f",
+             "current_show": "away",
+             "num_users": 1, "image_url": "", "room_subject": ""},
+        ])
+
+    out = fv._bulk_live_slugs(fetch)
+    assert out == {"alice"}, (
+        f"Only public rooms should be in the online-favs cache, "
+        f"got {out!r}"
+    )
 
 
 def test_online_favs_view_treats_all_as_offline_when_bulk_fails(

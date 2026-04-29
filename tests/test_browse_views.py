@@ -227,13 +227,13 @@ def test_top_cams_view_sorts_by_viewers_descending(
     body = json.dumps({
         "rooms": [
             {"username": "low", "gender": "f", "num_users": 18,
-             "label": "public"},
+             "current_show": "public", "label": "public"},
             {"username": "mid", "gender": "f", "num_users": 500,
-             "label": "public"},
+             "current_show": "public", "label": "public"},
             {"username": "high", "gender": "f", "num_users": 15000,
-             "label": "public"},
+             "current_show": "public", "label": "public"},
             {"username": "med2", "gender": "f", "num_users": 4000,
-             "label": "public"},
+             "current_show": "public", "label": "public"},
         ],
         "total_count": 4, "all_rooms_count": 4,
     })
@@ -256,11 +256,11 @@ def test_gender_view_sorts_by_viewers_descending(
     body = json.dumps({
         "rooms": [
             {"username": "x", "gender": "f", "num_users": 100,
-             "label": "public"},
+             "current_show": "public", "label": "public"},
             {"username": "y", "gender": "f", "num_users": 9999,
-             "label": "public"},
+             "current_show": "public", "label": "public"},
             {"username": "z", "gender": "f", "num_users": 1,
-             "label": "public"},
+             "current_show": "public", "label": "public"},
         ],
         "total_count": 3, "all_rooms_count": 3,
     })
@@ -541,3 +541,58 @@ def test_top_cams_view_attaches_ctxmenu_per_row(
         assert any("Add to TV" in lab for lab in labels)
         # With no favs.json, default is "Add to Favorites".
         assert any("Add to Favorites" in lab for lab in labels)
+
+
+def test_browse_renders_non_public_as_view_model_info(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """v0.7.32: hidden / private / paid-show / away rooms still appear
+    in the room-list feed but their AJAX status returns no HLS, so
+    routing them through ``mode=playvid`` silent-stub-loops the user.
+    Browse views must decorate them with a state prefix and route to
+    ``mode=view_model_info`` so the user can browse the profile /
+    photo sets without the trap."""
+    bv = _import()
+    body = json.dumps({
+        "rooms": [
+            {"username": "alice", "gender": "f", "num_users": 100,
+             "current_show": "public"},
+            {"username": "model_a", "gender": "f",
+             "num_users": 546, "current_show": "hidden",
+             "room_subject": "550 tkns full show"},
+            {"username": "bob", "gender": "m", "num_users": 1,
+             "current_show": "private"},
+            {"username": "afk", "gender": "f", "num_users": 1,
+             "current_show": "away"},
+        ],
+        "total_count": 4, "all_rooms_count": 4,
+    })
+
+    def fetch(*_a: Any, **_kw: Any) -> str:
+        return body
+
+    bv.top_cams_view(handle=42, fetch_func=fetch)
+
+    urls = _added_urls(kodi_mocks["xbmcplugin"])
+    play_urls = [u for u in urls if "mode=playvid" in u]
+    info_urls = [u for u in urls if "mode=view_model_info" in u]
+
+    # Only the public model lands in playvid.
+    play_slugs = {
+        u.split("slug=")[1].split("&")[0] for u in play_urls
+    }
+    assert play_slugs == {"alice"}, (
+        f"Only public rooms should route to playvid, got {play_slugs!r}"
+    )
+
+    # The three non-public rooms route to view_model_info.
+    info_slugs = {
+        u.split("slug=")[1].split("&")[0] for u in info_urls
+        if "slug=" in u
+    }
+    # info_slugs may include "Next page" entries that have no slug --
+    # filter to the three we care about.
+    assert {"model_a", "bob", "afk"}.issubset(info_slugs), (
+        f"Hidden/private/away models must route to view_model_info, "
+        f"got {info_slugs!r}"
+    )

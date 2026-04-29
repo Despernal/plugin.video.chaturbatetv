@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <addon id="plugin.video.chaturbatetv"
        name="Chaturbate TV"
-       version="0.7.31"
+       version="0.7.35"
        provider-name="flux">
     <requires>
         <import addon="xbmc.python" version="3.0.0"/>
@@ -20,7 +20,33 @@
             <icon>icon.png</icon>
             <fanart>fanart.jpg</fanart>
         </assets>
-        <news>0.7.31 - Bulk-live cache filters non-public rooms (the second half of the silent-stub-loop fix).
+        <news>0.7.35 - Defensive polish from the audit: fetch_room_status_json now passes the FULL response through (whitelist drop) so a future "banned"/"deleted" marker won't be silently discarded; is_model_live drops the ``success`` flag check so it agrees with cb_resolve.resolve_ajax (was inconsistent, could mark a live model offline -> mark-offline-loop symptom); 404-thumb-overrides-status protect-set narrowed to {"", "offline"} so a transient thumb-CDN miss can't clobber a hidden/private/away status with "gone"; _model_from_room dropped the wrong-type ``label`` fallback (label is a UI badge, not a state enum) -- room-list parser now classifies symmetric to the affiliate parser.
+
+0.7.34 - TV state machine + UX (audit agent 2 MED + agent 3 MED). The Lesson-17 disambiguator branch in _classify_after_stop has been dead code since v0.7.21: ``current_playlist_path`` is the post-resolution path (localhost proxy URL or silent stub) and never has ``slug=``, so the model_live check always fell through to the dialog. Added ``current_queued_plugin_url`` captured in onAVStarted from the playlist position (Kodi keeps the original queued URL accessible there); _classify_after_stop now reads it, so a single Stop press on a still-live model exits cleanly without the Yes/No dialog.
+
+tv_play snapshots ``entries`` once at session start; mid-session ``tv_add`` / ``tv_remove`` / ``tv_edit`` (which run in a separate Kodi-spawned default.py process) were ignored until restart. Added ``entries_path`` plumbing -- the loop re-reads tv.json at the top of each outer iteration. Atomic-write-safe; ~1ms per read.
+
+label_prefix_for_row got two new amber prefixes: ``[SHOW]`` for hidden paid-show models, ``[PRIV]`` for private 1-on-1, plus neutral ``[AWAY]`` and ``[PW]`` for AFK / password-gated. Lets you fast-scan offline favs and spot the actually-broadcasting-but-paywalled ones vs the "not on right now" majority. Plain offline / public-but-currently-off stays uncluttered.
+
+0.7.33 - Silent-stub robustness (audit agent 2 HIGH). Two fixes deepening the v0.7.29 silent-stub-loop fix.
+
+(1) Dropped the ``not user_stopped`` guard from the silent-stub mark-offline branch in tv_loop. On Kodi versions where the last item of a playlist ending fires onPlayBackStopped (instead of onPlayBackEnded), user_stopped becomes True for natural-end stub plays and the mark-offline path got skipped -- the loop re-picked the same offline slug forever, identical shape to the v0.7.21 wedge. Mark-offline is idempotent so widening the guard is safe.
+
+(2) New _OFFLINE_SESSION_SLUGS set captures every slug we discover un-playable during a TV session (silent stub played, AJAX refused HLS). _tv_bulk_refresh subtracts it from the public-only set BEFORE writing _TV_BULK_CACHE, so a wholesale bulk-cache refresh can't re-add a known-bad slug. Without this, the affiliate feed flips so often we'd chase the same broadcasting-but-unwatchable model every TTL window for the rest of the session. Cleared on tv_stop so a session-long block doesn't permanently hide a slug.
+
+0.7.32 - The audit-found leftovers from v0.7.31. v0.7.31 fixed _tv_bulk_refresh in addon_actions but missed three parallel paths.
+
+(1) ``favs_views._bulk_live_slugs`` was still treating hidden/private models as Online -- clicking a hidden fav from Online Favorites still silent-stub-looped. Now mirrors the v0.7.31 filter: only ``current_show=='public'`` makes the online-favs cache.
+
+(2) Browse views (Top, New, Female, Male, Couple, Trans, Search) rendered ALL rooms as playable. A high-viewer hidden show in Top Cams was a click-to-silent-stub trap. Non-public rooms now get a ``[HIDDEN]`` / ``[PRIVATE]`` / ``[AWAY]`` / ``[PW]`` amber prefix and route to ``mode=view_model_info`` instead of ``mode=playvid`` -- you can browse the profile / photo sets without the trap.
+
+(3) ``model_meta_store._row_values`` (the bulk-affiliate persistence path) never wrote ``last_room_status`` from ``current_show``. Hidden/private models the affiliate feed sees daily had NULL status until a deep refresh hit them. Now persists, joining the always-overwrite set so the latest poll wins (status is volatile freshness data; latest read should win, not COALESCE-preserve a stale ``public`` after the model went hidden).
+
+Plus the twin-of-v0.7.31 bug agent 1 caught: ``Model.from_dossier`` defaulted ``is_live`` purely on ``bool(hls_source)`` ignoring ``room_status`` -- a stale or cached HLS URL on a now-private/away room would have promoted it. Now requires ``room_status == 'public'`` AND non-empty hls. Defensive; the dossier code path is mostly cold but the same conflation pattern needed killing.
+
+Model dataclass got a new ``status: str`` field carrying the lowercase room state, so views can render non-public broadcasters with state-prefix labels rather than dropping them silently.
+
+0.7.31 - Bulk-live cache filters non-public rooms (the second half of the silent-stub-loop fix).
 
 User noticed TV mode kept promoting tier P12 (model_a) even after v0.7.29's silent-stub mark-offline fix. Root cause: model_a was running a HIDDEN paid show ("550 tkns full show"). The affiliate-onlinerooms feed includes her -- she IS broadcasting -- but the AJAX endpoint returns ``room_status='hidden'`` with no HLS, so playvid falls through to silent stub. v0.7.29 marked her offline in-process, but the next periodic bulk-poll refresh re-added her because parse_affiliate_onlinerooms hard-coded ``is_live=True`` on every entry regardless of state.
 

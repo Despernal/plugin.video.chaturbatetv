@@ -490,9 +490,11 @@ def test_tv_play_loads_entries_and_invokes_loop(
     captured: dict[str, Any] = {}
 
     def fake_tv_play(*, entries: Any, is_live_func: Any,
-                     poll_minutes: int = 10) -> str:
+                     poll_minutes: int = 10,
+                     entries_path: Any = None) -> str:
         captured["entries"] = entries
         captured["poll_minutes"] = poll_minutes
+        captured["entries_path"] = entries_path
         return "user_stopped"
 
     import resources.lib.tv_loop as tv_loop_mod
@@ -734,6 +736,89 @@ def test_tv_bulk_refresh_filters_non_public_from_cache(
             )
     finally:
         conn.close()
+
+
+def test_tv_bulk_mark_offline_records_in_session_set(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """v0.7.33: marking a slug offline must record it in
+    _OFFLINE_SESSION_SLUGS so the next bulk-cache refresh subtracts
+    it instead of re-adding the just-marked slug from the affiliate
+    feed. Idempotent across calls."""
+    actions = _import()
+    actions._OFFLINE_SESSION_SLUGS.clear()
+    actions._TV_BULK_CACHE["slugs"] = frozenset({"alice", "bob"})
+
+    actions._tv_bulk_mark_offline("alice")
+    assert "alice" in actions._OFFLINE_SESSION_SLUGS
+    assert actions._TV_BULK_CACHE["slugs"] == frozenset({"bob"})
+
+    # Idempotent: marking again is fine, set stays consistent.
+    actions._tv_bulk_mark_offline("alice")
+    assert actions._OFFLINE_SESSION_SLUGS == {"alice"}
+
+    # A slug not in the cache still gets recorded so a future bulk
+    # refresh that re-introduces it gets blocked.
+    actions._tv_bulk_mark_offline("ghost")
+    assert "ghost" in actions._OFFLINE_SESSION_SLUGS
+
+
+def test_tv_bulk_refresh_subtracts_session_offline_slugs(
+    kodi_mocks: dict[str, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """v0.7.33: the bulk refresh wholesale-overwrites _TV_BULK_CACHE
+    from the affiliate feed. Without subtracting _OFFLINE_SESSION_SLUGS,
+    a slug we just marked offline gets re-added every TTL window and
+    the TV loop chases it again (audit agent 2 HIGH #2). The fix
+    subtracts the session set after building the public-only set."""
+    import json as _json
+    actions = _import()
+    actions._OFFLINE_SESSION_SLUGS.clear()
+    actions._OFFLINE_SESSION_SLUGS.add("model_a")
+
+    rooms = [
+        {"username": "alice", "current_show": "public", "num_users": 1,
+         "gender": "f", "image_url": "", "room_subject": ""},
+        {"username": "model_a", "current_show": "public",
+         "num_users": 100, "gender": "f", "image_url": "",
+         "room_subject": ""},
+    ]
+
+    def fake_fetch(url: str, *a: Any, **kw: Any) -> str:
+        return _json.dumps(rooms)
+
+    import resources.lib.cb_client as cb_client_mod
+    monkeypatch.setattr(cb_client_mod, "fetch_browse_page", fake_fetch)
+    monkeypatch.setattr(actions, "_model_meta_db_path",
+                        lambda: tmp_path / "meta.db")
+
+    actions._TV_BULK_CACHE["slugs"] = frozenset()
+    ok = actions._tv_bulk_refresh()
+    assert ok is True
+    # model_a was filtered out even though the affiliate feed
+    # reported her current_show='public'.
+    assert actions._TV_BULK_CACHE["slugs"] == frozenset({"alice"}), (
+        f"session-blocked slug must NOT come back via bulk refresh, "
+        f"got {actions._TV_BULK_CACHE['slugs']!r}"
+    )
+
+    # Cleanup so other tests don't see the lingering block.
+    actions._OFFLINE_SESSION_SLUGS.clear()
+
+
+def test_tv_stop_clears_offline_session_slugs(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """v0.7.33: tv_stop must reset _OFFLINE_SESSION_SLUGS so a slug
+    blocked from a prior session can be reconsidered in a new one
+    (a model who was hidden an hour ago might be public now)."""
+    actions = _import()
+    actions._OFFLINE_SESSION_SLUGS.add("alice")
+    actions._OFFLINE_SESSION_SLUGS.add("bob")
+    actions.tv_stop(handle=42)
+    assert actions._OFFLINE_SESSION_SLUGS == set()
 
 
 def test_refresh_offline_meta_swallows_refresh_exception(
@@ -2010,7 +2095,8 @@ def test_tv_play_reads_poll_minutes_from_settings(
     captured: dict[str, Any] = {}
 
     def fake_tv_play(*, entries: Any, is_live_func: Any,
-                     poll_minutes: int = 10) -> str:
+                     poll_minutes: int = 10,
+                     entries_path: Any = None) -> str:
         captured["poll_minutes"] = poll_minutes
         return "user_stopped"
 

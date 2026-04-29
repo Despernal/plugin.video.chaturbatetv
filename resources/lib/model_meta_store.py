@@ -253,6 +253,16 @@ def _tags_to_json_or_none(v: Any) -> str | None:
     return json.dumps([str(t) for t in v])
 
 
+def _normalize_status(raw: Any) -> str | None:
+    """Lowercase + strip a raw status string. Empty / None -> None so
+    the COALESCE upsert preserves any existing non-null value rather
+    than overwriting it with whitespace."""
+    if raw is None:
+        return None
+    s = str(raw).strip().lower()
+    return s or None
+
+
 def _row_values(room: dict[str, Any], *, now: int, source: str) -> dict[str, Any] | None:
     """Convert a raw room dict to a column-keyed values dict, or
     None if the room lacks an identifying slug.
@@ -302,6 +312,16 @@ def _row_values(room: dict[str, Any], *, now: int, source: str) -> dict[str, Any
         "last_online_epoch": int(now),
         "first_online_epoch": int(now),
         "last_seconds_online": _to_int_or_none(room.get("seconds_online")),
+        # v0.7.32: persist current_show / room_status from the bulk
+        # affiliate poll so the offline favs view can distinguish a
+        # hidden / private / paid-show fav from a plain-offline one
+        # without waiting for a deep refresh. Affiliate uses
+        # ``current_show``; older payloads sometimes used
+        # ``room_status``. Lowercase for consistency with
+        # _STATUS_GONE / plot_for_offline_row checks.
+        "last_room_status": _normalize_status(
+            room.get("current_show") or room.get("room_status"),
+        ),
         "last_source": str(source),
         "updated_epoch": int(now),
     }
@@ -338,6 +358,11 @@ _COALESCE_COLS = (
 
 _OVERWRITE_COLS = (
     "last_online_epoch", "last_source", "updated_epoch",
+    # v0.7.32: status changes constantly (public <-> hidden <-> away
+    # as the model toggles paid-show modes). Latest poll wins -- never
+    # let a stale COALESCE preserve "public" after the model went
+    # hidden, which would silently re-promote her to TV-pickable.
+    "last_room_status",
 )
 
 _ALL_INSERT_COLS = (
@@ -672,6 +697,9 @@ def upsert_biocontext(
         "last_source", "updated_epoch",
         "last_broadcast_epoch", "last_broadcast_iso",
         "last_broadcast_human",
+        # v0.7.32: status is volatile freshness data; latest read
+        # always wins (mirror of the bulk-track _OVERWRITE_COLS rule).
+        "last_room_status",
     }
     parts: list[str] = []
     for c in cols:
@@ -696,18 +724,34 @@ def upsert_biocontext(
     return True
 
 
-def label_prefix_for_row(row: dict[str, Any]) -> str:
-    """Return a short HALO-red ``[GONE] `` prefix when ``last_room_status``
-    is one of {banned, deleted, gone}; empty string otherwise.
+_STATUS_BROADCASTING_NON_PUBLIC = {
+    "hidden": "[COLOR FFff8000][SHOW][/COLOR] ",
+    "private": "[COLOR FFff8000][PRIV][/COLOR] ",
+    "away": "[COLOR FFc8e8f8][AWAY][/COLOR] ",
+    "password protected": "[COLOR FFc8e8f8][PW][/COLOR] ",
+}
 
-    The prefix gets prepended to the offline-fav list label so accounts
-    that are unlikely to ever come back are visually distinct from
-    just-temporarily-offline models the user might want to keep
-    waiting on.
+
+def label_prefix_for_row(row: dict[str, Any]) -> str:
+    """Return a short status prefix for the offline-fav list label.
+
+    HALO-red ``[GONE] `` for banned/deleted accounts (agent 3 LOW
+    correctly flagged this -- they aren't coming back).
+
+    v0.7.34: amber ``[SHOW] `` for hidden paid-show models, ``[PRIV] ``
+    for private 1-on-1, neutral ``[AWAY] `` and ``[PW] `` for AFK and
+    password-gated. Lets the user fast-scan offline favs and spot the
+    ones that are actually broadcasting (just not freely viewable)
+    vs the "not on right now" majority.
+
+    Empty string for plain offline + public-but-currently-off so the
+    common case stays uncluttered.
     """
     status = (row.get("last_room_status") or "").strip().lower()
     if status in _STATUS_GONE:
         return "[COLOR FFff8080][GONE][/COLOR] "
+    if status in _STATUS_BROADCASTING_NON_PUBLIC:
+        return _STATUS_BROADCASTING_NON_PUBLIC[status]
     return ""
 
 

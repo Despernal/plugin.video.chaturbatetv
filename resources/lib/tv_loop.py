@@ -96,6 +96,16 @@ def _build_player_class() -> type:
             self.switched: bool = False
             self.idle_at_stop: int = 0
             self.current_playlist_path: str = ""
+            # v0.7.34: original slug-bearing plugin URL queued for
+            # this slot. ``current_playlist_path`` is whatever Kodi
+            # ends up actually playing (post-resolution: localhost
+            # proxy or silent stub), so ``slug=`` never appears there
+            # and ``_classify_after_stop`` couldn't tell the user-
+            # stopped-but-model-live disambiguator apart from the
+            # always-fallthrough case. With the queued URL captured
+            # alongside, _classify_after_stop can compute model_live
+            # against the actual queued slug.
+            self.current_queued_plugin_url: str = ""
             self.playlist_ended_naturally: bool = False
             self.last_natural_end_time: float = 0.0
             self.queued_paths: set[str] = set()
@@ -113,6 +123,7 @@ def _build_player_class() -> type:
             self.switched = False
             self.idle_at_stop = 0
             self.current_playlist_path = ""
+            self.current_queued_plugin_url = ""
             self.playlist_ended_naturally = False
             self.queued_paths = set()
 
@@ -122,6 +133,23 @@ def _build_player_class() -> type:
             except Exception:
                 cur = ""
             self.current_playlist_path = cur
+            # v0.7.34: capture the queued plugin URL (with ``slug=``)
+            # alongside the resolved path. Kodi's playlist keeps the
+            # original queued URL accessible via ``pl[pos].getPath()``
+            # during playback, even though ``getPlayingFile()`` returns
+            # the post-resolution URL.
+            try:
+                pl = xbmc.PlayList(xbmc.PLAYLIST_VIDEO)
+                pos = pl.getposition()
+                if 0 <= pos < pl.size():
+                    queued_url = pl[pos].getPath()
+                    if queued_url and "slug=" in queued_url:
+                        self.current_queued_plugin_url = queued_url
+            except Exception as exc:
+                _safe_log(
+                    f"_TVPlayer.onAVStarted: queued URL capture failed "
+                    f"err={exc!r}"
+                )
             internal = _is_internal_advance(cur, self.queued_paths)
             if not internal:
                 # Production fallback: playvid RESOLVES the queued
@@ -341,7 +369,17 @@ def _classify_after_stop(
       idle high, no recent user input). Keep playing forever.
     """
     cur_url = ""
-    cur_path = getattr(player_state, "current_playlist_path", "") or ""
+    # v0.7.34: prefer the queued plugin URL (slug-bearing) which we now
+    # capture in onAVStarted. ``current_playlist_path`` is the post-
+    # resolution path (localhost proxy URL or silent stub) and never
+    # has ``slug=`` in production -- the original lookup against
+    # current_playlist_path always failed silently and the entire
+    # Lesson-17 disambiguator branch was dead code.
+    cur_path = (
+        getattr(player_state, "current_queued_plugin_url", "")
+        or getattr(player_state, "current_playlist_path", "")
+        or ""
+    )
     if "slug=" in cur_path:
         try:
             from urllib.parse import parse_qs, urlparse
@@ -584,6 +622,7 @@ def tv_play(
     entries: list[TVEntry],
     is_live_func: Callable[[str], bool],
     poll_minutes: int = 10,
+    entries_path: Any = None,
 ) -> str:
     """Run the TV loop with real Kodi.
 
@@ -592,6 +631,14 @@ def tv_play(
 
     This function imports ``xbmc`` / ``xbmcgui`` lazily so the module
     stays importable from pure-test contexts that don't mock them.
+
+    v0.7.34: when ``entries_path`` is provided, the loop re-reads
+    ``tv.json`` at the top of each outer iteration. Keeps the loop in
+    sync with mid-session ``tv_add`` / ``tv_remove`` / ``tv_edit``
+    calls (which run in a separate Kodi-spawned default.py process
+    and would otherwise be invisible until restart -- audit agent 2
+    MED #2). When None, the entries snapshot at start is used (test
+    callers).
     """
     import xbmc
     import xbmcgui
@@ -635,6 +682,21 @@ def tv_play(
             try:
                 iter_count += 1
                 _safe_log(f"tv_loop.tv_play: iter={iter_count}")
+                # v0.7.34: re-read tv.json each outer iteration so
+                # mid-session tv_add / tv_remove / tv_edit (which run
+                # in a separate Kodi-spawned process) take effect on
+                # the next loop turn rather than waiting for restart.
+                if entries_path is not None:
+                    try:
+                        from resources.lib import tv_store as _ts
+                        fresh = _ts.load(entries_path)
+                        if fresh:
+                            entries = fresh
+                    except Exception as exc:
+                        _safe_log(
+                            f"tv_loop.tv_play: tv.json reload failed "
+                            f"err={exc!r} (keeping cached entries)"
+                        )
                 sorted_entries = tv_select.priority_sort(entries)
                 target = tv_select.pick_target(
                     sorted_entries, is_live_func,
@@ -808,19 +870,26 @@ def tv_play(
                 if self_promoted:
                     continue
 
-                # v0.7.21 loop unblock: if the inner loop exited cleanly
-                # (no user stop, no takeover, no promotion) and what
-                # actually played was the offline-skip silent stub, the
-                # slug we picked is offline. playvid's
-                # _tv_bulk_mark_offline runs in a separate
-                # Kodi-spawned default.py process and can't update OUR
-                # bulk cache, so we have to mark it ourselves here. The
-                # slug we mark is the one currently at the playlist
-                # position (handles multi-slug tiers correctly: only the
-                # one item that resolved offline gets dropped, others
-                # stay).
-                if (not player.user_stopped
-                        and not player.switched
+                # v0.7.21 loop unblock: if the silent stub just played,
+                # the slug we picked resolved offline and we need to
+                # mark it offline IN-PROCESS (playvid's mark runs in a
+                # different Kodi-spawned process and can't update our
+                # cache).
+                #
+                # v0.7.33 hardening: the original guard required
+                # ``not player.user_stopped`` because we worried that a
+                # user-stop on a silent-stub iteration would over-mark.
+                # But mark-offline is idempotent (no-op if the slug
+                # isn't in the cache) and on Kodi versions where the
+                # last item of a playlist ending fires
+                # ``onPlayBackStopped`` instead of ``onPlayBackEnded``,
+                # ``user_stopped`` becomes True for a natural-end
+                # silent stub -- the mark gets skipped, the loop
+                # re-picks the same offline slug forever (audit agent
+                # 2 HIGH #1, identical shape to the v0.7.21 wedge).
+                # Guard now widened: any silent-stub playback where we
+                # didn't switch is fair game to mark.
+                if (not player.switched
                         and _was_silent_stub_played(player.tracked_file)):
                     queued_path = ""
                     try:

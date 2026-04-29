@@ -33,8 +33,17 @@ def _build_url(mode: str, **params: Any) -> str:
 
 
 def add_dir(handle: int, label: str, mode: str, image: str | None = None,
+            plot: str | None = None,
+            ctx_items: list[tuple[str, str]] | None = None,
             **params: Any) -> None:
-    """Add a sub-folder ListItem to the current directory."""
+    """Add a sub-folder ListItem to the current directory.
+
+    ``plot`` populates the right-pane info via setInfo("video") so
+    folder rows can carry the same hover-info treatment as playable
+    rows. ``ctx_items`` attaches the same kind of state-aware
+    context menu that playable rows get -- both kwargs default to None
+    for backward compatibility with all the simple ``add_dir`` callers.
+    """
     import xbmcgui
     import xbmcplugin
 
@@ -42,6 +51,10 @@ def add_dir(handle: int, label: str, mode: str, image: str | None = None,
     li = xbmcgui.ListItem(label=label)
     if image:
         li.setArt({"thumb": image, "icon": image})
+    if plot:
+        li.setInfo("video", {"plot": plot, "title": label})
+    if ctx_items:
+        li.addContextMenuItems(ctx_items)
     xbmcplugin.addDirectoryItem(handle=handle, url=url, listitem=li, isFolder=True)
 
 

@@ -438,6 +438,70 @@ def test_affiliate_parser_other_non_public_states_NOT_live() -> None:
     }
 
 
+def test_affiliate_parser_records_status_field() -> None:
+    """v0.7.32: Model.status carries the lowercase current_show so
+    views can render non-public broadcasters with state prefixes
+    rather than silently dropping them."""
+    rooms = [
+        {"username": "alice", "current_show": "public", "num_users": 1,
+         "gender": "f", "image_url": "", "room_subject": ""},
+        {"username": "ms", "current_show": "hidden", "num_users": 1,
+         "gender": "f", "image_url": "", "room_subject": ""},
+        {"username": "afk", "current_show": "away", "num_users": 1,
+         "gender": "f", "image_url": "", "room_subject": ""},
+    ]
+    models = parse_affiliate_onlinerooms(rooms)
+    assert {m.slug: m.status for m in models} == {
+        "alice": "public",
+        "ms": "hidden",
+        "afk": "away",
+    }
+
+
+def test_room_list_parser_records_status_field() -> None:
+    """Same status round-trip in the room-list parser used by browse
+    views (Top / New / gender / Search). v0.7.35 dropped the wrong-
+    type ``label`` fallback so only ``current_show`` decides liveness;
+    asymmetry with the affiliate parser is gone."""
+    payload = json.dumps({
+        "rooms": [
+            {"username": "alice", "current_show": "public",
+             "num_users": 1, "gender": "f"},
+            {"username": "ms", "current_show": "hidden",
+             "num_users": 1, "gender": "f"},
+        ],
+        "total_count": 2, "all_rooms_count": 2,
+    })
+    page = parse_roomlist(payload)
+    statuses = {m.slug: (m.status, m.is_live) for m in page.models}
+    assert statuses == {
+        "alice": ("public", True),
+        "ms": ("hidden", False),
+    }
+
+
+def test_room_list_parser_drops_label_fallback_for_liveness() -> None:
+    """v0.7.35 audit-fix: ``label`` is a UI badge ("HD", "New", "Hot"),
+    NOT a state enum. Pre-fix, _model_from_room fell back to
+    ``label == "public"`` if current_show was missing -- which would
+    misclassify any future room whose label happened to read "public"
+    (and was asymmetric vs the affiliate parser). Now: missing
+    current_show -> not live, regardless of label."""
+    payload = json.dumps({
+        "rooms": [
+            {"username": "x", "label": "public", "num_users": 1,
+             "gender": "f"},
+        ],
+        "total_count": 1, "all_rooms_count": 1,
+    })
+    page = parse_roomlist(payload)
+    assert len(page.models) == 1
+    assert page.models[0].is_live is False, (
+        "label='public' must NOT promote a missing-current_show room "
+        "to is_live=True"
+    )
+
+
 def test_affiliate_parser_missing_current_show_NOT_live() -> None:
     """Defensive: if CB ever drops the current_show field on a room
     we'd rather treat it as not-playable than over-promote and trigger
