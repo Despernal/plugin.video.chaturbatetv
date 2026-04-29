@@ -265,6 +265,54 @@ def test_plot_for_omits_online_when_seconds_online_under_a_minute() -> None:
     assert "Online:" not in plot
 
 
+def test_plot_for_includes_online_when_only_start_timestamp_present() -> None:
+    """v0.7.17: the per-gender ``/api/ts/roomlist/`` endpoint (Top Cams,
+    Female, Male, Couple, Trans) returns start_timestamp (Unix epoch
+    of broadcast start) instead of seconds_online. plot_for must
+    derive duration from start_timestamp when seconds_online is
+    absent so all browse views show the Online line.
+    """
+    plot = plot_for(
+        {"username": "alice", "num_users": 100, "num_followers": 1000,
+         "start_timestamp": 1_000_000},
+        now=1_000_000 + 6697,
+    )
+    assert "Online:" in plot
+    assert "1h 51m" in plot
+
+
+def test_plot_for_prefers_seconds_online_over_start_timestamp() -> None:
+    """When both are present (defensive: we don't expect this in
+    practice but the affiliate endpoint might add start_timestamp
+    later), prefer seconds_online since it's already computed by the
+    server and avoids local-clock skew.
+    """
+    plot = plot_for(
+        {"username": "alice", "num_users": 100, "num_followers": 1000,
+         "seconds_online": 6697,           # 1h 51m
+         "start_timestamp": 1_000_000},    # would compute as 9999h
+        now=1_000_000 + 9_999 * 3600,
+    )
+    assert "1h 51m" in plot
+
+
+def test_plot_for_omits_online_when_neither_field_present() -> None:
+    """No seconds_online and no start_timestamp -> no Online line."""
+    plot = plot_for({"username": "alice", "num_users": 100, "num_followers": 1000})
+    assert "Online:" not in plot
+
+
+def test_plot_for_omits_online_when_start_timestamp_in_future() -> None:
+    """Defensive: start_timestamp ahead of now (clock skew, bad data)
+    should not produce a negative duration."""
+    plot = plot_for(
+        {"username": "alice", "num_users": 100, "num_followers": 1000,
+         "start_timestamp": 1_000_000 + 100},
+        now=1_000_000,
+    )
+    assert "Online:" not in plot
+
+
 def test_plot_for_renders_tags_in_green() -> None:
     plot = plot_for({"username": "alice", "tags": ["blonde", "teen"],
                      "num_users": 1, "num_followers": 0})

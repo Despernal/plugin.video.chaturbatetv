@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -227,18 +228,48 @@ def _format_seconds_online(seconds: int) -> str:
     return f"{d}d {h}h"
 
 
-def plot_for(room: dict[str, Any]) -> str:
+def _seconds_online_from_room(room: dict[str, Any], now: float | None = None) -> int:
+    """Pick the on-air duration from a room dict.
+
+    Two API shapes feed the addon: the affiliate-onlinerooms endpoint
+    (favs / TV mode bulk) returns ``seconds_online`` already computed
+    by the server; the per-gender ``/api/ts/roomlist/`` endpoint (Top,
+    Female, Male, Couple, Trans, Search) returns ``start_timestamp``
+    (Unix epoch of broadcast start) instead. This helper unifies them
+    so plot_for produces the same "Online:" line regardless of which
+    endpoint the room came from.
+
+    ``seconds_online`` wins when present (server-computed, no local
+    clock skew). Otherwise we derive from ``start_timestamp`` and
+    ``now``. Returns 0 on missing or future-dated start_timestamp so
+    plot_for can omit the line cleanly.
+    """
+    s = _to_int(room.get("seconds_online"), 0)
+    if s > 0:
+        return s
+    start_ts = _to_int(room.get("start_timestamp"), 0)
+    if start_ts <= 0:
+        return 0
+    current = int(now if now is not None else time.time())
+    delta = current - start_ts
+    return delta if delta > 0 else 0
+
+
+def plot_for(room: dict[str, Any], now: float | None = None) -> str:
     """Build a Kodi plot line for a list item from a room dict.
 
     Format mirrors the  layout (Subject / Age / Location /
     Watching / Followers / Online / Tags) but uses HALO cyan accents
     instead of 's deeppink, and HALO green for the tag line.
+
+    ``now`` is exposed for tests; production callers leave it at None
+    so the helper falls back to ``time.time()``.
     """
     age = room.get("display_age") or "Unknown"
     location = room.get("location") or ""
     viewers = _to_int(room.get("num_users"), 0)
     followers = _to_int(room.get("num_followers"), 0)
-    online_str = _format_seconds_online(_to_int(room.get("seconds_online"), 0))
+    online_str = _format_seconds_online(_seconds_online_from_room(room, now=now))
     subject = clean_subject(room.get("subject") or room.get("room_subject"))
     parts: list[str] = []
     if subject:
