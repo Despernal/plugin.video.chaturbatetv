@@ -359,6 +359,10 @@ def refresh_offline_meta(
 
     logger._log("refresh_offline_meta: kicking off background refresh")
 
+    # Close the directory request immediately so Kodi's busy spinner
+    # disappears -- the actual work happens on the daemon thread.
+    _close_directory_handle(handle)
+
     def _bg() -> None:
         # If another refresh (auto-poll, favs view fetch, or a previous
         # click) is already running, don't start a duplicate. Toast the
@@ -402,6 +406,81 @@ def refresh_offline_meta(
             logger._log("refresh_offline_meta: refresh returned False")
 
     spawn_func(_bg)
+
+
+def refresh_one_model(
+    handle: int,
+    *,
+    slug: str = "",
+    fetch_status_func: Any = None,
+    head_thumb_func: Any = None,
+    notify_func: Any = None,
+    **_params: Any,
+) -> None:
+    """Single-slug refresh wired to the per-row "Update model info"
+    context menu (v0.7.23).
+
+    One per-slug AJAX status + one thumb HEAD; persists to the
+    model_meta DB via upsert_status. Synchronous because one slug
+    is ~2 seconds total and the user clicked an explicit action;
+    no daemon thread needed. Closes the directory handle so the
+    busy spinner clears even though we ran inline.
+
+    Available on browse views, favs, TV-list rows -- the user can
+    refresh just one model's state without firing a 20-minute deep
+    crawl.
+    """
+    from resources.lib import logger
+
+    if notify_func is None:
+        notify_func = _notify
+    if fetch_status_func is None:
+        from resources.lib import cb_client as _cb_client
+        fetch_status_func = _cb_client.fetch_room_status_json
+    if head_thumb_func is None:
+        from resources.lib import cb_client as _cb_client
+        head_thumb_func = _cb_client.head_thumb
+
+    # Make sure Kodi's spinner clears either way.
+    _close_directory_handle(handle)
+
+    slug = (slug or "").strip()
+    if not slug:
+        logger._log("refresh_one_model: empty slug, skipping")
+        return
+
+    logger._log(f"refresh_one_model: starting for slug={slug!r}")
+    try:
+        data = fetch_status_func(slug)
+        room_status = (data.get("room_status") or "") or "offline"
+        thumb_code = head_thumb_func(slug)
+        thumb_ok = thumb_code == 200
+        # 404 thumb + non-gone status -> mark as gone (account removed).
+        if thumb_code == 404 and room_status not in ("banned", "deleted", "gone"):
+            room_status = "gone"
+        from resources.lib import model_meta_store as mms
+        import time as _time
+        conn = mms.open_db(str(_model_meta_db_path()))
+        try:
+            mms.upsert_status(
+                conn, slug,
+                room_status=room_status,
+                thumb_available=thumb_ok,
+                now=int(_time.time()),
+            )
+        finally:
+            conn.close()
+        notify_func(
+            "Chaturbate TV",
+            f"{slug}: {room_status}" + (" (no thumb)" if not thumb_ok else ""),
+        )
+        logger._log(
+            f"refresh_one_model: done slug={slug!r} status={room_status!r} "
+            f"thumb_code={thumb_code}"
+        )
+    except Exception as exc:
+        logger._log(f"refresh_one_model: FAIL slug={slug!r} err={exc!r}")
+        notify_func("Chaturbate TV", f"{slug}: refresh failed")
 
 
 def deep_refresh_offline_meta(
@@ -476,6 +555,12 @@ def deep_refresh_offline_meta(
         f"deep_refresh_offline_meta: {len(worklist)} offline favs to crawl "
         f"(rate={rate_limit_seconds}s, ETA ~{eta_min}min)"
     )
+
+    # Close the directory request immediately so Kodi's busy spinner
+    # disappears -- the actual crawl runs on the daemon thread for
+    # ~20 minutes and we don't want the user staring at a dialog
+    # the whole time.
+    _close_directory_handle(handle)
 
     def _bg() -> None:
         # Honour the same lock as the bulk refresh -- we don't want
@@ -1131,5 +1216,25 @@ def _refresh_container() -> None:
     try:
         import xbmc
         xbmc.executebuiltin("Container.Refresh")
+    except Exception:
+        return
+
+
+def _close_directory_handle(handle: int) -> None:
+    """Tell Kodi we're done with this plugin invocation so the busy
+    spinner stops.
+
+    Plugin URLs that do an action-and-return (rather than populate a
+    directory) still need to call ``endOfDirectory`` -- otherwise
+    Kodi waits for the directory contents that never arrive and
+    keeps the busy dialog visible until it times out (~30s).
+
+    succeeded=False keeps the user on the parent menu rather than
+    trying to navigate into an empty directory we just declared.
+    """
+    try:
+        import xbmcplugin
+        if handle is not None and handle >= 0:
+            xbmcplugin.endOfDirectory(handle, succeeded=False)
     except Exception:
         return

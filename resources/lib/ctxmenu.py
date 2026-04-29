@@ -82,4 +82,12 @@ def build_ctxmenu(
              _runplugin("fav_add", slug=slug, name=name, url=url)),
         )
 
+    # v0.7.23: per-row "Update model info" entry. Always present so
+    # the user can refresh any single model from any view (browse,
+    # favs, TV list) without firing the 20-minute deep crawl.
+    items.append(
+        ("Update model info",
+         _runplugin("refresh_one_model", slug=slug)),
+    )
+
     return items

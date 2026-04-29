@@ -39,15 +39,22 @@ def kodi_mocks(monkeypatch: pytest.MonkeyPatch) -> dict[str, MagicMock]:
     fake_xbmcgui.Dialog = _Dialog
     fake_xbmcgui.NOTIFICATION_INFO = "info"
     fake_xbmc.executebuiltin = MagicMock()
+    # v0.7.23: addon_actions._close_directory_handle calls
+    # xbmcplugin.endOfDirectory to clear Kodi's busy spinner. Tests
+    # need to observe the call so they can pin the spinner-fix
+    # behavior.
+    fake_xbmcplugin = MagicMock()
 
     monkeypatch.setitem(sys.modules, "xbmc", fake_xbmc)
     monkeypatch.setitem(sys.modules, "xbmcgui", fake_xbmcgui)
+    monkeypatch.setitem(sys.modules, "xbmcplugin", fake_xbmcplugin)
 
     sys.modules.pop("resources.lib.addon_actions", None)
 
     return {
         "xbmc": fake_xbmc,
         "xbmcgui": fake_xbmcgui,
+        "xbmcplugin": fake_xbmcplugin,
         "notifications": notifications,  # type: ignore[dict-item]
     }
 
@@ -805,6 +812,126 @@ def test_deep_refresh_offline_meta_iterates_offline_favs(
                for m in msgs), f"missing start toast: {msgs!r}"
     assert any("done" in m.lower() or "complete" in m.lower()
                for m in msgs), f"missing done toast: {msgs!r}"
+
+
+def test_refresh_offline_meta_closes_directory_handle(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """v0.7.23 spinner fix: the menu entry is a directory click;
+    Kodi waits for endOfDirectory before clearing the busy spinner.
+    The handler must close the directory immediately after spawning
+    the bg worker so the user doesn't stare at a spinner during a
+    long async refresh.
+    """
+    actions = _import()
+    spawn_calls: list[Any] = []
+
+    actions.refresh_offline_meta(
+        handle=42,
+        refresh_func=lambda: True,
+        notify_func=lambda h, m: None,
+        spawn_func=lambda t: spawn_calls.append(t),
+    )
+    end_calls = kodi_mocks["xbmcplugin"].endOfDirectory.call_args_list
+    assert any(c.args and c.args[0] == 42 for c in end_calls), (
+        "endOfDirectory(42, ...) was not called; busy spinner won't clear"
+    )
+
+
+def test_deep_refresh_offline_meta_closes_directory_handle(
+    kodi_mocks: dict[str, MagicMock],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same fix for the deep-refresh menu entry. The crawl runs for
+    ~20 minutes -- absolutely cannot leave a spinner up that whole
+    time."""
+    actions = _import()
+    db_path = str(tmp_path / "x.db")
+    monkeypatch.setattr(actions, "_model_meta_db_path",
+                        lambda: Path(db_path))
+    actions.deep_refresh_offline_meta(
+        handle=42,
+        fav_slugs=["a"],
+        online_slugs=frozenset(),
+        fetch_status_func=lambda s, **kw: {"room_status": "offline"},
+        head_thumb_func=lambda s: 200,
+        notify_func=lambda h, m: None,
+        spawn_func=lambda t: None,  # don't run -- we just want the close
+        sleep_func=lambda s: None,
+    )
+    end_calls = kodi_mocks["xbmcplugin"].endOfDirectory.call_args_list
+    assert any(c.args and c.args[0] == 42 for c in end_calls)
+
+
+def test_refresh_one_model_writes_status_to_db(
+    kodi_mocks: dict[str, MagicMock],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v0.7.23: single-slug refresh wired to the per-row context
+    menu. Hits per-slug AJAX status + thumb HEAD, upserts via
+    model_meta_store.upsert_status. Synchronous (one slug = ~2s,
+    no need for daemon thread).
+    """
+    actions = _import()
+    db_path = str(tmp_path / "meta.db")
+    monkeypatch.setattr(actions, "_model_meta_db_path",
+                        lambda: Path(db_path))
+
+    notifies: list[tuple[str, str]] = []
+    statuses: list[str] = []
+    thumbs: list[str] = []
+
+    def fake_status(slug: str, fetch_func: Any = None) -> dict[str, Any]:
+        statuses.append(slug)
+        return {"success": True, "room_status": "offline", "url": "",
+                "hidden_message": "", "cmaf_edge": False}
+
+    def fake_head(slug: str) -> int:
+        thumbs.append(slug)
+        return 200
+
+    actions.refresh_one_model(
+        handle=42, slug="alice",
+        fetch_status_func=fake_status,
+        head_thumb_func=fake_head,
+        notify_func=lambda h, m: notifies.append((h, m)),
+    )
+
+    assert statuses == ["alice"]
+    assert thumbs == ["alice"]
+
+    import resources.lib.model_meta_store as mms_real
+    conn = mms_real.open_db(db_path)
+    try:
+        row = mms_real.get_model(conn, "alice")
+    finally:
+        conn.close()
+    assert row is not None
+    assert row["last_room_status"] == "offline"
+    assert row["thumb_available"] == 1
+
+    msgs = [n[1] for n in notifies]
+    assert any("alice" in m.lower() for m in msgs), (
+        f"expected toast mentioning slug, got {msgs!r}"
+    )
+
+
+def test_refresh_one_model_skips_with_empty_slug(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """No slug provided (e.g., menu invoked from a non-model row) =
+    silent no-op."""
+    actions = _import()
+    statuses: list[str] = []
+    actions.refresh_one_model(
+        handle=42, slug="",
+        fetch_status_func=lambda s, **kw: statuses.append(s) or {},
+        head_thumb_func=lambda s: 200,
+        notify_func=lambda h, m: None,
+    )
+    assert statuses == []
 
 
 def test_deep_refresh_offline_meta_skips_when_locked(

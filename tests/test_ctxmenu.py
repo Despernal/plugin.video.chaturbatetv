@@ -121,6 +121,38 @@ def test_ctxmenu_in_both_tv_and_favs() -> None:
 # --------------------------------------------------------------------------- #
 
 
+def test_ctxmenu_includes_update_model_info() -> None:
+    """v0.7.23: every model row's context menu offers a single-slug
+    refresh that re-pulls AJAX status + thumb HEAD and upserts into
+    the model_meta DB. Available everywhere we render a model so the
+    user can refresh one specific model from any view (browse, favs,
+    TV list) without firing the 20-minute deep crawl."""
+    items = build_ctxmenu(_model("alice"), tv_entries=[], favs=[])
+    labels = [label for label, _ in items]
+    assert any("Update model info" in lbl for lbl in labels), (
+        f"ctxmenu missing 'Update model info' entry: {labels!r}"
+    )
+    cmd = next(c for lbl, c in items if "Update model info" in lbl)
+    assert "mode=refresh_one_model" in cmd
+    assert "slug=alice" in cmd
+
+
+def test_ctxmenu_update_model_info_present_for_in_tv_in_favs() -> None:
+    """The Update entry appears regardless of TV/favs membership state.
+    Single-source-of-truth model refresh, always available."""
+    fav = Favorite(slug="alice", name="alice",
+                   url="https://chaturbate.com/alice/", gender=Gender.UNKNOWN)
+    tv = TVEntry(name="alice", url="https://chaturbate.com/alice/", priority=10)
+
+    for tv_e, favs_e in [([], []), ([tv], []), ([], [fav]), ([tv], [fav])]:
+        items = build_ctxmenu(_model("alice"), tv_entries=tv_e, favs=favs_e)
+        labels = [lbl for lbl, _ in items]
+        assert any("Update model info" in lbl for lbl in labels), (
+            f"missing Update entry with tv={bool(tv_e)} favs={bool(favs_e)}: "
+            f"{labels!r}"
+        )
+
+
 def test_ctxmenu_returns_list_of_tuples() -> None:
     items = build_ctxmenu(_model("alice"), tv_entries=[], favs=[])
     for entry in items:
