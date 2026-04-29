@@ -165,23 +165,26 @@ def playvid(handle: int, slug: str = "", name: str = "",
         # canonical playlist-advance builtin.
         if _tv_mode_active():
             _tv_bulk_mark_offline(slug)
+            # v0.7.15 update: setResolvedUrl(True, silent_stub) instead of
+            # the (False, _empty_listitem) pattern from v0.7.14. Kodi's
+            # behavior on (False, ...) was to mark the item as failed-to-
+            # resolve, and when the playlist had nothing else to fall back
+            # on (solo-slug tier scenario), Kodi fired the "one or more
+            # items failed to play" dialog AND blocked the addon thread
+            # behind that modal until dismissed -- in one observed case the
+            # tv_loop went silent for 2h 43m waiting on the dialog. v0.7.14
+            # changed (False) timing only, not the dialog itself.
+            #
+            # The silent stub is a 1-second silent .mp4 bundled at
+            # resources/media/silent.mp4. Kodi plays it, hits natural end,
+            # fires onPlayBackEnded -> tv_loop iterates. No dialog ever
+            # appears. PlayerControl(Next) is no longer needed because the
+            # natural end-of-stub advances the playlist on its own.
             logger._log(
                 f"playvid: TV active + offline -> "
-                f"PlayerControl(Next) for slug={slug!r}"
+                f"silent stub setResolvedUrl(True) for slug={slug!r}"
             )
-            try:
-                import xbmc
-                xbmc.executebuiltin("PlayerControl(Next)")
-            except Exception:  # noqa: S110 - best-effort: no Kodi outside addon
-                pass
-            # MUST resolve to Kodi before returning, even with succeeded=False.
-            # Without this, Kodi waits 30s for the resolve that never comes,
-            # then shows "one or more items failed to play" with a sad-face
-            # dialog. The user sees this stack up as the loop iterates a
-            # solo-slug tier whose only model went offline. The intentional
-            # exit dialog still lives in tv_loop._classify_after_stop and
-            # is unaffected.
-            xbmcplugin.setResolvedUrl(handle, False, _empty_listitem())
+            xbmcplugin.setResolvedUrl(handle, True, _silent_stub_listitem())
             return
         xbmcplugin.setResolvedUrl(handle, False, _empty_listitem())
         _notify("Chaturbate TV", f"{slug} is offline or unreachable")
@@ -216,6 +219,47 @@ def _empty_listitem() -> Any:
     try:
         import xbmcgui
         return xbmcgui.ListItem()
+    except ImportError:  # pragma: no cover - outside Kodi
+        return None
+
+
+def _silent_stub_path() -> str:
+    """Resolve the on-disk path to the bundled 1-second silent stub.
+
+    Used by the TV-active-offline branch in playvid: instead of telling
+    Kodi the resolve failed (which fires the "one or more items failed
+    to play" dialog and blocks the addon thread until dismissed), we
+    return a successful resolve pointing at a tiny silent .mp4. Kodi
+    plays it for ~1s, the player ends naturally, the TV loop's stop
+    event fires, and the loop iterates without any user-visible dialog.
+
+    The file lives at ``resources/media/silent.mp4`` inside the addon.
+    Built once at package time (ffmpeg lavfi color + anullsrc, AAC, 2784
+    bytes), so this is just a path-resolve at runtime.
+    """
+    try:
+        import xbmcaddon
+        addon = xbmcaddon.Addon()
+        return str(Path(addon.getAddonInfo("path")) / "resources" / "media" / "silent.mp4")
+    except Exception:  # pragma: no cover - outside Kodi
+        # Fallback path used by tests; never resolves in production.
+        return str(Path(__file__).parent.parent.parent / "resources" / "media" / "silent.mp4")
+
+
+def _silent_stub_listitem() -> Any:
+    """ListItem pointing at the silent stub for setResolvedUrl(True, ...).
+
+    Kodi requires a real, playable URL on a successful resolve. If the
+    stub file is missing for any reason (broken install, missing
+    asset), fall back to an empty ListItem and let Kodi handle the
+    resolve-failure path (worst case = the old dialog comes back, which
+    is at least informative, not silently broken).
+    """
+    try:
+        import xbmcgui
+        path = _silent_stub_path()
+        li = xbmcgui.ListItem(path=path)
+        return li
     except ImportError:  # pragma: no cover - outside Kodi
         return None
 

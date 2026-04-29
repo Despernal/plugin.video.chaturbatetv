@@ -56,6 +56,23 @@ def _safe_log(msg: str) -> None:
         return
 
 
+def _current_dialog_id() -> int:
+    """Return the id of the topmost Kodi modal dialog, or 0 if none.
+
+    Used by the diagnostic logs around `xbmc.Player().play()` and the
+    inner monitor loop heartbeat. Window id 10100 is the "playback
+    failed" dialog historically; anything non-zero means a modal is
+    obstructing user input and may be holding the addon thread on
+    Player API calls. Best-effort: if xbmcgui isn't importable (test
+    context) we just report 0.
+    """
+    try:
+        import xbmcgui
+        return int(xbmcgui.getCurrentWindowDialogId())
+    except Exception:
+        return 0
+
+
 # --------------------------------------------------------------------------- #
 # _TVPlayer
 # --------------------------------------------------------------------------- #
@@ -593,30 +610,61 @@ def tv_play(
                     f"tv_loop.tv_play: built tier P{target_priority} "
                     f"slugs={[m.name for m in tier]}"
                 )
+                # v0.7.15 diagnostic: log around the call to
+                # xbmc.Player().play() because we observed the addon
+                # thread freeze for 2h 43m on 2026-04-28 around this
+                # site (modal "playback failed" dialog blocking the
+                # main thread). If this fires but the next "play()
+                # returned" log doesn't, we know the dialog modal is
+                # holding things up and we know within seconds.
+                _safe_log(
+                    f"tv_loop.tv_play: iter={iter_count} "
+                    f"calling xbmc.Player().play(playlist) "
+                    f"items={len(queued)}"
+                )
                 xbmc.Player().play(playlist)
+                _safe_log(
+                    f"tv_loop.tv_play: iter={iter_count} "
+                    f"xbmc.Player().play() returned, "
+                    f"dialog_id={_current_dialog_id()}"
+                )
 
                 # Wait up to 30s for playback to start.
                 started = False
-                for _ in range(30):
+                wait_start = time.time()
+                for tick in range(30):
                     if not _should_continue():
                         final_reason = "aborted"
                         return final_reason
                     if player.isPlaying():
                         started = True
+                        _safe_log(
+                            f"tv_loop.tv_play: iter={iter_count} "
+                            f"isPlaying=True after {tick+1}s"
+                        )
                         break
                     if monitor.waitForAbort(1):
                         final_reason = "aborted"
                         return final_reason
                 if not started:
-                    _safe_log("tv_loop.tv_play: never started, skip")
+                    _safe_log(
+                        f"tv_loop.tv_play: iter={iter_count} "
+                        f"never started after {time.time()-wait_start:.1f}s, "
+                        f"dialog_id={_current_dialog_id()}, skip"
+                    )
                     if monitor.waitForAbort(2):
                         final_reason = "aborted"
                         return final_reason
                     continue
 
                 # Inner monitor loop.
+                _safe_log(
+                    f"tv_loop.tv_play: iter={iter_count} "
+                    f"entering inner monitor loop poll_seconds={poll_seconds}"
+                )
                 elapsed = 0
                 step = 5
+                ticks_since_log = 0
                 self_promoted = False
                 while player.isPlaying():
                     if not _should_continue():
@@ -638,6 +686,18 @@ def tv_play(
                         final_reason = "aborted"
                         return final_reason
                     elapsed += step
+                    ticks_since_log += 1
+                    # Heartbeat every 60s of inner-loop time so a
+                    # silenced log = something is wedged. We need
+                    # enough breadcrumbs to spot a gap.
+                    if ticks_since_log >= 12:  # 12 * 5s = 60s
+                        ticks_since_log = 0
+                        _safe_log(
+                            f"tv_loop.tv_play: iter={iter_count} "
+                            f"inner-loop heartbeat elapsed={elapsed}s "
+                            f"playing={player.isPlaying()} "
+                            f"dialog_id={_current_dialog_id()}"
+                        )
                     if elapsed >= poll_seconds:
                         elapsed = 0
                         promoted = tv_select.pick_target(
@@ -660,6 +720,15 @@ def tv_play(
                                 pass
                             self_promoted = True
                             break
+
+                _safe_log(
+                    f"tv_loop.tv_play: iter={iter_count} "
+                    f"exited inner monitor loop "
+                    f"user_stopped={player.user_stopped} "
+                    f"switched={player.switched} "
+                    f"self_promoted={self_promoted} "
+                    f"dialog_id={_current_dialog_id()}"
+                )
 
                 if self_promoted:
                     continue

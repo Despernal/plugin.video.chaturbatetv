@@ -236,20 +236,30 @@ def test_playvid_calls_setResolvedUrl_with_failure_when_offline(
     assert succeeded is False
 
 
-def test_playvid_offline_during_tv_mode_fires_action_next(
+def test_playvid_offline_during_tv_mode_serves_silent_stub(
     kodi_mocks: dict[str, MagicMock],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Lesson v6.1 + v0.7.14 dialog-spam fix: when TV mode is active and
-    a slot in the playlist resolves offline, ``playvid`` must (1) fire
-    ``PlayerControl(Next)`` so the player advances, AND (2) call
-    ``setResolvedUrl(handle, False, ...)`` so Kodi doesn't sit waiting
-    30s for a resolve that never comes and then show "one or more items
-    failed to play" with a sad-face dialog. Earlier code returned
-    without resolving, which caused that dialog to spam every iteration
-    when the loop kept rebuilding a solo-slug tier whose model went
-    offline. The intentional Yes/No exit dialog lives in
-    tv_loop._classify_after_stop and is unaffected.
+    """v0.7.15 silent-stub fix.
+
+    History:
+    - v6.1: when TV is active and the played slug resolves offline,
+      we used to fire ``Action(Next)`` and return without calling
+      setResolvedUrl. Kodi waited 30s, then displayed "one or more
+      items failed to play" with a sad-face dialog.
+    - v0.7.14: added ``setResolvedUrl(handle, False, _empty_listitem())``
+      before the return to short-circuit the 30s wait. Faster failure,
+      same dialog -- (False, ...) still triggers the dialog when the
+      playlist has nothing else to fall back on (solo-slug tier).
+    - v0.7.15: switch to ``setResolvedUrl(handle, True, silent_stub)``
+      pointing at a bundled 1-second silent .mp4. Kodi plays it, hits
+      natural end, fires onPlayBackEnded, the TV loop iterates -- no
+      dialog ever appears. PlayerControl(Next) is no longer needed
+      because the natural end-of-stub advances the playlist on its
+      own.
+
+    The intentional Yes/No exit dialog lives in
+    ``tv_loop._classify_after_stop`` and is unaffected.
     """
     state: dict[str, str] = {"chaturbatetv_active": "1"}
 
@@ -264,27 +274,57 @@ def test_playvid_offline_during_tv_mode_fires_action_next(
             state[k] = v
 
     kodi_mocks["xbmcgui"].Window = _Win
+    # ListItem stub that captures the path passed in so we can assert
+    # it points at the silent stub asset.
+    captured_paths: list[str] = []
+
+    class _ListItem:
+        def __init__(self, label: str = "", path: str = "") -> None:
+            self._path = path
+            captured_paths.append(path)
+
+        def getPath(self) -> str:
+            return self._path
+
+    kodi_mocks["xbmcgui"].ListItem = _ListItem
 
     cap = _patch_resolver_and_xbmcplugin(monkeypatch, success=False)
     actions = _import()
 
     actions.playvid(handle=42, slug="ghost", name="ghost")
 
-    # PlayerControl(Next) was fired - player advances to next TV slot.
-    builtins_called = [c.args[0] for c in
-                       kodi_mocks["xbmc"].executebuiltin.call_args_list]
-    assert "PlayerControl(Next)" in builtins_called
-    # AND setResolvedUrl was called with succeeded=False so Kodi tears
-    # the resolve down cleanly instead of waiting 30s and showing the
-    # "one or more items failed to play" dialog.
+    # setResolvedUrl was called exactly once with succeeded=True so Kodi
+    # plays the silent stub and naturally advances rather than firing
+    # the "one or more items failed to play" dialog.
     assert len(cap["resolved"]) == 1, (
         f"playvid must call setResolvedUrl exactly once "
-        f"(got {len(cap['resolved'])} calls; missing call lets Kodi "
-        f"hang and show the failure dialog)"
+        f"(got {len(cap['resolved'])} calls)"
     )
     handle, succeeded, _li = cap["resolved"][0]
     assert handle == 42
-    assert succeeded is False
+    assert succeeded is True, (
+        "v0.7.15: must resolve TRUE (silent stub) so Kodi never shows "
+        "the failure dialog. (False) triggers the dialog AND blocks the "
+        "addon thread behind the modal until dismissed."
+    )
+    # The listitem must point at the bundled silent stub.
+    stub_path_used = next(
+        (p for p in captured_paths if p.endswith("silent.mp4")), ""
+    )
+    assert stub_path_used.endswith(
+        "resources/media/silent.mp4"
+    ), (
+        f"silent stub listitem must carry the resources/media/silent.mp4 "
+        f"path; got captured paths {captured_paths!r}"
+    )
+    # PlayerControl(Next) is no longer fired -- silent stub's natural
+    # end advances the playlist on its own.
+    builtins_called = [c.args[0] for c in
+                       kodi_mocks["xbmc"].executebuiltin.call_args_list]
+    assert "PlayerControl(Next)" not in builtins_called, (
+        "v0.7.15: PlayerControl(Next) is no longer needed; the silent "
+        "stub's natural end-of-playback advances the playlist."
+    )
 
 
 def test_playvid_offline_without_tv_mode_still_fails_cleanly(
@@ -633,11 +673,16 @@ def test_playvid_offline_invalidates_bulk_live_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Lesson 32: when playvid resolves offline AND TV mode is active,
-    drop that slug from the cached live set BEFORE firing
-    PlayerControl(Next). Without this, the loop's next pick_target
-    re-picks the same offline slug for the rest of the poll cycle
-    (~9.5 min default), each iter offline-skipping again, infinite
-    tight loop on a dead model.
+    drop that slug from the cached live set so the loop's next
+    pick_target doesn't re-pick the same offline slug for the rest of
+    the poll cycle (~9.5 min default), each iter offline-skipping again,
+    infinite tight loop on a dead model.
+
+    v0.7.15: cache invalidation still happens; PlayerControl(Next) is
+    no longer fired (the silent stub's natural end advances the
+    playlist on its own). The cache invalidation is what this test
+    pins; advance behavior is covered by
+    test_playvid_offline_during_tv_mode_serves_silent_stub.
     """
     state: dict[str, str] = {"chaturbatetv_active": "1"}
 
@@ -679,10 +724,12 @@ def test_playvid_offline_invalidates_bulk_live_cache(
     # alice + bob untouched.
     assert "alice" in actions_real._TV_BULK_CACHE["slugs"]
     assert "bob" in actions_real._TV_BULK_CACHE["slugs"]
-    # And PlayerControl(Next) was fired.
+    # v0.7.15: PlayerControl(Next) is no longer fired -- silent stub
+    # natural end advances the playlist on its own. Pinning here so
+    # nobody re-adds it without thinking through the dialog tradeoff.
     builtins_called = [c.args[0] for c in
                        kodi_mocks["xbmc"].executebuiltin.call_args_list]
-    assert "PlayerControl(Next)" in builtins_called
+    assert "PlayerControl(Next)" not in builtins_called
 
 
 def test_make_bulk_is_live_func_uses_affiliate_endpoint(
