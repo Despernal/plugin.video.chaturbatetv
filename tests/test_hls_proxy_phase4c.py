@@ -375,6 +375,10 @@ def test_force_player_stop_invokes_player_control_stop_builtin(
     monkeypatch.setitem(sys.modules, "xbmc", fake_xbmc)
 
     from resources.lib import hls_proxy
+    # v0.7.43: reset _active_proxy module global so the zombie-proxy
+    # guard in _force_player_stop sees "no active" -> fires normally.
+    # Other tests in this run may leave it set.
+    monkeypatch.setattr(hls_proxy, "_active_proxy", None)
     state = hls_proxy._State(stream_url="https://x", headers={})
     state.last_force_stop = 0.0
 
@@ -405,6 +409,7 @@ def test_force_player_stop_rate_limited_within_throttle_window(
     monkeypatch.setitem(sys.modules, "xbmc", fake_xbmc)
 
     from resources.lib import hls_proxy
+    monkeypatch.setattr(hls_proxy, "_active_proxy", None)
     state = hls_proxy._State(stream_url="https://x", headers={})
     state.last_force_stop = 0.0
 
@@ -435,6 +440,7 @@ def test_force_player_stop_fires_again_after_throttle_window_elapses(
     monkeypatch.setitem(sys.modules, "xbmc", fake_xbmc)
 
     from resources.lib import hls_proxy
+    monkeypatch.setattr(hls_proxy, "_active_proxy", None)
     state = hls_proxy._State(stream_url="https://x", headers={})
     state.last_force_stop = 0.0
 
@@ -450,6 +456,153 @@ def test_force_player_stop_fires_again_after_throttle_window_elapses(
     assert len(builtin_calls) == 2, (
         f"second call after throttle window should fire; "
         f"got {len(builtin_calls)} firings"
+    )
+
+
+def test_force_player_stop_skips_when_proxy_no_longer_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v0.7.43 regression: an abandoned proxy (replaced by a newer one
+    via playvid takeover) must NOT fire PlayerControl(Stop) when its
+    own reconnect-give-up path runs. Pre-fix repro from : TV mode
+    played model_e, user picked model_b from TV List, takeover released
+    TV mode and model_b started -- but model_e's old proxy was still
+    grinding through its 5-attempt 403-reconnect chain. When that
+    exhausted, it fired PlayerControl(Stop), killing model_b's playback.
+
+    Fix: ``_force_player_stop`` checks ``_active_proxy._state is state``.
+    A zombie proxy whose state isn't the global-active one bails before
+    firing the builtin.
+    """
+    import sys
+    from unittest.mock import MagicMock
+
+    fake_xbmc = MagicMock()
+    monkeypatch.setitem(sys.modules, "xbmc", fake_xbmc)
+
+    from resources.lib import hls_proxy
+    zombie_state = hls_proxy._State(stream_url="https://model_e", headers={})
+    zombie_state.last_force_stop = 0.0
+    active_state = hls_proxy._State(stream_url="https://model_b", headers={})
+
+    # Build a minimal handle that ``_active_proxy`` can hold and whose
+    # ``_state`` attribute exposes the active state.
+    fake_active_handle = MagicMock()
+    fake_active_handle._state = active_state
+    monkeypatch.setattr(hls_proxy, "_active_proxy", fake_active_handle)
+
+    hls_proxy._force_player_stop(zombie_state)
+
+    builtin_calls = [
+        c.args[0] for c in fake_xbmc.executebuiltin.call_args_list
+        if c.args and c.args[0] == "PlayerControl(Stop)"
+    ]
+    assert builtin_calls == [], (
+        "zombie proxy must NOT fire PlayerControl(Stop) on the new "
+        f"player; fired {builtin_calls!r}"
+    )
+
+
+def test_force_player_stop_fires_when_proxy_is_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sibling test: when the proxy IS the currently-active one, the
+    v0.7.43 guard must NOT block legitimate stop firings. Same setup
+    as the zombie test except ``_active_proxy._state is state``.
+    """
+    import sys
+    from unittest.mock import MagicMock
+
+    fake_xbmc = MagicMock()
+    monkeypatch.setitem(sys.modules, "xbmc", fake_xbmc)
+
+    from resources.lib import hls_proxy
+    state = hls_proxy._State(stream_url="https://model_e", headers={})
+    state.last_force_stop = 0.0
+    fake_active_handle = MagicMock()
+    fake_active_handle._state = state  # this proxy IS active
+    monkeypatch.setattr(hls_proxy, "_active_proxy", fake_active_handle)
+
+    hls_proxy._force_player_stop(state)
+
+    builtin_calls = [
+        c.args[0] for c in fake_xbmc.executebuiltin.call_args_list
+        if c.args and c.args[0] == "PlayerControl(Stop)"
+    ]
+    assert builtin_calls == ["PlayerControl(Stop)"], (
+        "active proxy must still fire stop; "
+        f"got {builtin_calls!r}"
+    )
+
+
+def test_force_player_stop_fires_when_no_active_proxy_tracked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Edge case: ``_active_proxy`` is None (between teardown and new
+    start, or fresh-process). The guard should NOT block in this case
+    -- "no tracked active" is treated as "this caller's state is fine".
+    Pre-fix this case existed only at module-import time; preserving
+    it keeps the existing _force_player_stop tests green.
+    """
+    import sys
+    from unittest.mock import MagicMock
+
+    fake_xbmc = MagicMock()
+    monkeypatch.setitem(sys.modules, "xbmc", fake_xbmc)
+
+    from resources.lib import hls_proxy
+    state = hls_proxy._State(stream_url="https://x", headers={})
+    state.last_force_stop = 0.0
+    monkeypatch.setattr(hls_proxy, "_active_proxy", None)
+
+    hls_proxy._force_player_stop(state)
+
+    builtin_calls = [
+        c.args[0] for c in fake_xbmc.executebuiltin.call_args_list
+        if c.args and c.args[0] == "PlayerControl(Stop)"
+    ]
+    assert builtin_calls == ["PlayerControl(Stop)"], (
+        f"no-active-proxy edge case should still fire; got {builtin_calls!r}"
+    )
+
+
+def test_stop_active_proxy_marks_stopping_synchronously(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v0.7.43: ``_stop_active_proxy`` must set ``prev._state.stopping``
+    True synchronously, BEFORE spawning the daemon cleanup thread.
+    Otherwise an in-flight reconnect thread on the old proxy may pass
+    its ``not state.stopping`` check and fire stop in the gap between
+    "_active_proxy cleared" and "daemon called .stop()".
+
+    Test: stub the daemon-thread spawn to a no-op so the test stays
+    deterministic, then assert state.stopping flipped True before
+    _stop_active_proxy returned.
+    """
+    from unittest.mock import MagicMock
+    from resources.lib import hls_proxy
+
+    state = hls_proxy._State(stream_url="https://x", headers={})
+    assert state.stopping is False  # baseline
+
+    fake_handle = MagicMock()
+    fake_handle._state = state
+    fake_handle.port = 12345
+    fake_handle.stop = MagicMock()
+    monkeypatch.setattr(hls_proxy, "_active_proxy", fake_handle)
+
+    # Stub Thread so we don't actually spawn or join a real thread; we
+    # just need to assert the synchronous flag flip happens before the
+    # spawn would have run.
+    import threading
+    fake_thread_cls = MagicMock(return_value=MagicMock(start=lambda: None))
+    monkeypatch.setattr(threading, "Thread", fake_thread_cls)
+
+    hls_proxy._stop_active_proxy()
+
+    assert state.stopping is True, (
+        "stopping flag must flip synchronously so in-flight reconnect "
+        "threads see it on their next tick"
     )
 
 

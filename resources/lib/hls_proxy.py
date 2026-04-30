@@ -748,11 +748,27 @@ def _force_player_stop(state: _State) -> None:
     only fires if at least ``_FORCE_STOP_THROTTLE_S`` has elapsed since
     the previous call.
 
+    v0.7.43 zombie-proxy guard: bail if this proxy's state is no longer
+    the active one. Pre-fix repro: TV mode plays model_e, user picks
+    model_b from the TV List, takeover detection releases TV mode and
+    model_b starts playing -- but model_e's old proxy was still running
+    its 5-attempt reconnect retry chain. When that exhausted, it fired
+    PlayerControl(Stop), killing model_b's playback. The state-comparison
+    check below ensures only the currently-active proxy can fire stop.
+
     Drawback (Lesson 30): ``xbmc.executebuiltin`` from a non-Kodi thread
     isn't documented as thread-safe. Works on every Kodi we've tested
     but isn't guaranteed - if a future Kodi tightens that, this becomes
     flaky.
     """
+    with _active_proxy_lock:
+        active = _active_proxy
+    if active is not None and active._state is not state:
+        _log(
+            "force_player_stop: skipped, this proxy has been supplanted "
+            "(zombie reconnect-give-up trying to stop the new player)"
+        )
+        return
     nowt = time.time()
     with state.lock:
         if nowt - state.last_force_stop < _FORCE_STOP_THROTTLE_S:
@@ -1080,9 +1096,17 @@ def _stop_active_proxy() -> None:
         _active_proxy = None
     if prev is None:
         return
+    # v0.7.43: flip stopping=True SYNCHRONOUSLY so any in-flight
+    # reconnect thread bails on its next ``not state.stopping`` check
+    # without waiting for the daemon-cleanup thread to call .stop()
+    # (which can lag several seconds when server.shutdown() drains
+    # in-flight handlers). The reconnect-give-up race -- model_e's
+    # zombie proxy firing PlayerControl(Stop) on model_b's player --
+    # opened during exactly this gap.
+    prev._state.stopping = True
     _log(
         f"start_proxy: spawning ASYNC cleanup of previous proxy "
-        f"port={prev.port}"
+        f"port={prev.port} (stopping=True set synchronously)"
     )
 
     def _bg_cleanup() -> None:
