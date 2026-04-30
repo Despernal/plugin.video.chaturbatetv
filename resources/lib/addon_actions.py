@@ -64,48 +64,60 @@ def _notify(heading: str, msg: str) -> None:
 def fav_add(handle: int, slug: str = "", name: str = "",
             url: str = "", gender: str = "unknown",
             store_path: Path | None = None, **_params: Any) -> None:
-    """Add a model to local favorites. Idempotent: existing slug -> no-op."""
-    from resources.lib import logger
+    """Add a model to local favorites. Idempotent: existing slug -> no-op.
+
+    v0.7.37 (race audit pass 1, agent 3 HIGH #1): wraps load+save in
+    a cross-process flock. Pre-fix, two ``fav_add`` invocations from
+    sibling Kodi processes (e.g., user double-tap) both loaded the
+    file, both appended, both wrote -- second write wholesale-clobbered
+    the first, silently losing the earlier append.
+    """
+    from resources.lib import file_lock, logger
     logger._log(f"fav_add: enter slug={slug!r} name={name!r} gender={gender!r}")
     if not slug:
         logger._log("fav_add: missing slug, abort")
         _notify("Chaturbate TV", "Add to favorites: missing slug")
         return
     path = store_path if store_path is not None else _favs_path()
-    favs = favs_store.load(path)
     fav = Favorite(
         name=name or slug,
         slug=slug,
         url=url or f"https://chaturbate.com/{slug}/",
         gender=Gender.from_str(gender),
     )
-    new_favs = favs_store.add(favs, fav)
-    if len(new_favs) == len(favs):
-        logger._log(f"fav_add: {slug!r} already exists, no-op")
-        _notify("Chaturbate TV", f"{slug} is already in favorites")
-        return
-    favs_store.save(path, new_favs)
+    with file_lock.locked(path):
+        favs = favs_store.load(path)
+        new_favs = favs_store.add(favs, fav)
+        if len(new_favs) == len(favs):
+            logger._log(f"fav_add: {slug!r} already exists, no-op")
+            _notify("Chaturbate TV", f"{slug} is already in favorites")
+            return
+        favs_store.save(path, new_favs)
     logger._log(f"fav_add: added {slug!r} ({len(favs)} -> {len(new_favs)})")
     _notify("Chaturbate TV", f"Added {slug} to favorites")
 
 
 def fav_remove(handle: int, slug: str = "",
                store_path: Path | None = None, **_params: Any) -> None:
-    """Remove a slug from local favorites."""
-    from resources.lib import logger
+    """Remove a slug from local favorites.
+
+    v0.7.37: same flock-protected RMW as fav_add.
+    """
+    from resources.lib import file_lock, logger
     logger._log(f"fav_remove: enter slug={slug!r}")
     if not slug:
         logger._log("fav_remove: missing slug, abort")
         _notify("Chaturbate TV", "Remove from favorites: missing slug")
         return
     path = store_path if store_path is not None else _favs_path()
-    favs = favs_store.load(path)
-    new_favs = favs_store.remove(favs, slug)
-    if len(new_favs) == len(favs):
-        logger._log(f"fav_remove: {slug!r} not in list, no-op")
-        _notify("Chaturbate TV", f"{slug} was not in favorites")
-        return
-    favs_store.save(path, new_favs)
+    with file_lock.locked(path):
+        favs = favs_store.load(path)
+        new_favs = favs_store.remove(favs, slug)
+        if len(new_favs) == len(favs):
+            logger._log(f"fav_remove: {slug!r} not in list, no-op")
+            _notify("Chaturbate TV", f"{slug} was not in favorites")
+            return
+        favs_store.save(path, new_favs)
     logger._log(f"fav_remove: removed {slug!r} ({len(favs)} -> {len(new_favs)})")
     _notify("Chaturbate TV", f"Removed {slug} from favorites")
 
@@ -899,22 +911,24 @@ def deep_refresh_offline_meta(
     _close_directory_handle(handle)
 
     def _bg() -> None:
-        # Honour the same lock as the bulk refresh -- we don't want
-        # the auto-poll firing while we're per-slug crawling, and we
-        # don't want a duplicate manual click queueing another crawl.
-        if _BULK_REFRESH_LOCK.locked():
+        # v0.7.37: dedicated lock for the long-running deep crawl so
+        # we don't starve the TV loop's bulk-cache TTL auto-refresh
+        # (which only needs _BULK_REFRESH_LOCK for ~3s). Concurrent
+        # bulk-poll + deep-crawl is fine: different CB endpoints,
+        # different DB column sets, always-overwrite columns converge.
+        if _DEEP_REFRESH_LOCK.locked():
             notify_func(
                 "Chaturbate TV",
-                "A refresh is already in progress",
+                "Deep refresh already in progress",
             )
-            logger._log("deep_refresh_offline_meta: skipped (lock held)")
+            logger._log("deep_refresh_offline_meta: skipped (deep lock held)")
             return
-        if not _BULK_REFRESH_LOCK.acquire(blocking=False):
+        if not _DEEP_REFRESH_LOCK.acquire(blocking=False):
             notify_func(
                 "Chaturbate TV",
-                "A refresh is already in progress",
+                "Deep refresh already in progress",
             )
-            logger._log("deep_refresh_offline_meta: skipped (lock raced)")
+            logger._log("deep_refresh_offline_meta: skipped (deep lock raced)")
             return
         notify_func(
             "Chaturbate TV",
@@ -1011,7 +1025,7 @@ def deep_refresh_offline_meta(
                 f"deep_refresh_offline_meta: done counts={counts!r}"
             )
         finally:
-            _BULK_REFRESH_LOCK.release()
+            _DEEP_REFRESH_LOCK.release()
 
     spawn_func(_bg)
 
@@ -1189,6 +1203,51 @@ _OFFLINE_SESSION_SLUGS: set[str] = set()
 # instead of misleadingly toasting "failed".
 _BULK_REFRESH_LOCK = threading.Lock()
 
+# v0.7.37 (race audit pass 1, agent 1 HIGH #1 + #2): guards
+# ``_TV_BULK_CACHE['slugs']`` and ``_OFFLINE_SESSION_SLUGS`` against
+# cross-thread mutation. Pre-fix:
+#
+# (1) ``_OFFLINE_SESSION_SLUGS`` (a plain ``set``) was added-to from
+#     the TV-loop thread on silent-stub mark-offline AND read-iterated
+#     by ``_tv_bulk_refresh`` in the same process. Python sets aren't
+#     thread-safe across add+iter; under load this raised
+#     ``RuntimeError: Set changed size during iteration`` or silently
+#     dropped the just-marked slug from the subtraction.
+#
+# (2) ``_TV_BULK_CACHE['slugs']`` did read-modify-write in
+#     ``_tv_bulk_mark_offline`` without a lock; concurrent
+#     ``_tv_bulk_refresh`` could clobber the eviction (the v0.7.33
+#     wedge through a side door).
+#
+# This is a fast-acquire lock -- holders only do a frozenset rebuild
+# (microseconds). Distinct from _BULK_REFRESH_LOCK (which serializes
+# the affiliate FETCH) and _DEEP_REFRESH_LOCK (the long crawl).
+_TV_CACHE_LOCK = threading.Lock()
+
+
+def _tv_cache_snapshot() -> frozenset[str]:
+    """Atomic snapshot of the current bulk-live slug set. Use this in
+    pick_target / is_live_func walks so within-walk drift can't make
+    one slot see a slug live and the next slot see it offline.
+    """
+    with _TV_CACHE_LOCK:
+        slugs = _TV_BULK_CACHE.get("slugs") or frozenset()
+    if isinstance(slugs, frozenset):
+        return slugs
+    return frozenset(slugs)
+
+
+# v0.7.37 (race audit pass 1, agent 1 MEDIUM #6): separate lock for
+# the long-running deep refresh (~20 min). Pre-fix, deep_refresh held
+# _BULK_REFRESH_LOCK for the entire crawl, which made the TV loop's
+# TTL auto-refresh fall through to per-slug AJAX (60+ requests per
+# pick walk) for the duration. Risked a CB ban from layered request
+# rates. Now deep_refresh has its own lock, _BULK_REFRESH_LOCK stays
+# short-lived for actual bulk-cache work, and the two can co-exist
+# (they hit different CB endpoints and the model_meta DB writes are
+# always-overwrite-friendly so concurrent writes converge correctly).
+_DEEP_REFRESH_LOCK = threading.Lock()
+
 # Affiliate watermarks ('s rotating array; same set favs_views uses).
 _TV_BULK_WATERMARKS = (
     "C9m5N", "tfZSl", "jQrKO", "5XO2a", "WXomN",
@@ -1260,10 +1319,16 @@ def _tv_bulk_refresh() -> bool:
         # cache refresh doesn't re-add a known-unplayable slug. The
         # affiliate feed flips so often we'd otherwise chase the same
         # bad slug every TTL window for the rest of the session.
-        new_slugs = public_slugs - _OFFLINE_SESSION_SLUGS
+        # v0.7.37: snapshot the offline-session set under the cache
+        # lock so a concurrent _tv_bulk_mark_offline can't add to it
+        # mid-iteration (Python sets aren't thread-safe across
+        # add+iter; RuntimeError or silent drop possible).
+        with _TV_CACHE_LOCK:
+            offline_snapshot = frozenset(_OFFLINE_SESSION_SLUGS)
+            new_slugs = public_slugs - offline_snapshot
+            _TV_BULK_CACHE["slugs"] = new_slugs
+            _TV_BULK_CACHE["ts"] = _time.time()
         session_blocked = len(public_slugs) - len(new_slugs)
-        _TV_BULK_CACHE["slugs"] = new_slugs
-        _TV_BULK_CACHE["ts"] = _time.time()
         logger._log(
             f"addon_actions._tv_bulk_refresh: refreshed slugs={len(new_slugs)} "
             f"(filtered {skipped} non-public from {len(models)} broadcasting; "
@@ -1305,21 +1370,27 @@ def _tv_bulk_mark_offline(slug: str) -> None:
     the tv_loop silent-stub branch (when the playvid resolver fell
     through to the silent stub). The session blocklist stops the next
     bulk-cache refresh from re-adding a slug we just discovered to be
-    un-playable. Without it, ``_tv_bulk_refresh`` wholesale-overwrites
-    the cache every TTL window and a broadcasting-but-unwatchable
-    model (audit agent 2 HIGH #2) would silently re-promote.
+    un-playable.
+
+    v0.7.37: both mutations now happen under ``_TV_CACHE_LOCK``. A
+    concurrent ``_tv_bulk_refresh`` reassigning ``_TV_BULK_CACHE['slugs']``
+    can no longer race the eviction (RMW is now a critical section);
+    the ``_OFFLINE_SESSION_SLUGS`` set add can no longer race a
+    refresh's iteration-difference.
 
     Idempotent for cache eviction; always records to the session set.
     """
     from resources.lib import logger
-    _OFFLINE_SESSION_SLUGS.add(slug)
-    current = _TV_BULK_CACHE["slugs"]
-    if slug not in current:
-        return
-    _TV_BULK_CACHE["slugs"] = frozenset(s for s in current if s != slug)
+    with _TV_CACHE_LOCK:
+        _OFFLINE_SESSION_SLUGS.add(slug)
+        current = _TV_BULK_CACHE["slugs"]
+        if slug not in current:
+            return
+        new_slugs = frozenset(s for s in current if s != slug)
+        _TV_BULK_CACHE["slugs"] = new_slugs
     logger._log(
         f"addon_actions._tv_bulk_mark_offline: {slug!r} removed from cache "
-        f"({len(current)} -> {len(_TV_BULK_CACHE['slugs'])})"
+        f"({len(current)} -> {len(new_slugs)})"
     )
 
 
@@ -1340,16 +1411,26 @@ def _make_bulk_is_live_func(poll_minutes: int) -> Any:
 
     def is_live(url: str) -> bool:
         nowt = _time.time()
-        if (not _TV_BULK_CACHE["slugs"]
-                or nowt - _TV_BULK_CACHE["ts"] > ttl_seconds):
+        # v0.7.37: snapshot under the cache lock so ttl/refresh
+        # decisions and the membership check both see the same
+        # cache version. Without the snapshot, _tv_bulk_refresh
+        # mid-walk could swap _TV_BULK_CACHE['slugs'] between
+        # successive is_live calls in pick_target -- the same slug
+        # would be live then offline within a single tier walk.
+        with _TV_CACHE_LOCK:
+            cur_slugs = _TV_BULK_CACHE["slugs"]
+            cur_ts = _TV_BULK_CACHE["ts"]
+        if (not cur_slugs or nowt - cur_ts > ttl_seconds):
             ok = _tv_bulk_refresh()
-            if not ok and not _TV_BULK_CACHE["slugs"]:
+            with _TV_CACHE_LOCK:
+                cur_slugs = _TV_BULK_CACHE["slugs"]
+            if not ok and not cur_slugs:
                 # Bulk failed AND we have no cached set (cold-start +
-                # affiliate-endpoint outage). Fall back to per-slug AJAX
-                # for THIS query so TV mode can pick a target. Don't
-                # cache the per-slug answer; next call retries bulk
-                # first so we recover automatically when the affiliate
-                # endpoint comes back.
+                # affiliate-endpoint outage). Fall back to per-slug
+                # AJAX for THIS query so TV mode can pick a target.
+                # Don't cache the per-slug answer; next call retries
+                # bulk first so we recover automatically when the
+                # affiliate endpoint comes back.
                 slug = _slug_from_url(url)
                 logger._log(
                     f"addon_actions._tv_bulk_is_live: cold + bulk FAIL, "
@@ -1364,7 +1445,7 @@ def _make_bulk_is_live_func(poll_minutes: int) -> Any:
                     )
                     return False
         slug = _slug_from_url(url)
-        return slug in _TV_BULK_CACHE["slugs"]
+        return slug in cur_slugs
 
     return is_live
 
@@ -1381,7 +1462,8 @@ def tv_stop(handle: int, **_params: Any) -> None:
     fresh bulk-cache reading at next start.
     """
     from resources.lib import logger, tv_state
-    _OFFLINE_SESSION_SLUGS.clear()
+    with _TV_CACHE_LOCK:
+        _OFFLINE_SESSION_SLUGS.clear()
     try:
         import xbmcgui
         win = xbmcgui.Window(10000)
@@ -1507,12 +1589,16 @@ def tv_add(handle: int, slug: str = "", name: str = "",
     ``confirm_func`` is a DI seam so tests can supply a fake
     yes/no without xbmcgui.
     """
-    from resources.lib import logger
+    from resources.lib import file_lock, logger
     if not slug:
         _notify("Chaturbate TV", "Add to TV: missing slug")
         return
     path = store_path if store_path is not None else _tv_path()
     target_url = url or f"https://chaturbate.com/{slug}/"
+    # First load is unlocked: we just need to short-circuit on
+    # "already in list" without prompting the user. The actual mutation
+    # re-loads under the lock so a sibling process's add doesn't get
+    # clobbered (race-audit pass 1, agent 3 HIGH #2).
     entries = tv_store.load(path)
     if any(e.url == target_url for e in entries):
         logger._log(f"addon_actions.tv_add: {slug!r} already in list")
@@ -1533,8 +1619,19 @@ def tv_add(handle: int, slug: str = "", name: str = "",
     p = _resolve_priority(priority, name or slug)
     if p is None:
         return
-    entries.append(TVEntry(name=name or slug, url=target_url, priority=p))
-    tv_store.save(path, entries)
+    with file_lock.locked(path):
+        # Re-load under the lock so a concurrent sibling add hasn't
+        # already added this slug (we'd double-add otherwise).
+        entries = tv_store.load(path)
+        if any(e.url == target_url for e in entries):
+            logger._log(
+                f"addon_actions.tv_add: {slug!r} added concurrently; "
+                f"no-op"
+            )
+            _notify("Chaturbate TV", f"{slug} was just added")
+            return
+        entries.append(TVEntry(name=name or slug, url=target_url, priority=p))
+        tv_store.save(path, entries)
     logger._log(f"addon_actions.tv_add: added {slug!r} P{p}")
     _notify("Chaturbate TV", f"Added {slug} (priority {p})")
 
@@ -1558,20 +1655,21 @@ def _confirm_add_to_tv(name: str) -> bool:
 def tv_remove(handle: int, slug: str = "", url: str = "",
               store_path: Path | None = None,
               **_params: Any) -> None:
-    """Remove a model from the TV list."""
-    from resources.lib import logger
+    """Remove a model from the TV list. v0.7.37: flock-protected RMW."""
+    from resources.lib import file_lock, logger
     if not slug and not url:
         _notify("Chaturbate TV", "Remove from TV: missing slug/url")
         return
     target_url = url or f"https://chaturbate.com/{slug}/"
     path = store_path if store_path is not None else _tv_path()
-    entries = tv_store.load(path)
-    new_entries = [e for e in entries if e.url != target_url]
-    if len(new_entries) == len(entries):
-        logger._log(f"addon_actions.tv_remove: {slug!r} not in list")
-        _notify("Chaturbate TV", f"{slug or 'entry'} was not in TV list")
-        return
-    tv_store.save(path, new_entries)
+    with file_lock.locked(path):
+        entries = tv_store.load(path)
+        new_entries = [e for e in entries if e.url != target_url]
+        if len(new_entries) == len(entries):
+            logger._log(f"addon_actions.tv_remove: {slug!r} not in list")
+            _notify("Chaturbate TV", f"{slug or 'entry'} was not in TV list")
+            return
+        tv_store.save(path, new_entries)
     logger._log(
         f"addon_actions.tv_remove: removed {slug!r} ({len(entries)} -> {len(new_entries)})"
     )
@@ -1584,14 +1682,16 @@ def tv_edit(handle: int, slug: str = "", url: str = "",
             store_path: Path | None = None,
             **_params: Any) -> None:
     """Edit a TV entry's priority. Prompts numeric if priority param
-    is empty.
+    is empty. v0.7.37: flock-protected RMW.
     """
-    from resources.lib import logger
+    from resources.lib import file_lock, logger
     if not slug and not url:
         _notify("Chaturbate TV", "Edit TV: missing slug/url")
         return
     target_url = url or f"https://chaturbate.com/{slug}/"
     path = store_path if store_path is not None else _tv_path()
+    # Unlocked load is fine for the prompt phase: we just need to find
+    # the current priority for the numpad default. Mutation is locked.
     entries = tv_store.load(path)
     cur = next((e for e in entries if e.url == target_url), None)
     if cur is None:
@@ -1601,11 +1701,17 @@ def tv_edit(handle: int, slug: str = "", url: str = "",
     new_p = _resolve_priority(priority, cur.name, default=cur.priority)
     if new_p is None:
         return
-    new_entries = [
-        TVEntry(name=e.name, url=e.url, priority=new_p) if e.url == target_url else e
-        for e in entries
-    ]
-    tv_store.save(path, new_entries)
+    with file_lock.locked(path):
+        # Re-load under the lock to merge with any sibling-process
+        # mutations that happened during the (possibly long) priority
+        # numpad prompt.
+        entries = tv_store.load(path)
+        new_entries = [
+            TVEntry(name=e.name, url=e.url, priority=new_p)
+            if e.url == target_url else e
+            for e in entries
+        ]
+        tv_store.save(path, new_entries)
     logger._log(
         f"addon_actions.tv_edit: {slug!r} P{cur.priority} -> P{new_p}"
     )

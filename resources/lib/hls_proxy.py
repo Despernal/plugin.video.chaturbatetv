@@ -182,6 +182,17 @@ class _State:
     # from inside the handler so Kodi forcibly stops the player. Rate-
     # limited via this timestamp so we don't flood Kodi's event queue.
     last_force_stop: float = 0.0
+    # v0.7.37 (race audit pass 1, agent 2 HIGH #2 + #3): monotonic
+    # counter incremented under state.lock by _refresh_session every
+    # time the JWT / url_map / cache set is rotated. Handler threads
+    # that fetch a chunklist or segment outside the lock can capture
+    # this value before the fetch and compare it after; a mismatch
+    # means a refresh swapped state mid-fetch and the harvested data
+    # references the OLD CDN -- skip persisting it. Without this, a
+    # stale fetch would poison the freshly-cleared seg_cdn_urls /
+    # latest_seg with old-CDN URLs, cascading 502s on subsequent
+    # segment requests.
+    refresh_gen: int = 0
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -508,7 +519,12 @@ def _refresh_session(state: _State, host: str = "", port: int = 0) -> bool:
         state.chunklist_cache.clear()
         state.seg_cdn_urls.clear()
         state.latest_seg.clear()
-    _log(f"refresh_session: OK new_keys={list(new_map.keys())} caches_cleared")
+        # v0.7.37: bump the generation counter so any handler thread
+        # that captured a snapshot before this refresh can detect the
+        # rotation and skip persisting stale harvest data.
+        state.refresh_gen += 1
+    _log(f"refresh_session: OK new_keys={list(new_map.keys())} caches_cleared "
+         f"refresh_gen={state.refresh_gen}")
     return True
 
 
@@ -634,6 +650,40 @@ _ENDLIST_BODY = (
 _FORCE_STOP_THROTTLE_S = 1.0
 
 
+@dataclass(frozen=True)
+class _StateSnapshot:
+    """Atomic view of the proxy state's flags + refresh generation.
+
+    Captured under state.lock in a single critical section so handler
+    threads can branch on a coherent view rather than racing against
+    a refresh that may flip terminal / clear caches / rotate url_map
+    halfway through a request.
+    """
+
+    terminal: bool
+    stopping: bool
+    reconnecting: bool
+    refresh_gen: int
+
+
+def _snapshot(state: _State) -> _StateSnapshot:
+    """One-acquire snapshot of the volatile state flags. v0.7.37
+    (race audit pass 1, agent 2 HIGH #1) collapses the lockless
+    ``if state.terminal`` / ``if state.stopping or state.terminal``
+    compound checks into a single coherent read. Without this, a
+    concurrent _run_reconnect.finally block flipping terminal mid-
+    handler-check could split the request between the false branch
+    and the true branch (cosmetic at worst, but also rare extra-tick
+    delay before terminal-flag fast path engages)."""
+    with state.lock:
+        return _StateSnapshot(
+            terminal=state.terminal,
+            stopping=state.stopping,
+            reconnecting=state.reconnecting,
+            refresh_gen=state.refresh_gen,
+        )
+
+
 def _force_player_stop(state: _State) -> None:
     """Fire ``xbmc.executebuiltin('PlayerControl(Stop)')`` to tear down
     the player. Module-level so both the handler thread (when ISA
@@ -744,8 +794,13 @@ def _make_handler(host: str, port: int, state: _State,
             if not name:
                 self.send_error(400)
                 return
+            # v0.7.37: capture the refresh generation alongside the
+            # url_map read so we can detect a refresh-during-fetch
+            # below. Single-acquire keeps the read and gen-check
+            # coherent.
             with state.lock:
                 cdn_url = state.url_map.get(name, "")
+                gen_before = state.refresh_gen
             if not cdn_url:
                 _log(f"handler: chunklist name={name!r} not in url_map")
                 # No mapping known. Serve cache if available; else
@@ -799,17 +854,36 @@ def _make_handler(host: str, port: int, state: _State,
             body = raw.decode("utf-8", "replace")
             cbase = cdn_url.rsplit("/", 1)[0] + "/"
             absolutized = rewrite_master(body, cbase)
-            _harvest_segment_maps(absolutized, name, state)
             rewritten = _rewrite_chunklist_for_isa(absolutized, host, port)
             payload = rewritten.encode("utf-8")
+            # v0.7.37: re-check refresh_gen under the lock alongside
+            # the cache write. If a refresh swapped the url_map and
+            # cleared seg_cdn_urls / latest_seg between our read and
+            # now, the segment URLs in this chunklist body reference
+            # the OLD CDN -- harvesting them would re-poison the
+            # freshly-cleared maps. Skip the harvest AND skip the
+            # cache write so ISA refetches with the new JWT.
             with state.lock:
+                if state.refresh_gen != gen_before:
+                    _log(
+                        f"handler: chunklist refresh-during-fetch "
+                        f"detected name={name!r} "
+                        f"gen={gen_before}->{state.refresh_gen}; "
+                        f"skipping harvest + cache write"
+                    )
+                    self._send_body(payload, "application/vnd.apple.mpegurl")
+                    return
                 state.chunklist_cache[name] = payload
+            _harvest_segment_maps(absolutized, name, state)
             # Per-chunklist OK is too chatty during steady-state playback
             # (1-2 lines/sec from disk I/O). Errors / reconnects still log.
             self._send_body(payload, "application/vnd.apple.mpegurl")
 
         def _serve_segment(self) -> None:
-            if state.terminal:
+            # v0.7.37: snapshot under one lock acquire so terminal /
+            # stopping read coherently with the upcoming tier lookups.
+            snap = _snapshot(state)
+            if snap.terminal:
                 _log("handler: segment terminal-flag fast path -> 410")
                 self.send_error(410)
                 return
@@ -833,6 +907,24 @@ def _make_handler(host: str, port: int, state: _State,
                     f"url={_redact_url(seg_url)!r} err={exc!r}"
                 )
                 trigger_fn(f"segment fail name={seg_name}")
+            # v0.7.37: race audit pass 1, agent 2 HIGH #3 -- the
+            # tier-2/3 lookups race _refresh_session's
+            # latest_seg.clear() / seg_cdn_urls.clear(). If a refresh
+            # ran between snap and now, the maps were just cleared
+            # and tier-2/3 will both miss. ISA's auto-retry will hit
+            # the new url_map -- return 502 with a clear log so we
+            # know the 502 is from the refresh race, not a real
+            # tier-2/3 exhaustion.
+            cur_snap = _snapshot(state)
+            if cur_snap.refresh_gen != snap.refresh_gen:
+                _log(
+                    f"handler: segment refresh-during-fallback "
+                    f"name={seg_name!r} "
+                    f"gen={snap.refresh_gen}->{cur_snap.refresh_gen}; "
+                    f"502 -> let ISA retry against fresh url_map"
+                )
+                self.send_error(502)
+                return
             # Tier 2: try the current CDN URL for the same segment name.
             with state.lock:
                 fallback = state.seg_cdn_urls.get(seg_name)

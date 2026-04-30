@@ -130,6 +130,144 @@ def _chunklist_body(seg_url: str = "seg_1_video.m4s") -> bytes:
 # --------------------------------------------------------------------------- #
 
 
+def test_refresh_session_increments_refresh_gen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v0.7.37 (race audit pass 1, agent 2 HIGH #2 + #3): the
+    refresh_gen counter is the linchpin of detecting a refresh
+    rotation that happened while a handler was mid-fetch. This test
+    pins the bump invariant: every successful refresh_session call
+    increments the counter under the lock."""
+    from resources.lib import hls_proxy
+    state = hls_proxy._State(
+        stream_url="https://x/master.m3u8",
+        headers={"User-Agent": "test"},
+    )
+    initial = state.refresh_gen
+
+    # Stub _fetch (the lower-level fetcher refresh_session uses) to
+    # return a minimal valid master manifest so the refresh path
+    # completes without a real network call.
+    def fake_fetch(*_a: Any, **_kw: Any) -> tuple[bytes, str]:
+        return (
+            b"#EXTM3U\n"
+            b"#EXT-X-STREAM-INF:BANDWIDTH=1000\n"
+            b"https://cdn/x/chunklist.m3u8\n"
+        ), "application/vnd.apple.mpegurl"
+
+    monkeypatch.setattr(hls_proxy, "_fetch", fake_fetch)
+
+    ok = hls_proxy._refresh_session(state)
+    assert ok is True
+    assert state.refresh_gen == initial + 1, (
+        f"refresh_session must bump refresh_gen; "
+        f"got {state.refresh_gen} (was {initial})"
+    )
+
+
+def test_snapshot_returns_atomic_view_of_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v0.7.37: _snapshot collapses the lockless ``if state.terminal``
+    + ``if state.stopping`` compound checks into a single coherent
+    view. The returned tuple is frozen so even if the caller hangs
+    onto it, subsequent state mutations don't change what they're
+    branching on."""
+    from resources.lib import hls_proxy
+    state = hls_proxy._State(stream_url="https://x", headers={})
+
+    snap1 = hls_proxy._snapshot(state)
+    assert snap1.terminal is False
+    assert snap1.stopping is False
+    assert snap1.refresh_gen == 0
+
+    # Mutate state after the snapshot.
+    state.terminal = True
+    state.refresh_gen = 99
+
+    # snap1 stays unchanged (frozen dataclass).
+    assert snap1.terminal is False
+    assert snap1.refresh_gen == 0
+
+    # New snapshot reflects the mutation.
+    snap2 = hls_proxy._snapshot(state)
+    assert snap2.terminal is True
+    assert snap2.refresh_gen == 99
+
+
+def test_chunklist_skips_harvest_when_refresh_during_fetch(
+    stub_cdn: tuple[str, _StubState],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v0.7.37 (race audit pass 1, agent 2 HIGH #2): if refresh_gen
+    advanced between the url_map read and the chunklist payload's
+    cache write, the segment URLs in the chunklist body reference the
+    OLD CDN. Without the gen-check, _harvest_segment_maps would
+    repopulate the freshly-cleared seg_cdn_urls / latest_seg with
+    those stale URLs (poisoning future tier-2 lookups). The fix
+    skips the harvest AND the cache write when the refresh_gen
+    rotation is detected."""
+    from resources.lib import hls_proxy
+
+    cdn_base, state = stub_cdn
+    state.set_response("/hls/abc/master.m3u8", _master_body())
+    state.set_response(
+        "/hls/abc/chunklist_w12345_video.m3u8",
+        _chunklist_body(),
+    )
+
+    handle = hls_proxy.start_proxy(
+        stream_url=f"{cdn_base}/hls/abc/master.m3u8",
+        room_url="https://chaturbate.com/alice/",
+    )
+    try:
+        # Bump refresh_gen while a chunklist fetch is "in flight" by
+        # patching _fetch to bump the gen as a side effect of the
+        # fetch returning. Simulates the race deterministically.
+        original_fetch = hls_proxy._fetch
+
+        def fetch_with_concurrent_refresh(
+            url: str, headers: dict[str, str], **kw: Any,
+        ) -> tuple[bytes, str]:
+            result = original_fetch(url, headers, **kw)
+            if "chunklist_w12345_video" in url:
+                with handle._state.lock:
+                    handle._state.refresh_gen += 1
+            return result
+
+        monkeypatch.setattr(hls_proxy, "_fetch", fetch_with_concurrent_refresh)
+
+        # Get master so we have a chunklist URL to hit.
+        with urlopen(handle.master_url, timeout=5) as resp:
+            master = resp.read().decode("utf-8")
+        cl_url = next(
+            line for line in master.splitlines()
+            if line and not line.startswith("#")
+        )
+
+        # Pre-populate seg_cdn_urls so we can detect whether the
+        # poisoning happened. The chunklist body has "seg_1_video.m4s"
+        # which would normally land in seg_cdn_urls under that key.
+        with handle._state.lock:
+            handle._state.seg_cdn_urls.clear()
+
+        # Hit the chunklist; the patched _fetch bumps refresh_gen mid-
+        # request so the post-fetch gen check should detect the race.
+        with urlopen(cl_url, timeout=5) as resp:
+            resp.read()
+
+        # Verify: seg_cdn_urls was NOT poisoned with stale segment
+        # URLs because the harvest was skipped.
+        with handle._state.lock:
+            harvested = dict(handle._state.seg_cdn_urls)
+        assert harvested == {}, (
+            f"refresh-during-fetch must skip _harvest_segment_maps; "
+            f"got {harvested!r}"
+        )
+    finally:
+        handle.stop()
+
+
 def test_force_player_stop_invokes_player_control_stop_builtin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -84,6 +84,86 @@ def test_fav_add_writes_to_store(tmp_path: Path,
     assert favs[0].gender is Gender.FEMALE
 
 
+def test_fav_add_concurrent_processes_dont_lose_writes(
+    tmp_path: Path,
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """v0.7.37 (race audit pass 1, agent 3 HIGH #1): two sibling Kodi
+    processes invoking fav_add on different slugs in rapid succession
+    used to silent-clobber each other -- the second writer's
+    os.replace wholesale-overwrote the first's append. Now both
+    mutations run inside a fcntl.flock critical section so the load+
+    save sequence is atomic across processes.
+
+    The test simulates the cross-process race by spawning two threads
+    (in real production these would be two processes; threads share
+    the flock semantics on the same file for testing purposes).
+    """
+    import threading
+    actions = _import()
+    favs_path = tmp_path / "favs.json"
+
+    def add_alice() -> None:
+        actions.fav_add(handle=42, slug="alice", name="alice",
+                        url="https://chaturbate.com/alice/",
+                        gender="female", store_path=favs_path)
+
+    def add_bob() -> None:
+        actions.fav_add(handle=42, slug="bob", name="bob",
+                        url="https://chaturbate.com/bob/",
+                        gender="male", store_path=favs_path)
+
+    t_a = threading.Thread(target=add_alice)
+    t_b = threading.Thread(target=add_bob)
+    t_a.start()
+    t_b.start()
+    t_a.join(timeout=3.0)
+    t_b.join(timeout=3.0)
+
+    favs = favs_store.load(favs_path)
+    slugs = {f.slug for f in favs}
+    assert slugs == {"alice", "bob"}, (
+        f"both concurrent fav_add calls must land; got {slugs!r}"
+    )
+
+
+def test_tv_add_concurrent_processes_dont_lose_writes(
+    tmp_path: Path,
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """v0.7.37 (race audit pass 1, agent 3 HIGH #2): same flock
+    protection for tv.json. Two sibling tv_add invocations don't
+    clobber each other anymore."""
+    import threading
+    from resources.lib import tv_store as tv_store_mod
+    actions = _import()
+    tv_path = tmp_path / "tv.json"
+
+    def add_a() -> None:
+        actions.tv_add(handle=42, slug="alice", name="alice",
+                       url="https://chaturbate.com/alice/",
+                       priority="10", store_path=tv_path)
+
+    def add_b() -> None:
+        actions.tv_add(handle=42, slug="bob", name="bob",
+                       url="https://chaturbate.com/bob/",
+                       priority="15", store_path=tv_path)
+
+    t_a = threading.Thread(target=add_a)
+    t_b = threading.Thread(target=add_b)
+    t_a.start()
+    t_b.start()
+    t_a.join(timeout=3.0)
+    t_b.join(timeout=3.0)
+
+    entries = tv_store_mod.load(tv_path)
+    urls = {e.url for e in entries}
+    assert urls == {
+        "https://chaturbate.com/alice/",
+        "https://chaturbate.com/bob/",
+    }, f"both concurrent tv_add calls must land; got {urls!r}"
+
+
 def test_fav_add_idempotent(tmp_path: Path,
                             kodi_mocks: dict[str, MagicMock]) -> None:
     actions = _import()
@@ -1715,7 +1795,10 @@ def test_deep_refresh_offline_meta_skips_when_locked(
     notifies: list[tuple[str, str]] = []
     fetches: list[str] = []
 
-    actions._BULK_REFRESH_LOCK.acquire()
+    # v0.7.37: deep refresh now has its own _DEEP_REFRESH_LOCK so it
+    # can run concurrently with bulk-refresh ops. The "already in
+    # progress" guard fires when the deep lock specifically is held.
+    actions._DEEP_REFRESH_LOCK.acquire()
     try:
         actions.deep_refresh_offline_meta(
             handle=42,
@@ -1728,11 +1811,141 @@ def test_deep_refresh_offline_meta_skips_when_locked(
             sleep_func=lambda s: None,
         )
     finally:
-        actions._BULK_REFRESH_LOCK.release()
+        actions._DEEP_REFRESH_LOCK.release()
 
     assert fetches == [], "must not fetch when lock is held"
     msgs = [n[1] for n in notifies]
     assert any("already" in m.lower() or "in progress" in m.lower() for m in msgs)
+
+
+def test_deep_refresh_runs_concurrently_with_bulk_refresh_lock(
+    kodi_mocks: dict[str, MagicMock],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v0.7.37 (race audit pass 1, agent 1 MEDIUM #6): deep refresh
+    no longer holds _BULK_REFRESH_LOCK -- it has its own
+    _DEEP_REFRESH_LOCK. The TV loop's bulk-cache TTL refresh can keep
+    working during the ~20-min crawl instead of falling through to
+    per-slug AJAX (which would stack request rates and risk a CB ban).
+
+    This test pins: holding _BULK_REFRESH_LOCK does NOT block the
+    deep refresh from starting.
+    """
+    actions = _import()
+    db_path = str(tmp_path / "x.db")
+    monkeypatch.setattr(actions, "_model_meta_db_path",
+                        lambda: Path(db_path))
+
+    notifies: list[tuple[str, str]] = []
+    bios_fetched: list[str] = []
+
+    def fake_bio(slug: str) -> dict[str, Any]:
+        bios_fetched.append(slug)
+        return {"room_status": "offline", "real_name": slug}
+
+    actions._BULK_REFRESH_LOCK.acquire()
+    try:
+        actions.deep_refresh_offline_meta(
+            handle=42,
+            fav_slugs=["a"],
+            online_slugs=frozenset(),
+            fetch_biocontext_func=fake_bio,
+            fetch_status_func=lambda s, **kw: {},
+            head_thumb_func=lambda s: 200,
+            notify_func=lambda h, m: notifies.append((h, m)),
+            spawn_func=lambda t: t(),
+            sleep_func=lambda s: None,
+        )
+    finally:
+        actions._BULK_REFRESH_LOCK.release()
+
+    # _BULK_REFRESH_LOCK was held but deep refresh STILL ran.
+    assert bios_fetched == ["a"], (
+        f"deep refresh should NOT block on _BULK_REFRESH_LOCK; "
+        f"got bios_fetched={bios_fetched!r}"
+    )
+
+
+def test_tv_bulk_mark_offline_under_concurrent_refresh_doesnt_lose_eviction(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """v0.7.37 (race audit pass 1, agent 1 HIGH #2): the
+    read-modify-write in _tv_bulk_mark_offline used to race
+    _tv_bulk_refresh's wholesale assignment. Now both mutations are
+    serialized through _TV_CACHE_LOCK, so the eviction either lands
+    before the refresh's snapshot (and thus _OFFLINE_SESSION_SLUGS
+    excludes the slug from the new set) or after (and thus the new
+    set still has the slug, but we then evict it). Either way, the
+    slug ends up evicted -- never both.
+
+    This is a contract test: assert _tv_bulk_mark_offline always
+    leaves the slug evicted from _TV_BULK_CACHE['slugs'] AFTER the
+    call returns, regardless of any concurrent refresh state.
+    """
+    import threading
+    actions = _import()
+    actions._TV_BULK_CACHE["slugs"] = frozenset({"alice", "bob"})
+    actions._OFFLINE_SESSION_SLUGS.clear()
+
+    # Simulate a thread mid-refresh by acquiring the cache lock.
+    other_lock_held = threading.Event()
+    refresh_done = threading.Event()
+
+    def fake_concurrent_refresh() -> None:
+        with actions._TV_CACHE_LOCK:
+            other_lock_held.set()
+            # Simulate refresh writing a fresh set.
+            refresh_done.wait(timeout=2.0)
+            actions._TV_BULK_CACHE["slugs"] = frozenset(
+                {"alice", "bob"} - actions._OFFLINE_SESSION_SLUGS
+            )
+
+    t = threading.Thread(target=fake_concurrent_refresh)
+    t.start()
+    other_lock_held.wait(timeout=2.0)
+
+    # While the refresh thread is mid-critical-section, fire mark.
+    # mark_offline must wait for the lock and then evict.
+    mark_thread = threading.Thread(
+        target=lambda: actions._tv_bulk_mark_offline("alice"),
+    )
+    mark_thread.start()
+
+    # Let the refresh thread finish first.
+    refresh_done.set()
+    t.join(timeout=2.0)
+    mark_thread.join(timeout=2.0)
+
+    # Final state: alice must be evicted, alice must be in the
+    # session blocklist.
+    assert "alice" not in actions._TV_BULK_CACHE["slugs"]
+    assert "alice" in actions._OFFLINE_SESSION_SLUGS
+    # Cleanup so other tests aren't polluted.
+    actions._OFFLINE_SESSION_SLUGS.clear()
+
+
+def test_tv_cache_snapshot_is_atomic_against_concurrent_writes(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """v0.7.37: pick_target / is_live_func now use _tv_cache_snapshot()
+    so a within-walk refresh swap doesn't make slot N see a slug live
+    and slot N+1 see it offline. Snapshot returns a frozen view that's
+    consistent for the duration of one walk."""
+    actions = _import()
+    actions._TV_BULK_CACHE["slugs"] = frozenset({"alice", "bob", "carol"})
+
+    snap1 = actions._tv_cache_snapshot()
+    # Mutate the cache after the snapshot.
+    actions._TV_BULK_CACHE["slugs"] = frozenset({"david"})
+    snap2 = actions._tv_cache_snapshot()
+
+    assert snap1 == frozenset({"alice", "bob", "carol"})
+    assert snap2 == frozenset({"david"})
+    assert isinstance(snap1, frozenset), (
+        "snapshot must be a frozen view (immune to subsequent "
+        "modification)"
+    )
 
 
 def test_restart_kodi_runs_quit_builtin(

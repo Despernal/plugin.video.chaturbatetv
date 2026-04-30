@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <addon id="plugin.video.chaturbatetv"
        name="Chaturbate TV"
-       version="0.7.36"
+       version="0.7.37"
        provider-name="flux">
     <requires>
         <import addon="xbmc.python" version="3.0.0"/>
@@ -20,7 +20,19 @@
             <icon>icon.png</icon>
             <fanart>fanart.jpg</fanart>
         </assets>
-        <news>0.7.36 - Test coverage backfill from audit pass #2 (test fragility audit). 9 new HIGH tests pinning bug classes that prior coverage missed despite 669 passing tests. Net: 684 tests.
+        <news>0.7.37 - Race-condition fixes from audit pass #3 (concurrency review). 4 architectural changes covering 8 HIGH findings across the TV state machine, HLS proxy, and cross-process file stores. Net: 692 tests.
+
+[1] Split `_DEEP_REFRESH_LOCK` from `_BULK_REFRESH_LOCK`. Pre-fix the deep crawl held _BULK_REFRESH_LOCK for ~20 minutes, which made the TV loop's bulk-cache TTL refresh fall through to per-slug AJAX (60+ requests per pick walk) for the entire window. Layered request rates risked a CB ban. Now the two are independent: bulk-refresh stays short-lived, deep-refresh has its own lock; they run concurrently without conflicting on data structures (different CB endpoints, always-overwrite-friendly DB columns).
+
+[2] Cross-process flock on favs.json + tv.json. Pre-fix two sibling Kodi processes invoking fav_add / tv_add / tv_remove / tv_edit on different slugs in rapid succession used to silent-clobber each other -- the second writer's os.replace wholesale-overwrote the first's append. fcntl.flock advisory lock now wraps the load+save critical section so cross-process RMW is atomic. Per-store .lock files next to favs.json / tv.json (created on first acquire, never deleted -- removing them would itself race).
+
+[3] _TV_CACHE_LOCK + snapshot pattern. _OFFLINE_SESSION_SLUGS (a plain set) was being added-to from the TV-loop thread while concurrently iterated by _tv_bulk_refresh -- Python sets aren't thread-safe across add+iter; under load this raised RuntimeError or silently dropped just-marked slugs. _TV_BULK_CACHE['slugs'] read-modify-write in _tv_bulk_mark_offline could race the wholesale assignment in _tv_bulk_refresh, re-promoting just-marked slugs (the v0.7.33 wedge through a side door). Now: _tv_bulk_mark_offline runs the full RMW under _TV_CACHE_LOCK; _tv_bulk_refresh snapshots _OFFLINE_SESSION_SLUGS to a frozenset under the same lock before the difference; _make_bulk_is_live_func uses a snapshot in is_live so within-walk drift can't make slot N see a slug live and slot N+1 see it offline. New _tv_cache_snapshot() helper exposes the atomic-view contract.
+
+[4] HLS proxy refresh-generation counter + state.snapshot(). _serve_chunklist used to read state.url_map then fetch outside the lock -- a refresh that swapped url_map mid-fetch would let the stale fetch's harvest re-poison the freshly-cleared seg_cdn_urls / latest_seg with old-CDN URLs, cascading 502s on subsequent segment requests. Now: chunklist captures state.refresh_gen alongside the url_map read; before persisting the harvest + cache write, re-checks under the lock that the gen hasn't advanced. Same protection on _serve_segment Tier-2/3 fallback (the v0.7.36 race we worked around in tests but production still had). _StateSnapshot dataclass + _snapshot() helper collapse the lockless terminal/stopping compound checks into a coherent single-acquire view.
+
+Eight new tests covering: deep refresh runs concurrently with _BULK_REFRESH_LOCK held, _tv_bulk_mark_offline + concurrent refresh -> eviction always lands, _tv_cache_snapshot atomic-view contract, fav_add concurrent processes don't lose writes, tv_add concurrent processes don't lose writes, refresh_session bumps refresh_gen, _snapshot returns frozen view immune to subsequent mutation, chunklist skips harvest when refresh_gen advanced mid-fetch.
+
+0.7.36 - Test coverage backfill from audit pass #2 (test fragility audit). 9 new HIGH tests pinning bug classes that prior coverage missed despite 669 passing tests. Net: 684 tests.
 
 (1) ``_NON_PUBLIC_PREFIXES`` per-status mapping: pre-fix, only routing was asserted; a typo swapping `[HIDDEN]` and `[AWAY]` colors would have shipped green. Now parametrized over all 4 statuses + the unknown-state fallback, plus AARRGGBB color regression guards.
 
