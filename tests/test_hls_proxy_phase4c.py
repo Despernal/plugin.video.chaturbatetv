@@ -566,6 +566,149 @@ def test_force_player_stop_fires_when_no_active_proxy_tracked(
     )
 
 
+def test_force_player_stop_skips_when_player_on_different_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v0.7.44 regression: the v0.7.43 in-process ``_active_proxy``
+    guard couldn't see sibling Kodi-spawned playvid processes (each
+    has its own ``_active_proxy`` global). Real-world repro persisted:
+    rapid model-switching had every old proxy fire ``PlayerControl(
+    Stop)`` on its reconnect-give-up, killing whichever sibling
+    process's stream the player was actually serving.
+
+    The fix uses ``xbmc.Player().getPlayingFile()`` -- a Kodi-global
+    (cross-process) -- and bails when the player's URL doesn't contain
+    this proxy's bound port token (``:PORT/``).
+    """
+    import sys
+    from unittest.mock import MagicMock
+
+    fake_xbmc = MagicMock()
+    # Player is currently serving port 35655 (model_b); this proxy is
+    # the zombie at port 41575 (model_e).
+    fake_xbmc.Player.return_value.getPlayingFile.return_value = (
+        "http://127.0.0.1:35655/master.m3u8"
+    )
+    monkeypatch.setitem(sys.modules, "xbmc", fake_xbmc)
+
+    from resources.lib import hls_proxy
+    monkeypatch.setattr(hls_proxy, "_active_proxy", None)
+    state = hls_proxy._State(stream_url="https://model_e", headers={})
+    state.port = 41575  # zombie port
+    state.last_force_stop = 0.0
+
+    hls_proxy._force_player_stop(state)
+
+    builtin_calls = [
+        c.args[0] for c in fake_xbmc.executebuiltin.call_args_list
+        if c.args and c.args[0] == "PlayerControl(Stop)"
+    ]
+    assert builtin_calls == [], (
+        "zombie sibling-process proxy must not stop the active player; "
+        f"fired {builtin_calls!r}"
+    )
+
+
+def test_force_player_stop_fires_when_player_on_matching_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sibling: when the player IS serving from this proxy's port, the
+    v0.7.44 cross-process guard must NOT block legitimate stop firings.
+    """
+    import sys
+    from unittest.mock import MagicMock
+
+    fake_xbmc = MagicMock()
+    fake_xbmc.Player.return_value.getPlayingFile.return_value = (
+        "http://127.0.0.1:41575/master.m3u8"
+    )
+    monkeypatch.setitem(sys.modules, "xbmc", fake_xbmc)
+
+    from resources.lib import hls_proxy
+    monkeypatch.setattr(hls_proxy, "_active_proxy", None)
+    state = hls_proxy._State(stream_url="https://model_e", headers={})
+    state.port = 41575  # matches what the player is on
+    state.last_force_stop = 0.0
+
+    hls_proxy._force_player_stop(state)
+
+    builtin_calls = [
+        c.args[0] for c in fake_xbmc.executebuiltin.call_args_list
+        if c.args and c.args[0] == "PlayerControl(Stop)"
+    ]
+    assert builtin_calls == ["PlayerControl(Stop)"], (
+        f"matching-port active proxy must fire stop; got {builtin_calls!r}"
+    )
+
+
+def test_force_player_stop_fires_when_player_returns_empty_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Edge case: ``getPlayingFile()`` returns empty (player not
+    playing or between-files transition). The v0.7.44 guard treats
+    this as "no signal, fall through to existing logic" rather than
+    silently suppressing legitimate stops. The in-process v0.7.43 guard
+    then handles whatever comes next."""
+    import sys
+    from unittest.mock import MagicMock
+
+    fake_xbmc = MagicMock()
+    fake_xbmc.Player.return_value.getPlayingFile.return_value = ""
+    monkeypatch.setitem(sys.modules, "xbmc", fake_xbmc)
+
+    from resources.lib import hls_proxy
+    monkeypatch.setattr(hls_proxy, "_active_proxy", None)
+    state = hls_proxy._State(stream_url="https://x", headers={})
+    state.port = 41575
+    state.last_force_stop = 0.0
+
+    hls_proxy._force_player_stop(state)
+
+    builtin_calls = [
+        c.args[0] for c in fake_xbmc.executebuiltin.call_args_list
+        if c.args and c.args[0] == "PlayerControl(Stop)"
+    ]
+    assert builtin_calls == ["PlayerControl(Stop)"], (
+        "empty getPlayingFile() should not block stop; "
+        f"fall through to in-process check, got {builtin_calls!r}"
+    )
+
+
+def test_force_player_stop_falls_through_when_state_port_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defensive: if state.port is 0 (state was constructed but proxy
+    never bound), skip the cross-process check entirely. Otherwise the
+    f':0/' token would falsely match nothing and bail every time.
+    Hits in test harness paths where ``_State`` is constructed directly.
+    """
+    import sys
+    from unittest.mock import MagicMock
+
+    fake_xbmc = MagicMock()
+    fake_xbmc.Player.return_value.getPlayingFile.return_value = (
+        "http://127.0.0.1:99999/master.m3u8"  # would not match port 0
+    )
+    monkeypatch.setitem(sys.modules, "xbmc", fake_xbmc)
+
+    from resources.lib import hls_proxy
+    monkeypatch.setattr(hls_proxy, "_active_proxy", None)
+    state = hls_proxy._State(stream_url="https://x", headers={})
+    # state.port stays at default 0
+    state.last_force_stop = 0.0
+
+    hls_proxy._force_player_stop(state)
+
+    builtin_calls = [
+        c.args[0] for c in fake_xbmc.executebuiltin.call_args_list
+        if c.args and c.args[0] == "PlayerControl(Stop)"
+    ]
+    assert builtin_calls == ["PlayerControl(Stop)"], (
+        f"unset state.port should skip cross-process check, not block; "
+        f"got {builtin_calls!r}"
+    )
+
+
 def test_stop_active_proxy_marks_stopping_synchronously(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

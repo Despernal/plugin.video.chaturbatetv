@@ -190,6 +190,15 @@ class _State:
     # latest_seg with old-CDN URLs, cascading 502s on subsequent
     # segment requests.
     refresh_gen: int = 0
+    # v0.7.44 cross-process zombie guard: the port this proxy bound,
+    # used by ``_force_player_stop`` to compare against
+    # ``xbmc.Player().getPlayingFile()``. The v0.7.43 in-process guard
+    # via ``_active_proxy`` was insufficient because each ``playvid``
+    # invocation runs in its own Kodi-spawned Python process, so a
+    # zombie proxy in process B would still see ITSELF as the active
+    # one (its own _active_proxy). Comparing port against the player's
+    # actual currently-playing URL is process-agnostic.
+    port: int = 0
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -748,19 +757,46 @@ def _force_player_stop(state: _State) -> None:
     only fires if at least ``_FORCE_STOP_THROTTLE_S`` has elapsed since
     the previous call.
 
-    v0.7.43 zombie-proxy guard: bail if this proxy's state is no longer
-    the active one. Pre-fix repro: TV mode plays model_e, user picks
-    model_b from the TV List, takeover detection releases TV mode and
-    model_b starts playing -- but model_e's old proxy was still running
-    its 5-attempt reconnect retry chain. When that exhausted, it fired
-    PlayerControl(Stop), killing model_b's playback. The state-comparison
-    check below ensures only the currently-active proxy can fire stop.
+    v0.7.43 zombie-proxy guard (in-process): bail if this proxy's state
+    is no longer the active one in module-local ``_active_proxy``.
+
+    v0.7.44 zombie-proxy guard (cross-process): the v0.7.43 in-process
+    guard caught the case where a single process held two proxy
+    handles, but each Kodi-spawned ``playvid`` runs in its OWN python
+    process so module-level globals are process-local. Process B's
+    zombie still saw ITSELF as the in-process active. Real-world repro
+    persisted into v0.7.43: rapid model-switching across playvid
+    invocations (model_b -> model_c -> model_d) had each
+    playvid's old proxy fire ``PlayerControl(Stop)`` on its
+    reconnect-give-up, killing whichever sibling-process proxy the
+    player was actually serving. The cross-process check below queries
+    ``xbmc.Player().getPlayingFile()`` -- a Kodi global, visible across
+    addon processes -- and bails when the player isn't on this proxy's
+    bound port.
 
     Drawback (Lesson 30): ``xbmc.executebuiltin`` from a non-Kodi thread
     isn't documented as thread-safe. Works on every Kodi we've tested
     but isn't guaranteed - if a future Kodi tightens that, this becomes
     flaky.
     """
+    # v0.7.44 cross-process check first: it catches the playvid-sibling
+    # case the v0.7.43 in-process guard couldn't see.
+    if state.port:
+        try:
+            import xbmc
+            playing = xbmc.Player().getPlayingFile() or ""
+        except Exception:
+            playing = ""
+        port_token = f":{state.port}/"
+        if playing and port_token not in playing:
+            _log(
+                f"force_player_stop: skipped, player is on a different "
+                f"proxy (playing port doesn't match my port={state.port}); "
+                f"this is a zombie sibling-process proxy"
+            )
+            return
+    # v0.7.43 in-process check: complementary -- catches the case of
+    # two proxies in the same process (e.g., test harness scenarios).
     with _active_proxy_lock:
         active = _active_proxy
     if active is not None and active._state is not state:
@@ -1215,6 +1251,10 @@ def start_proxy(stream_url: str, room_url: str,
     raw_host = server.server_address[0]
     host = raw_host if isinstance(raw_host, str) else raw_host.decode("ascii")
     port = int(server.server_address[1])
+    # v0.7.44: stash the bound port on _State so the cross-process
+    # zombie guard in _force_player_stop can compare against
+    # xbmc.Player().getPlayingFile().
+    state.port = port
 
     # Step 2: with the port now known, rewrite the prefetched master so
     # ISA gets /chunklist?name=X URLs instead of upstream CDN URLs.
