@@ -180,8 +180,15 @@ def run(
         win = _make_screensaver_class()(color=color)
     try:
         win.show()
-    except Exception:  # noqa: S110 - silent fallback intentional
-        pass
+    except Exception as exc:
+        # v0.7.38 (audit pass #4 HIGH #5): if show() raised, the
+        # window isn't visible -- onAction won't fire, so the
+        # ``while not win.dismissed`` loop below would block until
+        # is_active_func flips OR the loop is killed. Bail
+        # immediately instead so the TV loop falls through to the
+        # next outer iteration.
+        _safe_log(f"screensaver.run: show() failed err={exc!r}; bailing")
+        return None
     elapsed = 0.0
     try:
         while not win.dismissed:

@@ -195,6 +195,69 @@ def test_snapshot_returns_atomic_view_of_state(
     assert snap2.refresh_gen == 99
 
 
+def test_harvest_segment_maps_drops_data_when_refresh_gen_advances_midway(
+) -> None:
+    """v0.7.38 (audit pass #4 HIGH #6): v0.7.37 added the refresh_gen
+    check at the chunklist handler's outer cache write, but a refresh
+    that landed BETWEEN the outer check and the per-line harvest
+    writes would still poison the just-cleared seg_cdn_urls. Fix:
+    pass gen_before into _harvest_segment_maps; the bulk-update
+    under one lock acquire compares gens and drops on mismatch.
+    """
+    from resources.lib import hls_proxy
+
+    state = hls_proxy._State(stream_url="https://x", headers={})
+    state.refresh_gen = 5
+
+    chunklist = (
+        "#EXTM3U\n"
+        "#EXT-X-VERSION:3\n"
+        "#EXTINF:2.0,\n"
+        "https://cdn-old/seg_video_0_42.m4s\n"
+        "#EXTINF:2.0,\n"
+        "https://cdn-old/seg_video_0_43.m4s\n"
+        "#EXT-X-ENDLIST\n"
+    )
+
+    # Simulate refresh-during-harvest by advancing refresh_gen BEFORE
+    # the harvest call. With gen_before=5 and current gen=6, the bulk-
+    # update should detect the mismatch and drop everything.
+    state.refresh_gen = 6
+    hls_proxy._harvest_segment_maps(
+        chunklist, "chunklist_video_0", state, gen_before=5,
+    )
+    assert state.seg_cdn_urls == {}, (
+        f"refresh-during-harvest must drop the harvest; "
+        f"got {state.seg_cdn_urls!r}"
+    )
+    assert state.latest_seg == {}
+
+
+def test_harvest_segment_maps_writes_when_gen_unchanged() -> None:
+    """v0.7.38 happy-path counterpoint: when gen_before matches the
+    current gen, the harvest goes through normally (single bulk
+    update under one lock acquire)."""
+    from resources.lib import hls_proxy
+
+    state = hls_proxy._State(stream_url="https://x", headers={})
+    state.refresh_gen = 5
+
+    chunklist = (
+        "#EXTM3U\n"
+        "#EXTINF:2.0,\n"
+        "https://cdn-good/seg_video_0_42.m4s\n"
+        "#EXT-X-ENDLIST\n"
+    )
+    hls_proxy._harvest_segment_maps(
+        chunklist, "chunklist_video_0", state, gen_before=5,
+    )
+
+    assert "seg_video_0_42.m4s" in state.seg_cdn_urls
+    assert state.latest_seg.get("chunklist_video_0") == (
+        "https://cdn-good/seg_video_0_42.m4s"
+    )
+
+
 def test_chunklist_skips_harvest_when_refresh_during_fetch(
     stub_cdn: tuple[str, _StubState],
     monkeypatch: pytest.MonkeyPatch,

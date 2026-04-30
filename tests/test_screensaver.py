@@ -212,6 +212,48 @@ def test_screensaver_action_marks_dismissed(
 # --------------------------------------------------------------------------- #
 
 
+def test_run_returns_none_when_window_show_fails(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """v0.7.38 (audit pass #4 HIGH #5): if win.show() raises, the
+    window isn't visible -- onAction won't fire and the
+    ``while not win.dismissed`` loop blocks until is_active_func
+    flips. Bail immediately and return None so the TV loop falls
+    through to the next outer iteration."""
+    ss = _import()
+
+    class _FailingWindow:
+        dismissed = False
+
+        def show(self) -> None:
+            raise RuntimeError("show failed")
+
+        def tick(self) -> None: ...
+        def addControl(self, *_a: Any, **_kw: Any) -> None: ...
+        def removeControl(self, *_a: Any, **_kw: Any) -> None: ...
+        def close(self) -> None: ...
+
+    re_walk_calls = {"n": 0}
+
+    def re_walk() -> object | None:
+        re_walk_calls["n"] += 1
+        return None
+
+    out = ss.run(
+        window_factory=lambda: _FailingWindow(),
+        re_walk_func=re_walk,
+        is_active_func=lambda: True,
+        wait_for_abort=lambda _t: False,
+        re_walk_interval_seconds=1.0,
+        tick_interval_seconds=1.0,
+    )
+
+    assert out is None, "show() failure must short-circuit run() to None"
+    assert re_walk_calls["n"] == 0, (
+        "must NOT enter the dismissal loop when show() failed"
+    )
+
+
 def test_run_returns_target_when_re_walk_finds_live(
     kodi_mocks: dict[str, MagicMock],
 ) -> None:

@@ -154,8 +154,14 @@ def _bulk_live_slugs(
     try:
         body = cb_client.fetch_browse_page(url, fetch_func=fetch_func)
     except OSError as exc:
+        # v0.7.38 (audit pass #4 HIGH #4): mark this distinctly as a
+        # FETCH-FAIL so the offline_favs view can notify the user
+        # "network unreachable" rather than silently rendering all
+        # 1228 favs as offline (indistinguishable from "site is
+        # down for everyone").
         logger._log(
-            f"favs_views._bulk_live_slugs: NETWORK FAIL err={exc!r}"
+            f"favs_views._bulk_live_slugs: NETWORK FAIL err={exc!r} "
+            f"(returning None -- view should notify)"
         )
         return None
     models = cb_listing.parse_affiliate_onlinerooms(body)
@@ -349,20 +355,27 @@ def _render_favs(handle: int, favs: list[Favorite],
         )
 
 
-def _classify_favs(favs: list[Favorite],
-                   fetch_func: _FetchFn | None) -> tuple[list[Favorite], list[Favorite]]:
-    """Split the local favorites list into (online, offline) using the
-    cached bulk-fetch. If the bulk path fails, returns the full list as
-    offline and an empty online list - we'd rather show the user
-    everything than block forever on per-slug AJAX (which is what
-    locked up  on a 1224-fav library).
+def _classify_favs(
+    favs: list[Favorite],
+    fetch_func: _FetchFn | None,
+) -> tuple[list[Favorite], list[Favorite], bool]:
+    """Split the local favorites list into ``(online, offline,
+    fetch_failed)``. v0.7.38 added the bool flag (audit pass #4
+    HIGH #4) so the calling view can distinguish "site is down /
+    network unreachable" from "everyone is genuinely offline".
+
+    On bulk fetch failure, returns the full list as offline AND
+    ``fetch_failed=True`` so the view notifies the user. Pre-fix the
+    UX was indistinguishable -- the user saw 1228 offline favs and
+    couldn't tell if the network was down or every model just happened
+    to not be on.
     """
     online_slugs = _bulk_live_slugs(fetch_func)
     if online_slugs is None:
-        return [], list(favs)
+        return [], list(favs), True
     online = [f for f in favs if f.slug in online_slugs]
     offline = [f for f in favs if f.slug not in online_slugs]
-    return online, offline
+    return online, offline, False
 
 
 def online_favs_view(handle: int, store_path: Path | None = None,
@@ -378,10 +391,13 @@ def online_favs_view(handle: int, store_path: Path | None = None,
     from resources.lib import logger
     path = store_path if store_path is not None else _favs_path()
     favs = favs_store.load(path)
-    online, _offline = _classify_favs(favs, fetch_func)
+    online, _offline, fetch_failed = _classify_favs(favs, fetch_func)
     logger._log(
-        f"favs_views.online_favs_view: total={len(favs)} live={len(online)}"
+        f"favs_views.online_favs_view: total={len(favs)} "
+        f"live={len(online)} fetch_failed={fetch_failed}"
     )
+    if fetch_failed:
+        _notify_fetch_failed("Online Favorites")
     _render_favs(handle, online, enrich_with_models=True)
     kodi_helpers.end_directory(handle, content_type="videos")
 
@@ -401,11 +417,33 @@ def offline_favs_view(handle: int, store_path: Path | None = None,
     from resources.lib import logger
     path = store_path if store_path is not None else _favs_path()
     favs = favs_store.load(path)
-    _online, offline = _classify_favs(favs, fetch_func)
+    _online, offline, fetch_failed = _classify_favs(favs, fetch_func)
     meta_map = _load_offline_meta_for([f.slug for f in offline])
     logger._log(
         f"favs_views.offline_favs_view: total={len(favs)} "
-        f"offline={len(offline)} meta_hits={len(meta_map)}"
+        f"offline={len(offline)} meta_hits={len(meta_map)} "
+        f"fetch_failed={fetch_failed}"
     )
+    if fetch_failed:
+        _notify_fetch_failed("Offline Favorites")
     _render_favs(handle, offline, offline_meta=meta_map)
     kodi_helpers.end_directory(handle, content_type="videos")
+
+
+def _notify_fetch_failed(context: str) -> None:
+    """v0.7.38 (audit pass #4 HIGH #4): show the user a "network
+    unreachable" toast when the bulk-live fetch failed so they can
+    distinguish a genuine "everyone offline" from a site-down /
+    DNS-blocked / VPN-down situation. Best-effort; if xbmcgui isn't
+    available (pure-test path) the call is a no-op."""
+    try:
+        import xbmcgui
+        xbmcgui.Dialog().notification(
+            "Chaturbate TV",
+            f"{context}: network unreachable; "
+            f"showing all favs as offline",
+            xbmcgui.NOTIFICATION_WARNING,
+            5000,
+        )
+    except Exception:
+        return

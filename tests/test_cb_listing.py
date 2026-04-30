@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from resources.lib.cb_listing import (
     RoomListPage,
@@ -436,6 +437,82 @@ def test_affiliate_parser_other_non_public_states_NOT_live() -> None:
     assert {m.slug: m.is_live for m in models} == {
         "a": False, "b": False, "c": False,
     }
+
+
+def test_parse_roomlist_logs_body_snippet_on_decode_failure(
+    monkeypatch: Any,
+) -> None:
+    """v0.7.38 (audit pass #4 HIGH #3): pre-fix, JSONDecodeError
+    collapsed to ``"empty page"`` indistinguishable from "no live
+    rooms". Now logs the first ~120 chars of the body so Cloudflare
+    interstitials, rate-limit HTML, and login redirects are
+    diagnosable from cb_feature.log alone.
+
+    Test stubs the logger to capture log lines, then feeds a
+    Cloudflare-style HTML body and asserts the snippet shows up.
+    """
+    from resources.lib import cb_listing as mod
+
+    captured: list[str] = []
+    # monkeypatch the real logger's _log so the lazy `from resources.lib
+    # import logger; logger._log(...)` calls inside cb_listing route to
+    # our capture. Cleaner than swapping the whole module in sys.modules
+    # because Python caches module attributes on the parent package,
+    # which leaks across tests under randomized ordering.
+    from resources.lib import logger as _logger_mod
+    monkeypatch.setattr(
+        _logger_mod, "_log",
+        lambda msg: captured.append(str(msg)),
+    )
+    cf_html = (
+        b"<!DOCTYPE html>\n<html><head><title>Just a moment...</title>"
+        b"<script>cf_chl_opt={cvId:'3',cType:'managed'};</script>"
+    )
+    page = mod.parse_roomlist(cf_html)
+
+    # Empty page returned (existing contract preserved).
+    assert page.models == []
+    # And the diagnostic snippet landed in the log.
+    log_str = "\n".join(captured)
+    assert "JSON decode failed" in log_str
+    assert "<!DOCTYPE html>" in log_str, (
+        f"snippet must surface the leading body marker so "
+        f"Cloudflare HTML is distinguishable; got log:\n{log_str}"
+    )
+
+
+def test_parse_affiliate_onlinerooms_logs_body_snippet_on_decode_failure(
+    monkeypatch: Any,
+) -> None:
+    """Same diagnostic-snippet contract for the affiliate parser."""
+    from resources.lib import cb_listing as mod
+
+    captured: list[str] = []
+    # monkeypatch the real logger's _log so the lazy `from resources.lib
+    # import logger; logger._log(...)` calls inside cb_listing route to
+    # our capture. Cleaner than swapping the whole module in sys.modules
+    # because Python caches module attributes on the parent package,
+    # which leaks across tests under randomized ordering.
+    from resources.lib import logger as _logger_mod
+    monkeypatch.setattr(
+        _logger_mod, "_log",
+        lambda msg: captured.append(str(msg)),
+    )
+    rate_limit = (
+        b'{"error": "rate_limited", "retry_after": 60, '
+        b'"message": "Too many requests, please slow down"}'
+    )
+    # The body IS valid JSON but it's a dict, not a list -- exercises
+    # the "payload not list" branch which also got the type-info
+    # logging upgrade.
+    out = mod.parse_affiliate_onlinerooms(rate_limit)
+
+    assert out == []
+    log_str = "\n".join(captured)
+    assert "payload not list" in log_str
+    assert "type=dict" in log_str, (
+        f"non-list payload should log its actual type; got: {log_str}"
+    )
 
 
 def test_affiliate_parser_records_status_field() -> None:

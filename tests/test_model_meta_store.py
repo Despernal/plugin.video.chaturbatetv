@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+
+import pytest
 from pathlib import Path
 
 from resources.lib import model_meta_store as mms
@@ -760,6 +762,37 @@ _BIOCONTEXT_SAMPLE = {
 # v0.7.24 biocontext: the breakthrough endpoint that gives us
 # last_broadcast + real_name + photo_sets + age/location/etc for
 # any model regardless of online state. New schema columns + upsert.
+
+
+def test_ensure_columns_swallows_duplicate_column_name_race(
+    tmp_path: Path,
+) -> None:
+    """v0.7.38 (audit pass #4 HIGH #8): two concurrent upgrade-on-
+    first-launch processes both pass the PRAGMA check, both run
+    ALTER TABLE -- loser raises ``OperationalError: duplicate column
+    name``. Pre-fix, the exception bubbled to caller's bare
+    ``except Exception`` and the meta render silently degraded.
+    Now: re-running ``_ensure_columns`` against an already-migrated
+    DB is a clean no-op (every column already exists -> no ALTER
+    fired). Simulate the race-loser path by manually running
+    ``ALTER TABLE`` on a column to force the dup-name error from
+    sqlite, then call ``_ensure_columns`` and verify it doesn't
+    raise."""
+    conn = _open(tmp_path)
+    # Manually add a column that's already in the schema. _open()
+    # already ran the migration, so every _EXPECTED_COLUMNS column
+    # exists. Trying to re-add one raises duplicate-column.
+    with pytest.raises(sqlite3.OperationalError, match="duplicate column"):
+        conn.execute("ALTER TABLE models ADD COLUMN slug TEXT")
+
+    # _ensure_columns must NOT raise even when re-run on a fully-
+    # migrated DB (defensive contract for the race-loser path).
+    mms._ensure_columns(conn)
+    # And the table is still functional.
+    cur = conn.execute("PRAGMA table_info(models)")
+    cols = {row[1] for row in cur.fetchall()}
+    assert "slug" in cols
+    assert "bio_fetched_epoch" in cols  # v3 column still there
 
 
 def test_v2_db_migrates_to_v3_with_biocontext_columns(tmp_path: Path) -> None:

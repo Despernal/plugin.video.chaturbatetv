@@ -39,7 +39,14 @@ def parse_qs(qs: str) -> dict[str, str]:
 
 
 def dispatch(argv: list[str], handlers: dict[str, _Handler]) -> None:
-    """Look up a handler by mode and call it with handle + params."""
+    """Look up a handler by mode and call it with handle + params.
+
+    v0.7.38 (audit pass #4, agent 3 HIGH #1): handler exceptions get
+    caught, logged, and the directory is closed with succeeded=False
+    so Kodi releases the busy spinner instead of showing the generic
+    "Plugin failed to start" toast and leaving the user staring at a
+    spinning indicator. Single-chokepoint safety net for every view.
+    """
     # Logger import is lazy + tolerant: in the pure-test path xbmcaddon
     # may not be available, so a failure to log must not break dispatch.
     try:
@@ -57,19 +64,52 @@ def dispatch(argv: list[str], handlers: dict[str, _Handler]) -> None:
     params = parse_qs(argv[2])
     mode = params.pop("mode", "")
     _log(f"router.dispatch: handle={handle} mode={mode!r} params={params}")
-    if not mode:
-        main = handlers.get("main")
-        if main is not None:
-            main(handle=handle, **params)
-        return
-    handler = handlers.get(mode)
-    if handler is None:
-        _log(f"router.dispatch: no handler for mode={mode!r}, fallback")
-        fallback = handlers.get("_fallback")
-        if fallback is not None:
-            fallback(handle=handle, **params)
-        return
-    handler(handle=handle, **params)
+    try:
+        if not mode:
+            main = handlers.get("main")
+            if main is not None:
+                main(handle=handle, **params)
+            return
+        handler = handlers.get(mode)
+        if handler is None:
+            _log(f"router.dispatch: no handler for mode={mode!r}, fallback")
+            fallback = handlers.get("_fallback")
+            if fallback is not None:
+                fallback(handle=handle, **params)
+            return
+        handler(handle=handle, **params)
+    except Exception as exc:
+        _log(
+            f"router.dispatch: handler raised mode={mode!r} "
+            f"handle={handle} err={exc!r}"
+        )
+        # Best-effort: close the directory so Kodi stops spinning, and
+        # toast the user so they know the click did something. Both
+        # are wrapped so a Kodi-import failure (pure test path) doesn't
+        # mask the original exception's log line.
+        try:
+            import xbmcplugin
+            if handle >= 0:
+                xbmcplugin.endOfDirectory(handle, succeeded=False)
+        except Exception as cleanup_exc:
+            _log(
+                f"router.dispatch: endOfDirectory cleanup failed "
+                f"err={cleanup_exc!r}"
+            )
+        try:
+            import xbmcgui
+            xbmcgui.Dialog().notification(
+                "Chaturbate TV",
+                f"Action failed: {mode or 'main'} (see log)",
+                xbmcgui.NOTIFICATION_ERROR,
+                4000,
+            )
+        except Exception as notif_exc:
+            # Notification failure is OK to swallow -- the log line
+            # above is the actionable signal. Note it for completeness.
+            _log(
+                f"router.dispatch: notify failed err={notif_exc!r}"
+            )
 
 
 # --------------------------------------------------------------------------- #

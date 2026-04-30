@@ -173,3 +173,29 @@ def test_remove_only_first_match_when_dups_present() -> None:
     b = _fav("bob")
     out = remove([a1, a2, b], "alice")
     assert out == [b]
+
+
+def test_load_sweeps_orphan_tempfiles_older_than_1h(tmp_path) -> None:
+    """v0.7.38 (audit pass #4 HIGH #10): Kodi-SIGKILL between mkstemp
+    and os.replace orphans .favs-*.json tempfiles. Pass #1 agent 3
+    flagged this; the load-time sweep is the fix. Bounded by max_age
+    so concurrent in-flight saves aren't disturbed."""
+    import os as _os
+    import time as _time
+
+    p = tmp_path / "favs.json"
+    p.write_text('{"favorites": []}')
+
+    old = tmp_path / ".favs-OLD12345.json"
+    fresh = tmp_path / ".favs-FRESH567.json"
+    old.write_text("orphan")
+    fresh.write_text("inflight")
+    twohr_ago = _time.time() - 7200
+    _os.utime(old, (twohr_ago, twohr_ago))
+
+    load(p)
+
+    assert not old.exists(), "stale tempfile (>1h) should be swept"
+    assert fresh.exists(), (
+        "young tempfile (<1h) must be left alone (could be in-flight save)"
+    )

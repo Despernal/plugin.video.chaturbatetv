@@ -121,13 +121,78 @@ def test_dispatch_does_not_raise_on_short_argv() -> None:
     router.dispatch(["plugin://"], {"main": lambda **k: None})
 
 
-def test_dispatch_handler_can_raise_and_router_propagates() -> None:
-    """Handler exceptions surface to the entry point so Kodi shows an error."""
+def test_dispatch_catches_handler_exception_and_closes_directory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v0.7.38 (audit pass #4 HIGH #1): handler exceptions used to
+    propagate uncaught -> Kodi showed "Plugin failed to start" toast
+    AND left the busy spinner spinning until ~30s timeout. Now the
+    router catches, logs, and calls endOfDirectory(handle,
+    succeeded=False) so the spinner clears immediately and the user
+    sees a "Action failed" notification instead of generic Kodi
+    failure UI.
+    """
+    import sys
+    from unittest.mock import MagicMock
+
+    fake_xbmcplugin = MagicMock()
+    fake_xbmcgui = MagicMock()
+    fake_xbmcgui.NOTIFICATION_ERROR = "error"
+    monkeypatch.setitem(sys.modules, "xbmcplugin", fake_xbmcplugin)
+    monkeypatch.setitem(sys.modules, "xbmcgui", fake_xbmcgui)
+
     def boom(handle: int, **params: Any) -> None:
         raise RuntimeError("dispatcher-test")
 
-    with pytest.raises(RuntimeError):
-        router.dispatch(_make_argv("?mode=top"), {"top": boom})
+    # Should NOT raise.
+    router.dispatch(_make_argv("?mode=top"), {"top": boom})
+
+    # endOfDirectory was called with succeeded=False on the handle.
+    end_calls = fake_xbmcplugin.endOfDirectory.call_args_list
+    # _make_argv defaults handle="1"
+    assert any(
+        c.args and c.args[0] == 1
+        and c.kwargs.get("succeeded") is False
+        for c in end_calls
+    ), (
+        f"expected endOfDirectory(1, succeeded=False); got "
+        f"{end_calls!r}"
+    )
+
+    # And the user got a notification mentioning the mode.
+    notif_calls = fake_xbmcgui.Dialog.return_value.notification.call_args_list
+    assert any(
+        "top" in str(c).lower() or "failed" in str(c).lower()
+        for c in notif_calls
+    ), f"expected user notification about failure; got {notif_calls!r}"
+
+
+def test_dispatch_handler_exception_skips_endOfDirectory_when_handle_is_negative(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RunPlugin invocations have handle=-1 (action verbs, no
+    directory). Calling endOfDirectory(-1, ...) is invalid and would
+    raise inside Kodi. Skip it on negative handles."""
+    import sys
+    from unittest.mock import MagicMock
+
+    fake_xbmcplugin = MagicMock()
+    fake_xbmcgui = MagicMock()
+    fake_xbmcgui.NOTIFICATION_ERROR = "error"
+    monkeypatch.setitem(sys.modules, "xbmcplugin", fake_xbmcplugin)
+    monkeypatch.setitem(sys.modules, "xbmcgui", fake_xbmcgui)
+
+    def boom(handle: int, **params: Any) -> None:
+        raise RuntimeError("dispatcher-test")
+
+    # handle=-1 from a RunPlugin invocation
+    router.dispatch(["plugin://", "-1", "?mode=fav_add"],
+                    {"fav_add": boom})
+
+    end_calls = fake_xbmcplugin.endOfDirectory.call_args_list
+    assert end_calls == [], (
+        "must NOT call endOfDirectory on handle=-1 (RunPlugin path)"
+    )
 
 
 # --------------------------------------------------------------------------- #

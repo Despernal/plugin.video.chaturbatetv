@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -54,13 +55,48 @@ def _safe_log(msg: str) -> None:
         return
 
 
+def _sweep_orphan_tempfiles(parent: Path, max_age_s: float = 3600.0) -> None:
+    """Remove leftover ``.tv-*.json`` tempfiles older than max_age_s.
+
+    v0.7.38 (audit pass #4 HIGH #10): Kodi-SIGKILL between mkstemp and
+    os.replace orphans the tempfile. Bounded by max_age so we don't
+    accidentally delete a sibling save's in-flight tempfile.
+    """
+    try:
+        if not parent.is_dir():
+            return
+        nowt = time.time()
+        for stale in parent.glob(".tv-*.json"):
+            try:
+                age = nowt - stale.stat().st_mtime
+                if age > max_age_s:
+                    stale.unlink()
+                    _safe_log(
+                        f"tv_store._sweep_orphan_tempfiles: removed "
+                        f"stale tempfile {stale.name} (age {age:.0f}s)"
+                    )
+            except OSError as exc:
+                _safe_log(
+                    f"tv_store._sweep_orphan_tempfiles: skip {stale} "
+                    f"err={exc!r}"
+                )
+    except OSError as exc:
+        _safe_log(
+            f"tv_store._sweep_orphan_tempfiles: parent scan failed "
+            f"err={exc!r}"
+        )
+
+
 def load(path: Path) -> list[TVEntry]:
     """Read ``path`` and return the list of TVEntry rows.
 
     Returns ``[]`` on any failure (missing file, malformed JSON, missing
     ``models`` key, value not a list, all rows unparseable). The TV loop
     treats an empty list as "list is empty, exit cleanly".
+
+    Sweeps orphan ``.tv-*.json`` tempfiles (>1h old) as a side effect.
     """
+    _sweep_orphan_tempfiles(path.parent)
     try:
         text = path.read_text(encoding="utf-8")
     except (FileNotFoundError, IsADirectoryError, PermissionError, OSError) as exc:

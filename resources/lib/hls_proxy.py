@@ -414,12 +414,27 @@ def _rewrite_chunklist_for_isa(absolutized: str, host: str, port: int) -> str:
 
 
 def _harvest_segment_maps(absolutized_chunklist: str, type_key: str | None,
-                          state: _State) -> None:
+                          state: _State,
+                          gen_before: int | None = None) -> None:
     """Walk the absolutized chunklist body, recording each segment's
     canonical CDN URL into ``seg_cdn_urls`` (keyed by basename) and the
     last segment per chunklist into ``latest_seg``. Used by the segment
     handler's three-tier fallback.
+
+    v0.7.38 (audit pass #4 HIGH #6): when ``gen_before`` is provided,
+    each per-line write also re-checks ``state.refresh_gen`` under the
+    same lock acquire. v0.7.37 added the gen-check at the chunklist
+    handler's outer cache write, but a refresh that landed BETWEEN
+    the outer check and a harvest line would still poison the
+    just-cleared seg_cdn_urls / latest_seg with old-CDN URLs.
+    Now: if gen advanced mid-harvest, drop the rest on the floor.
+
+    v0.7.38 (audit pass #4 MEDIUM): also batches the per-line lock
+    cycles into a single bulk-update under one acquire. Pre-fix, a
+    100-segment chunklist took 100 lock acquire/release cycles and
+    blocked _refresh_session's lock-held writes for the duration.
     """
+    pending: dict[str, str] = {}
     last_seen: str = ""
     for line in absolutized_chunklist.splitlines():
         line = line.strip()
@@ -428,11 +443,23 @@ def _harvest_segment_maps(absolutized_chunklist: str, type_key: str | None,
         if ".m4s" not in line:
             continue
         basename = line.rsplit("/", 1)[-1].split("?", 1)[0]
-        with state.lock:
-            state.seg_cdn_urls[basename] = line
+        pending[basename] = line
         last_seen = line
-    if last_seen and type_key:
-        with state.lock:
+    # Single bulk-update under one lock acquire. If gen_before is
+    # set and the gen has since advanced, a refresh swapped url_map
+    # mid-fetch -- the harvest data is stale, so drop it.
+    if not pending and not last_seen:
+        return
+    with state.lock:
+        if gen_before is not None and state.refresh_gen != gen_before:
+            _log(
+                f"_harvest_segment_maps: refresh-during-harvest detected "
+                f"gen={gen_before}->{state.refresh_gen}; dropping "
+                f"{len(pending)} entries"
+            )
+            return
+        state.seg_cdn_urls.update(pending)
+        if last_seen and type_key:
             state.latest_seg[type_key] = last_seen
 
 
@@ -591,15 +618,28 @@ def _run_reconnect(state: _State) -> None:
     except Exception as exc:
         _log(f"reconnect: THREAD CRASHED: {exc!r}")
     finally:
+        # v0.7.38 (audit pass #4 HIGH #7): the entire reconnecting-
+        # release + terminal-flip decision now runs in one critical
+        # section. Pre-fix, the if-needs_terminal-and-not-state.stopping
+        # check ran lockless between two locked blocks; a concurrent
+        # stop() that flipped state.stopping=True between the check
+        # and the inner state.terminal=True write could fire
+        # PlayerControl(Stop) at a moment Kodi was already moving to
+        # the next playlist item -- "wrong room got Stopped" symptom.
+        # Single critical section keeps stopping / terminal observed
+        # coherently with the decision they gate.
+        should_force_stop = False
         with state.lock:
             state.active_reconnect_threads = max(
                 0, state.active_reconnect_threads - 1,
             )
             state.reconnecting = False
-        if needs_terminal and not state.stopping and not state.terminal:
-            _log("reconnect: flipping terminal=True + PlayerControl(Stop)")
-            with state.lock:
+            if needs_terminal and not state.stopping and not state.terminal:
                 state.terminal = True
+                state.refresh_gen += 1  # cache caches see fresh state
+                should_force_stop = True
+        if should_force_stop:
+            _log("reconnect: flipped terminal=True + PlayerControl(Stop)")
             # Fire the hammer from the bg thread too. Without this, if
             # ISA stops requesting after we go terminal (e.g. it gave
             # up on its own), the chunklist handler's PlayerControl(Stop)
@@ -874,7 +914,8 @@ def _make_handler(host: str, port: int, state: _State,
                     self._send_body(payload, "application/vnd.apple.mpegurl")
                     return
                 state.chunklist_cache[name] = payload
-            _harvest_segment_maps(absolutized, name, state)
+            _harvest_segment_maps(absolutized, name, state,
+                                  gen_before=gen_before)
             # Per-chunklist OK is too chatty during steady-state playback
             # (1-2 lines/sec from disk I/O). Errors / reconnects still log.
             self._send_body(payload, "application/vnd.apple.mpegurl")

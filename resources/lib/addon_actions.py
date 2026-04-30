@@ -936,7 +936,15 @@ def deep_refresh_offline_meta(
             f"(~{eta_min} min)",
         )
         counts: dict[str, int] = {"ok": 0, "gone": 0, "error": 0}
+        # v0.7.38 (audit pass #4 HIGH #11): bail after N consecutive
+        # sqlite OperationalError exceptions so a wedged DB doesn't
+        # silently no-op a 20-min crawl. Only counts CONSECUTIVE
+        # errors -- transient locks reset the counter on the next
+        # successful upsert.
+        consecutive_db_errors = 0
+        _DB_ERROR_BAIL_THRESHOLD = 10
         try:
+            import sqlite3 as _sqlite3
             db_path = str(_model_meta_db_path())
             conn = mms.open_db(db_path)
             try:
@@ -997,8 +1005,37 @@ def deep_refresh_offline_meta(
                             counts["gone"] += 1
                         else:
                             counts["ok"] += 1
+                        # Successful upsert -> reset DB-error streak.
+                        consecutive_db_errors = 0
+                    except _sqlite3.OperationalError as exc:
+                        # v0.7.38: distinguish DB errors from
+                        # network/parse errors. A wedged DB (locked,
+                        # disk full, schema mismatch) gives no value
+                        # to the next 1227 slugs -- bail early.
+                        consecutive_db_errors += 1
+                        counts["error"] += 1
+                        logger._log(
+                            f"deep_refresh_offline_meta: slug={slug!r} "
+                            f"DB FAIL err={exc!r} "
+                            f"streak={consecutive_db_errors}"
+                        )
+                        if consecutive_db_errors >= _DB_ERROR_BAIL_THRESHOLD:
+                            logger._log(
+                                f"deep_refresh_offline_meta: bailing "
+                                f"after {consecutive_db_errors} "
+                                f"consecutive DB errors at slug "
+                                f"{i + 1}/{len(worklist)}"
+                            )
+                            notify_func(
+                                "Chaturbate TV",
+                                f"Deep refresh aborted: DB unwritable "
+                                f"after {consecutive_db_errors} tries "
+                                f"({i + 1}/{len(worklist)} done)",
+                            )
+                            return
                     except Exception as exc:
                         counts["error"] += 1
+                        consecutive_db_errors = 0
                         logger._log(
                             f"deep_refresh_offline_meta: slug={slug!r} "
                             f"FAIL err={exc!r}"

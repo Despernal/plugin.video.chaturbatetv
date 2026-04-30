@@ -166,6 +166,14 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     DBs created before a column was added end up with the new column
     set to NULL on existing rows -- callers tolerate NULL (the upsert
     code uses COALESCE, the renderer guards every read).
+
+    v0.7.38 (audit pass #4 HIGH #8): the PRAGMA-then-ALTER sequence
+    has a TOCTOU window that two concurrent upgrade-on-first-launch
+    Kodi processes can both pass; the loser's ALTER raises
+    ``OperationalError: duplicate column name``. Pre-fix, the
+    exception bubbled to ``open_db``'s caller's bare ``except
+    Exception`` and the meta-render silently degraded for that
+    request. Now: catch duplicate-column specifically, log, continue.
     """
     cur = conn.execute("PRAGMA table_info(models)")
     existing = {row[1] for row in cur.fetchall()}
@@ -173,7 +181,32 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         if col not in existing:
             # col + type_ come from a fixed module-level tuple; no
             # user input lands in the SQL string.
-            conn.execute(f"ALTER TABLE models ADD COLUMN {col} {type_}")
+            try:
+                conn.execute(
+                    f"ALTER TABLE models ADD COLUMN {col} {type_}"
+                )
+            except sqlite3.OperationalError as exc:
+                # Race-loser path: a sibling Kodi process won the
+                # PRAGMA-then-ALTER race and added this column
+                # microseconds ago. Verify by re-checking PRAGMA;
+                # if the column now exists, swallow + log; otherwise
+                # re-raise (real DDL failure, not the race).
+                msg = str(exc).lower()
+                if "duplicate column name" in msg:
+                    _safe_log(
+                        f"model_meta_store._ensure_columns: race-loser "
+                        f"on {col} (sibling process added it); continuing"
+                    )
+                    continue
+                raise
+
+
+def _safe_log(msg: str) -> None:
+    try:
+        from resources.lib import logger
+        logger._log(msg)
+    except Exception:
+        return
 
 
 def open_db(path: str) -> sqlite3.Connection:
@@ -429,6 +462,15 @@ def upsert_rooms(
     skipped -- garbage in one row never breaks the whole batch.
 
     Returns the number of rows actually written.
+
+    v0.7.38 (audit pass #4 MEDIUM): pre-fix, ``with conn:`` was a no-op
+    because ``open_db`` set ``isolation_level=None`` (autocommit mode),
+    which disables sqlite3 module's auto-BEGIN/COMMIT. The
+    ``executemany`` ran as N independent fsync-per-statement upserts
+    -- ~30x slower than intended AND the docstring's atomicity claim
+    was false. Fix: explicit ``BEGIN`` / ``COMMIT`` / ``ROLLBACK``
+    bounding the executemany so the bulk poll genuinely runs as one
+    transaction (single fsync at COMMIT under WAL).
     """
     written = 0
     rows: list[dict[str, Any]] = []
@@ -442,8 +484,13 @@ def upsert_rooms(
         written += 1
     if not rows:
         return 0
-    with conn:
+    conn.execute("BEGIN")
+    try:
         conn.executemany(_UPSERT_SQL, rows)
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    conn.execute("COMMIT")
     return written
 
 

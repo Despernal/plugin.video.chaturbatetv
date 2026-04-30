@@ -48,6 +48,25 @@ class RoomListPage:
     all_rooms_count: int
 
 
+def _payload_snippet(payload: str | bytes, n: int = 120) -> str:
+    """Return the first N chars of a string/bytes payload as a
+    readable snippet for diagnostic logs. v0.7.38 (audit pass #4
+    HIGH #3): collapses 12 MB Cloudflare-HTML / rate-limit-page /
+    login-redirect bodies into a leading marker that distinguishes
+    them in cb_feature.log."""
+    try:
+        if isinstance(payload, bytes):
+            text = payload[:n].decode("utf-8", errors="replace")
+        else:
+            text = payload[:n]
+        # Collapse whitespace runs so the snippet fits on one log
+        # line and the leading marker (<!DOCTYPE, {"error":, etc) is
+        # the first thing visible.
+        return " ".join(text.split())
+    except Exception:
+        return "<unreadable>"
+
+
 def _to_int(v: Any, default: int = 0) -> int:
     if isinstance(v, bool):
         return default
@@ -137,16 +156,26 @@ def parse_affiliate_onlinerooms(
     except Exception:  # pragma: no cover - never raises
         def _log(_msg: object) -> None: ...
     if isinstance(payload, (str, bytes)):
+        raw_body = payload
         try:
-            payload = json.loads(payload)
-        except (TypeError, ValueError, json.JSONDecodeError):
+            payload = json.loads(raw_body)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            # v0.7.38 (audit pass #4 HIGH #3): log a snippet of the
+            # body so Cloudflare interstitials, rate-limit HTML, and
+            # login redirects are diagnosable. Pre-fix the failure
+            # collapsed to "empty list" indistinguishable from
+            # "no live rooms".
+            snippet = _payload_snippet(raw_body)
             _log(
-                "cb_listing.parse_affiliate_onlinerooms: JSON decode failed"
+                "cb_listing.parse_affiliate_onlinerooms: JSON decode "
+                f"failed err={exc!r} bytes={len(raw_body)} "
+                f"snippet={snippet!r}"
             )
             return []
     if not isinstance(payload, list):
         _log(
-            "cb_listing.parse_affiliate_onlinerooms: payload not list"
+            f"cb_listing.parse_affiliate_onlinerooms: payload not list "
+            f"(type={type(payload).__name__})"
         )
         return []
     out: list[Model] = []
@@ -174,13 +203,24 @@ def parse_roomlist(payload: dict[str, Any] | str | bytes) -> RoomListPage:
     except Exception:  # pragma: no cover - never raises
         def _log(_msg: object) -> None: ...
     if isinstance(payload, (str, bytes)):
+        raw_body = payload
         try:
-            payload = json.loads(payload)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            _log("cb_listing.parse_roomlist: JSON decode failed -> empty page")
+            payload = json.loads(raw_body)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            # v0.7.38: snippet logging so Cloudflare HTML / rate-
+            # limit pages / login redirects are diagnosable.
+            snippet = _payload_snippet(raw_body)
+            _log(
+                f"cb_listing.parse_roomlist: JSON decode failed "
+                f"err={exc!r} bytes={len(raw_body)} snippet={snippet!r} "
+                f"-> empty page"
+            )
             return RoomListPage(models=[], total_count=0, all_rooms_count=0)
     if not isinstance(payload, dict):
-        _log("cb_listing.parse_roomlist: payload not dict -> empty page")
+        _log(
+            f"cb_listing.parse_roomlist: payload not dict "
+            f"(type={type(payload).__name__}) -> empty page"
+        )
         return RoomListPage(models=[], total_count=0, all_rooms_count=0)
 
     rooms = payload.get("rooms") or []

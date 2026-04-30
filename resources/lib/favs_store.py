@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -48,10 +49,52 @@ def _safe_log(msg: str) -> None:
         return
 
 
+def _sweep_orphan_tempfiles(parent: Path, max_age_s: float = 3600.0) -> None:
+    """Remove leftover ``.favs-*.json`` tempfiles older than max_age_s.
+
+    v0.7.38 (audit pass #4 HIGH #10): if Kodi SIGKILLs the process
+    between mkstemp and os.replace, the tempfile is orphaned. The
+    save() finally-clause cleans up tempfiles from THIS process's
+    failures, but not crashes. Pass #1 agent 3 flagged this; this
+    sweep on every load() call is the simplest fix.
+
+    Bounded by max_age (default 1h) so a sweep can't accidentally
+    delete a tempfile from a SIBLING save that's currently in flight.
+    """
+    try:
+        if not parent.is_dir():
+            return
+        nowt = time.time()
+        for stale in parent.glob(".favs-*.json"):
+            try:
+                age = nowt - stale.stat().st_mtime
+                if age > max_age_s:
+                    stale.unlink()
+                    _safe_log(
+                        f"favs_store._sweep_orphan_tempfiles: "
+                        f"removed stale tempfile {stale.name} "
+                        f"(age {age:.0f}s)"
+                    )
+            except OSError as exc:
+                _safe_log(
+                    f"favs_store._sweep_orphan_tempfiles: skip "
+                    f"{stale} err={exc!r}"
+                )
+    except OSError as exc:
+        _safe_log(
+            f"favs_store._sweep_orphan_tempfiles: parent scan "
+            f"failed err={exc!r}"
+        )
+
+
 def load(path: Path) -> list[Favorite]:
     """Read ``path`` and return the favorites list. Returns ``[]`` on any
     failure (missing, malformed, schema mismatch).
+
+    Sweeps orphan tempfiles (>1h old) from the parent dir as a side
+    effect so Kodi-SIGKILL leftovers don't accumulate forever.
     """
+    _sweep_orphan_tempfiles(path.parent)
     try:
         text = path.read_text(encoding="utf-8")
     except (FileNotFoundError, IsADirectoryError, PermissionError, OSError) as exc:

@@ -158,3 +158,44 @@ def test_load_tolerates_concurrent_partial_write(tmp_path) -> None:
     p = tmp_path / "tv.json"
     p.write_text("")  # zero bytes mid-write
     assert load(p) == []
+
+
+def test_load_sweeps_orphan_tempfiles_older_than_1h(tmp_path) -> None:
+    """v0.7.38 (audit pass #4 HIGH #10): Kodi-SIGKILL between mkstemp
+    and os.replace orphans .tv-*.json tempfiles. The next load() call
+    sweeps them if they're older than max_age (default 1h). Younger
+    tempfiles are LEFT ALONE because they may be from a sibling
+    process's in-flight save."""
+    import os as _os
+    import time as _time
+
+    parent = tmp_path
+    p = parent / "tv.json"
+    p.write_text('{"models": []}')
+
+    # Plant two orphan tempfiles: one old (should be swept), one
+    # fresh (must survive -- could be a concurrent save in flight).
+    old = parent / ".tv-OLD12345.json"
+    fresh = parent / ".tv-FRESH567.json"
+    old.write_text("orphan")
+    fresh.write_text("inflight")
+    # Backdate the old file by 2 hours.
+    twohr_ago = _time.time() - 7200
+    _os.utime(old, (twohr_ago, twohr_ago))
+
+    load(p)
+
+    assert not old.exists(), "stale tempfile (>1h) should be swept"
+    assert fresh.exists(), (
+        "young tempfile (<1h) MUST be left alone -- could be a "
+        "sibling save in flight"
+    )
+
+
+def test_load_sweep_tolerates_missing_parent_dir(tmp_path) -> None:
+    """Sweep on a load() against a nonexistent parent must not
+    raise -- the load() itself handles missing files, but the sweep
+    runs before that read attempt."""
+    p = tmp_path / "newdir" / "tv.json"
+    # Parent dir doesn't exist yet. load() should still return [].
+    assert load(p) == []

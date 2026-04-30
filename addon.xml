@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <addon id="plugin.video.chaturbatetv"
        name="Chaturbate TV"
-       version="0.7.37"
+       version="0.7.38"
        provider-name="flux">
     <requires>
         <import addon="xbmc.python" version="3.0.0"/>
@@ -20,7 +20,35 @@
             <icon>icon.png</icon>
             <fanart>fanart.jpg</fanart>
         </assets>
-        <news>0.7.37 - Race-condition fixes from audit pass #3 (concurrency review). 4 architectural changes covering 8 HIGH findings across the TV state machine, HLS proxy, and cross-process file stores. Net: 692 tests.
+        <news>0.7.38 - Error-handling and resource-leak fixes from audit pass #4. 12 fixes covering all 11 HIGH findings + the autocommit-perf MEDIUM. Net: 707 tests.
+
+(1) router.py top-level handler wrap. Pre-fix, an exception in any view propagated uncaught -> Kodi showed "Plugin failed to start" toast and left the busy spinner spinning until ~30s timeout. Now: catch, log, call endOfDirectory(handle, succeeded=False), notify the user via xbmcgui.Dialog().notification with a NOTIFICATION_ERROR icon. handle=-1 from RunPlugin paths skips endOfDirectory.
+
+(2) browse_views fetch-fail handling. _fetch_models used to propagate OSError up to view handlers; now catches and returns empty list with a log line. Listings render cleanly with no spinner-trap on network blips.
+
+(3) parse_roomlist / parse_affiliate_onlinerooms log body snippet on JSONDecodeError. Pre-fix, Cloudflare HTML / rate-limit pages / login redirects all collapsed to "empty list" indistinguishable from "no live rooms". New _payload_snippet helper logs the first 120 chars of the body (whitespace-collapsed for one-line readability) so cb_feature.log shows the leading marker.
+
+(4) favs_views distinguishes fetch-fail from "everyone offline". _classify_favs returns a third tuple element (fetch_failed bool); online_favs_view and offline_favs_view notify "network unreachable" via xbmcgui when set so the user can tell the network's down vs all 1228 favs are genuinely offline.
+
+(5) screensaver win.show() failure short-circuits to None. Pre-fix, if show() raised the loop would block on a non-shown window forever; now bails immediately and the TV loop falls through to next iter.
+
+(6) HLS proxy _harvest_segment_maps recheck refresh_gen. v0.7.37 added the gen-check at the chunklist handler's outer cache write but the per-line harvest writes still raced. Now harvest takes a gen_before kwarg, batches into a local dict, then bulk-updates under one lock with a final gen-check -- drops the data on the floor if a refresh landed mid-harvest. Bonus: replaces 100 per-line lock cycles with one bulk acquire.
+
+(7) HLS proxy _run_reconnect terminal-flip under lock. Pre-fix, the if-needs_terminal-and-not-state.stopping check ran lockless between two locked blocks; concurrent stop() could fire PlayerControl(Stop) at the wrong moment. Single critical section now keeps stopping/terminal observed coherently with the decision they gate.
+
+(8) model_meta_store _ensure_columns swallows duplicate-column race. Two concurrent first-launch upgrades both pass PRAGMA, both ALTER -- loser raises OperationalError("duplicate column name"). Pre-fix, the exception bubbled to caller's bare except and meta render silently degraded. Now: catch the specific message + log + continue.
+
+(9) file_lock yields a sentinel bool. Pre-fix, OSError on os.open or fcntl.flock degraded silently to fail-open with no signal. Now yields False on acquire failure so callers can branch (notify, retry, or accept-and-document); existing call sites that ignore the value still get fail-open behavior, but the silent downgrade is now traceable.
+
+(10) Orphan tempfile sweeper at load(). Kodi-SIGKILL between mkstemp and os.replace orphans .favs-*.json / .tv-*.json forever. Pass #1 agent 3 flagged this; never shipped until now. Sweep runs on every load() call, removes tempfiles older than 1h (bounded so concurrent in-flight saves aren't disturbed).
+
+(11) deep_refresh DB-error early-bail. Pre-fix, sqlite OperationalError ("database is locked", schema mismatch, disk full) collapsed into the generic per-slug error count -- 20 minutes of work silent-failing on 1228 slugs with a "1228 errors" toast that gave no actionable signal. Now: catch sqlite3.OperationalError specifically, count consecutive occurrences, bail after 10 with a clear toast.
+
+(12) model_meta_store upsert_rooms autocommit fix (MEDIUM promoted). Pre-fix, ``with conn:`` was a no-op because open_db sets isolation_level=None (autocommit), which disables sqlite3 module's auto-BEGIN/COMMIT. The executemany ran as N independent fsync-per-statement upserts -- ~30x slower than intended AND the docstring's atomicity claim was false. Now: explicit BEGIN / COMMIT / ROLLBACK so bulk poll genuinely runs as one transaction (single fsync at COMMIT under WAL).
+
+Plus 8 new tests pinning each fix. ruff clean, mypy --strict clean.
+
+0.7.37 - Race-condition fixes from audit pass #3 (concurrency review). 4 architectural changes covering 8 HIGH findings across the TV state machine, HLS proxy, and cross-process file stores. Net: 692 tests.
 
 [1] Split `_DEEP_REFRESH_LOCK` from `_BULK_REFRESH_LOCK`. Pre-fix the deep crawl held _BULK_REFRESH_LOCK for ~20 minutes, which made the TV loop's bulk-cache TTL refresh fall through to per-slug AJAX (60+ requests per pick walk) for the entire window. Layered request rates risked a CB ban. Now the two are independent: bulk-refresh stays short-lived, deep-refresh has its own lock; they run concurrently without conflicting on data structures (different CB endpoints, always-overwrite-friendly DB columns).
 

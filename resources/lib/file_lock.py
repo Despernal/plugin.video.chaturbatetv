@@ -55,8 +55,16 @@ def _safe_log(msg: str) -> None:
 
 
 @contextmanager
-def locked(path: Path | str, timeout_s: float | None = None) -> Iterator[None]:
+def locked(path: Path | str, timeout_s: float | None = None) -> Iterator[bool]:
     """Acquire an exclusive advisory lock for the duration of the block.
+
+    Yields ``True`` when the lock is held, ``False`` when acquisition
+    failed (read-only FS, fd exhaustion, missing parent dir, non-POSIX
+    platform). v0.7.38 (audit pass #4 HIGH #9) added the sentinel:
+    callers that care about correctness can branch on the value to
+    notify the user, retry, or accept the degraded path explicitly.
+    Existing call sites that ignore the value still get fail-open
+    behaviour, but the silent-downgrade is now traceable.
 
     The lock file is ``<path>.lock`` next to ``path``. It's created on
     first acquire and intentionally never deleted -- the file's
@@ -67,16 +75,16 @@ def locked(path: Path | str, timeout_s: float | None = None) -> Iterator[None]:
     timed waits) -- the lock blocks until acquired. POSIX flock blocks
     cooperatively across processes.
 
-    On non-POSIX platforms (Windows dev), this is a no-op so tests
-    still run; race protection there is not required because Kodi
-    addons don't ship there.
+    On non-POSIX platforms (Windows dev), this yields ``False`` so
+    tests still run; race protection there is not required because
+    Kodi addons don't ship there.
     """
     target = Path(path)
     lock_path = target.parent / (target.name + ".lock")
     if not _HAS_FCNTL:
-        # Non-POSIX fallback: no-op. Tests still pass; production
-        # safety isn't required here (Kodi runs on POSIX).
-        yield
+        # Non-POSIX fallback: no-op + sentinel False so callers can
+        # detect.
+        yield False
         return
 
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -85,7 +93,7 @@ def locked(path: Path | str, timeout_s: float | None = None) -> Iterator[None]:
         fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
         _fcntl.flock(fd, _fcntl.LOCK_EX)
         try:
-            yield
+            yield True
         finally:
             try:
                 _fcntl.flock(fd, _fcntl.LOCK_UN)
@@ -97,12 +105,13 @@ def locked(path: Path | str, timeout_s: float | None = None) -> Iterator[None]:
     except OSError as exc:
         _safe_log(
             f"file_lock.locked: acquire failed path={target} err={exc!r} "
-            f"(falling through unlocked)"
+            f"(falling through unlocked -- caller gets sentinel False)"
         )
         # Fall through unlocked rather than wedge production. The
         # race we're guarding is rare; a fail-open here is preferable
-        # to a wedged tv_add.
-        yield
+        # to a wedged tv_add. Sentinel False tells the caller they
+        # were degraded.
+        yield False
     finally:
         if fd >= 0:
             try:

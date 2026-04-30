@@ -189,8 +189,23 @@ def _coerce_page(value: Any) -> int:
 
 
 def _fetch_models(url: str, fetch_func: _FetchFn | None) -> list[Model]:
-    """GET the JSON room-list, return parsed Models. Empty on any failure."""
-    body = cb_client.fetch_browse_page(url, fetch_func=fetch_func)
+    """GET the JSON room-list, return parsed Models. Empty on any failure.
+
+    v0.7.38 (audit pass #4 HIGH #2): network failures (OSError from
+    fetch_browse_page) used to propagate uncaught -- the calling view
+    handler raised, the directory was never finalized, Kodi spun
+    forever. Now: log + return empty list. Caller renders a clean
+    "no rooms" view instead of an eternal spinner.
+    """
+    try:
+        body = cb_client.fetch_browse_page(url, fetch_func=fetch_func)
+    except OSError as exc:
+        from resources.lib import logger
+        logger._log(
+            f"browse_views._fetch_models: fetch failed url={url} "
+            f"err={exc!r}; rendering empty"
+        )
+        return []
     return cb_listing.parse_roomlist(body).models
 
 
