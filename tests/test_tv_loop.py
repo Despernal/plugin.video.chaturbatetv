@@ -384,20 +384,25 @@ def test_tvplayer_tier_next_button_does_not_fire_takeover(
     the UNRESOLVED plugin URLs; the naive ``cur in queued_paths`` check
     would always fail and fire TAKEOVER, stopping TV mode.
 
-    The fix: also accept the path when it's a 127.0.0.1 proxy URL AND
-    the playlist size + position match what we queued. User direct-play
-    REPLACES the playlist, so size mismatch still classifies a real
-    takeover correctly.
+    The fix (v0.7.40 refresh): check ``pl[pos].getPath()`` against
+    queued_paths. Kodi keeps the original queued plugin URL accessible
+    via that, even after the resolver swapped getPlayingFile() for the
+    localhost proxy URL. If the queued URL is in queued_paths, this
+    advance is ours.
     """
     tl = _import()
     p = tl._TVPlayer()
+    bob_queued = tl._build_playlist_url("bob", "bob")
     p.queued_paths = {
         tl._build_playlist_url("alice", "alice"),
-        tl._build_playlist_url("bob", "bob"),
+        bob_queued,
     }
     p.tracked_file = "http://127.0.0.1:42327/master.m3u8"  # alice's proxy
-    # Playlist still has 2 items (our tier), advanced to position 1.
-    _patch_playlist(kodi_mods, size=2, pos=1)
+    # Playlist still has 2 items (our tier), advanced to position 1
+    # (bob); Kodi exposes bob's queued plugin URL via pl[1].getPath().
+    _patch_playlist_with_queued(
+        kodi_mods, size=2, pos=1, queued_url=bob_queued,
+    )
     # Override getPlayingFile to return the new proxy URL.
     p.getPlayingFile = lambda: "http://127.0.0.1:55555/master.m3u8"  # type: ignore[method-assign]
 
@@ -412,8 +417,8 @@ def test_tvplayer_user_direct_play_fires_takeover(
     kodi_mods: dict[str, Any],
 ) -> None:
     """User clicks a non-queued model directly while TV is playing:
-    Kodi REPLACES the playlist with a one-item one. Size no longer
-    matches our queued count (2 -> 1); takeover MUST fire."""
+    Kodi REPLACES the playlist with a one-item one whose plugin URL is
+    the user's clicked one (NOT in queued_paths); takeover MUST fire."""
     tl = _import()
     p = tl._TVPlayer()
     p.queued_paths = {
@@ -421,14 +426,94 @@ def test_tvplayer_user_direct_play_fires_takeover(
         tl._build_playlist_url("bob", "bob"),
     }
     p.tracked_file = "http://127.0.0.1:42327/master.m3u8"
-    # User direct-play replaced the playlist with a single item.
-    _patch_playlist(kodi_mods, size=1, pos=0)
+    # User direct-play replaced the playlist with the URL THEY clicked
+    # (slug-only, no name=, since browse_views constructs it via
+    # add_play_item without a name kwarg). Not in queued_paths.
+    user_clicked = (
+        "plugin://plugin.video.chaturbatetv/?mode=playvid&slug=carol"
+    )
+    _patch_playlist_with_queued(
+        kodi_mods, size=1, pos=0, queued_url=user_clicked,
+    )
     p.getPlayingFile = lambda: "http://127.0.0.1:99999/master.m3u8"  # type: ignore[method-assign]
 
     p.onAVStarted()
 
     assert p.switched is True, (
-        "user direct-play must fire takeover (playlist size mismatch)"
+        "user direct-play must fire takeover (queued URL not in our set)"
+    )
+
+
+def test_tvplayer_single_model_tier_user_direct_play_fires_takeover(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """v0.7.40 regression: when the active tier holds exactly ONE model,
+    the user clicking a different model REPLACES the playlist with a
+    one-item one. Pre-fix, the takeover-detection fallback was
+    ``pl_size == len(queued_paths)`` -- 1 == 1 -- so the heuristic
+    misclassified the takeover as an internal advance. TV loop kept
+    running invisibly underneath the user's click.
+
+    The fix uses ``pl[pos].getPath() in queued_paths`` instead, which is
+    insensitive to playlist size: queued URL match -> internal, non-
+    match -> takeover.
+
+    Real-world repro: tier P7 had only one model (model_h), user
+    browsed Female and clicked vesia, log showed
+    ``onAVStarted: internal advance to ...`` instead of the expected
+    ``TAKEOVER detected`` line.
+    """
+    tl = _import()
+    p = tl._TVPlayer()
+    model_h_queued = tl._build_playlist_url("model_h", "model_h")
+    p.queued_paths = {model_h_queued}  # tier of exactly 1 model
+    p.tracked_file = "http://127.0.0.1:43415/master.m3u8"  # model_h's proxy
+
+    # User clicked vesia in Female browse. Kodi replaces the playlist
+    # with a one-item playlist whose plugin URL is vesia's, NOT in our
+    # queued_paths (also: shape differs -- browse_views.add_play_item
+    # builds slug-only URLs, no name= param).
+    user_clicked = (
+        "plugin://plugin.video.chaturbatetv/?mode=playvid&slug=vesia"
+    )
+    _patch_playlist_with_queued(
+        kodi_mods, size=1, pos=0, queued_url=user_clicked,
+    )
+    p.getPlayingFile = lambda: "http://127.0.0.1:36641/master.m3u8"  # vesia's proxy
+
+    p.onAVStarted()
+
+    assert p.switched is True, (
+        "single-model tier (size=1) collides with user direct-play "
+        "(also size=1) under the size-equality heuristic; the queued-URL "
+        "check must classify this as TAKEOVER, not internal advance"
+    )
+
+
+def test_tvplayer_single_model_tier_internal_does_not_fire_takeover(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """v0.7.40 regression sibling: same single-model tier shape as the
+    misclassification test above, but the post-resolution localhost
+    proxy URL changed (e.g., HLS proxy rebound to a new port). The
+    queued URL at pl[0].getPath() IS still our queued one -- so this
+    is a genuine internal advance and must NOT fire takeover.
+    """
+    tl = _import()
+    p = tl._TVPlayer()
+    queued = tl._build_playlist_url("model_h", "model_h")
+    p.queued_paths = {queued}
+    p.tracked_file = "http://127.0.0.1:43415/master.m3u8"  # old port
+    _patch_playlist_with_queued(
+        kodi_mods, size=1, pos=0, queued_url=queued,  # OUR url at pos 0
+    )
+    p.getPlayingFile = lambda: "http://127.0.0.1:55555/master.m3u8"  # new port
+
+    p.onAVStarted()
+
+    assert p.switched is False, (
+        "queued URL at pl[pos].getPath() matches queued_paths -- "
+        "this is our own internal advance, not a takeover"
     )
 
 

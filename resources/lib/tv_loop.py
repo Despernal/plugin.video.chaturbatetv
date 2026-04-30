@@ -133,45 +133,42 @@ def _build_player_class() -> type:
             except Exception:
                 cur = ""
             self.current_playlist_path = cur
-            # v0.7.34: capture the queued plugin URL (with ``slug=``)
-            # alongside the resolved path. Kodi's playlist keeps the
-            # original queued URL accessible via ``pl[pos].getPath()``
-            # during playback, even though ``getPlayingFile()`` returns
-            # the post-resolution URL.
+            # v0.7.34: capture the queued plugin URL alongside the
+            # resolved path. Kodi's playlist keeps the original queued
+            # URL accessible via ``pl[pos].getPath()`` during playback,
+            # even though ``getPlayingFile()`` returns the post-
+            # resolution URL.
+            queued_url = ""
             try:
                 pl = xbmc.PlayList(xbmc.PLAYLIST_VIDEO)
                 pos = pl.getposition()
                 if 0 <= pos < pl.size():
-                    queued_url = pl[pos].getPath()
-                    if queued_url and "slug=" in queued_url:
-                        self.current_queued_plugin_url = queued_url
+                    queued_url = pl[pos].getPath() or ""
             except Exception as exc:
                 _safe_log(
                     f"_TVPlayer.onAVStarted: queued URL capture failed "
                     f"err={exc!r}"
                 )
+                queued_url = ""
+            if queued_url and "slug=" in queued_url:
+                self.current_queued_plugin_url = queued_url
             internal = _is_internal_advance(cur, self.queued_paths)
-            if not internal:
-                # Production fallback: playvid RESOLVES the queued
-                # plugin URL into a localhost proxy URL before onAVStarted
-                # fires, so the queued_paths set never contains the
-                # actually-playing path. Detect tier-internal advances
-                # via playlist coherence: if the playlist size equals
-                # what we queued AND position is valid AND the path is
-                # one of our localhost proxies, it's internal. User
-                # direct-play replaces the playlist (size=1), so this
-                # heuristic still fires takeover on real takeovers.
-                try:
-                    pl = xbmc.PlayList(xbmc.PLAYLIST_VIDEO)
-                    pl_size = pl.size()
-                    pl_pos = pl.getposition()
-                except Exception:
-                    pl_size = pl_pos = -1
-                if (cur.startswith("http://127.0.0.1:")
-                        and self.queued_paths
-                        and pl_size == len(self.queued_paths)
-                        and 0 <= pl_pos < pl_size):
-                    internal = True
+            if not internal and queued_url and queued_url in self.queued_paths:
+                # ``cur`` is the post-resolution URL (a localhost proxy
+                # URL the playvid resolver swapped in), so it never
+                # appears in ``queued_paths``. But Kodi keeps the
+                # original queued plugin URL accessible via
+                # ``pl[pos].getPath()`` -- if THAT URL is one we queued,
+                # this is an internal advance, not a takeover.
+                #
+                # v0.7.40 fix: replaced a size-equality fallback (
+                # ``pl_size == len(queued_paths)``) that misclassified
+                # takeovers as internal whenever the queued tier had
+                # exactly one model: 1 == 1 collides with the user's
+                # one-item direct-play replacement. Comparing the queued
+                # URL directly is insensitive to playlist size and
+                # cleanly separates "ours" from "theirs."
+                internal = True
             if self.tracked_file is None:
                 self.tracked_file = cur
                 _safe_log(
