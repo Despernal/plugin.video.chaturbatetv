@@ -112,30 +112,27 @@ _ABS_SEG_URI_RE = re.compile(
 
 
 def _redact_url(url: str) -> str:
-    """Drop secret-looking query values before they hit a log line.
+    """Strip the query string + fragment before a URL hits a log line.
 
-    Chaturbate's master URL carries a single-use JWT in ``?token=...``
-    and a few other parameters that uniquely identify the session. We
-    don't want any of those persisting in a user-readable log on disk,
-    so this function rewrites the value of any sensitive key to
-    ``REDACTED``.
+    v0.7.39 (audit pass #5 HIGH, agent 2): pre-fix, this redacted a
+    fixed allowlist of 5 keys ({token, sig, session, auth, key}).
+    The audit found Akamai/CloudFront/Chaturbate URLs use many more
+    secret-bearing params: ``hdnts, hdnea, Expires, Signature,
+    Policy, KeyPair-Id, nonce, psch, pkey, csrf, bearer,
+    access_token, refresh_token``. Maintaining a growing keyset is
+    whack-a-mole. Inverted rule: log only ``scheme://host/path`` and
+    drop the query + fragment entirely. Loses some debuggability but
+    makes the logger never-leaks-a-secret by construction.
+
+    Path segments aren't redacted (e.g. Akamai's
+    ``.../hdnts=exp~hmac=.../seg.m4s`` would still log the path),
+    but the typical CB/mmcdn/highwebmedia URLs keep secrets in the
+    query string only.
     """
     parsed = urlparse(url)
-    if not parsed.query:
+    if not parsed.query and not parsed.fragment:
         return url
-    redacted_keys = {"token", "sig", "session", "auth", "key"}
-    parts = []
-    for kv in parsed.query.split("&"):
-        if "=" in kv:
-            k, v = kv.split("=", 1)
-            if k.lower() in redacted_keys and v:
-                parts.append(f"{k}=REDACTED")
-            else:
-                parts.append(kv)
-        else:
-            parts.append(kv)
-    redacted_qs = "&".join(parts)
-    return parsed._replace(query=redacted_qs).geturl()
+    return parsed._replace(query="", fragment="").geturl()
 
 
 def _log(msg: str) -> None:
@@ -475,7 +472,25 @@ def _fetch(url: str, headers: dict[str, str],
     Returns ``(body_bytes, content_type)``. Some mmcdn edges send gzip
     without ``Content-Encoding`` set, so we also detect by magic bytes
     (eb7785c).
+
+    v0.7.39 (audit pass #5 HIGH, agent 2): URL is host-allowlisted
+    against ``cb_endpoints.is_trusted_url`` BEFORE urlopen. This is
+    the SSRF defense that blocks /segment?url=file:///etc/shadow,
+    blocks LAN pivots via /segment?url=http://192.168.1.1/admin, and
+    blocks file:// schemes that would otherwise be honoured by
+    urllib's default opener. Untrusted URLs raise ValueError so the
+    caller (handler / refresh / harvest) treats it like any other
+    fetch failure.
     """
+    from resources.lib.cb_endpoints import is_trusted_url
+    if not is_trusted_url(url):
+        # Use _redact_url so a crafted query-string secret doesn't
+        # leak into the rejection log line.
+        _log(
+            f"_fetch: REJECTED untrusted URL "
+            f"safe={_redact_url(url)!r}"
+        )
+        raise ValueError(f"untrusted URL host: {urlparse(url).hostname!r}")
     req = Request(url, headers=headers)  # noqa: S310 - chaturbate edge URL
     with urlopen(req, timeout=timeout) as resp:  # noqa: S310 - chaturbate edge URL
         raw: bytes = resp.read()

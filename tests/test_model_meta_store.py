@@ -396,29 +396,29 @@ def test_image_for_row_prefers_image_url() -> None:
     last_image_url_legacy is the per-gender API's ``img`` field which
     may be a smaller / thumbnail-only URL."""
     row = {
-        "last_image_url": "https://example.com/full.jpg",
-        "last_image_url_thumb": "https://example.com/thumb.jpg",
-        "last_image_url_legacy": "https://example.com/legacy.jpg",
+        "last_image_url": "https://thumb.live.mmcdn.com/ri/full.jpg",
+        "last_image_url_thumb": "https://thumb.live.mmcdn.com/ri/thumb.jpg",
+        "last_image_url_legacy": "https://thumb.live.mmcdn.com/ri/legacy.jpg",
     }
-    assert mms.image_for_row(row) == "https://example.com/full.jpg"
+    assert mms.image_for_row(row) == "https://thumb.live.mmcdn.com/ri/full.jpg"
 
 
 def test_image_for_row_falls_back_to_thumb() -> None:
     row = {
         "last_image_url": None,
-        "last_image_url_thumb": "https://example.com/thumb.jpg",
+        "last_image_url_thumb": "https://thumb.live.mmcdn.com/ri/thumb.jpg",
         "last_image_url_legacy": None,
     }
-    assert mms.image_for_row(row) == "https://example.com/thumb.jpg"
+    assert mms.image_for_row(row) == "https://thumb.live.mmcdn.com/ri/thumb.jpg"
 
 
 def test_image_for_row_falls_back_to_legacy() -> None:
     row = {
         "last_image_url": None,
         "last_image_url_thumb": None,
-        "last_image_url_legacy": "https://example.com/legacy.jpg",
+        "last_image_url_legacy": "https://thumb.live.mmcdn.com/ri/legacy.jpg",
     }
-    assert mms.image_for_row(row) == "https://example.com/legacy.jpg"
+    assert mms.image_for_row(row) == "https://thumb.live.mmcdn.com/ri/legacy.jpg"
 
 
 def test_image_for_row_returns_none_when_all_missing() -> None:
@@ -1032,11 +1032,52 @@ def test_image_for_row_cached_url_still_wins() -> None:
     static synth -- it's the freshest live capture available."""
     row = {
         "slug": "alice",
-        "last_image_url": "https://example.com/cached.jpg",
-        "photo_set_cover_url": "https://example.com/cover.jpg",
+        "last_image_url": "https://thumb.live.mmcdn.com/ri/cached.jpg",
+        "photo_set_cover_url": "https://thumb.live.mmcdn.com/ri/cover.jpg",
         "thumb_available": 1,
     }
-    assert mms.image_for_row(row) == "https://example.com/cached.jpg"
+    assert mms.image_for_row(row) == "https://thumb.live.mmcdn.com/ri/cached.jpg"
+
+
+def test_image_for_row_drops_untrusted_host() -> None:
+    """v0.7.39 (audit pass #5 MEDIUM): a malicious biocontext could
+    land a non-CB URL in last_image_url (e.g.,
+    http://192.168.1.1:8088/admin or file:///etc/passwd). Kodi's image
+    cache would happily fetch it. Drop untrusted hosts -- caller
+    renders without thumb instead."""
+    row = {
+        "slug": "alice",
+        # Untrusted: not in CB allowlist
+        "last_image_url": "http://192.168.1.1:8088/admin",
+        # Also untrusted
+        "photo_set_cover_url": "file:///etc/passwd",
+        # No thumb_available so we don't fall through to synth.
+    }
+    assert mms.image_for_row(row) is None
+
+
+def test_image_for_row_drops_untrusted_then_synthesizes_when_available() -> None:
+    """If the cached URLs are untrusted but thumb_available=1 with a
+    valid slug, we still fall through to the synthesized URL (which
+    is hardcoded https://thumb.live.mmcdn.com/ri/<slug>.jpg)."""
+    row = {
+        "slug": "alice",
+        "last_image_url": "javascript:alert(1)",
+        "thumb_available": 1,
+    }
+    assert mms.image_for_row(row) == "https://thumb.live.mmcdn.com/ri/alice.jpg"
+
+
+def test_image_for_row_synth_skipped_for_path_traversal_slug() -> None:
+    """v0.7.39 belt-and-suspenders: if a slug somehow contains path
+    traversal chars (`/`, `..`), the synth URL is skipped. Slugs
+    should already be alphanum-validated upstream but defense in
+    depth."""
+    row = {
+        "slug": "../../etc/passwd",
+        "thumb_available": 1,
+    }
+    assert mms.image_for_row(row) is None
 
 
 def test_plot_for_offline_row_renders_last_broadcast_line() -> None:

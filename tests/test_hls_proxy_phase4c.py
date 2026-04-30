@@ -83,7 +83,35 @@ def _make_stub_handler(state: _StubState) -> type[BaseHTTPRequestHandler]:
 
 
 @pytest.fixture
-def stub_cdn() -> Iterator[tuple[str, _StubState]]:
+def stub_cdn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[tuple[str, _StubState]]:
+    """Stub upstream "CDN" that listens on 127.0.0.1.
+
+    v0.7.39: the production SSRF guard in ``hls_proxy._fetch``
+    rejects 127.0.0.1 URLs. Tests stand up a real listener on
+    loopback, so we monkey-patch ``cb_endpoints.is_trusted_url`` to
+    accept loopback for the test scope. The SSRF guard itself is
+    exercised by dedicated tests in test_hls_proxy_phase4c that
+    feed crafted URLs to ``_fetch`` directly without this fixture.
+    """
+    from resources.lib import cb_endpoints
+    real_is_trusted = cb_endpoints.is_trusted_url
+
+    def _test_is_trusted(url: str) -> bool:
+        # Accept localhost for the in-test stub CDN; production hosts
+        # still go through the real check.
+        from urllib.parse import urlparse
+        try:
+            host = (urlparse(url).hostname or "").lower()
+        except (ValueError, TypeError):
+            return real_is_trusted(url)
+        if host in ("127.0.0.1", "localhost"):
+            return True
+        return real_is_trusted(url)
+
+    monkeypatch.setattr(cb_endpoints, "is_trusted_url", _test_is_trusted)
+
     state = _StubState()
     server = ThreadingHTTPServer(("127.0.0.1", 0), _make_stub_handler(state))
     host, port = server.server_address[0], server.server_address[1]
@@ -1147,14 +1175,77 @@ def test_master_uri_quoted_chunklists_routed_through_proxy(
 # --------------------------------------------------------------------------- #
 
 
-def test_log_redacts_token_query_string() -> None:
-    """If a URL carrying ``?token=...`` ends up in a log line, the
-    token MUST be redacted before write so we don't leak single-use
-    JWTs into the user-readable log file.
+def test_fetch_rejects_untrusted_url_with_value_error() -> None:
+    """v0.7.39 (audit pass #5 HIGH, agent 2): the SSRF defense that
+    closes the localhost-proxy ``/segment?url=`` attack. _fetch
+    rejects any URL whose host isn't in the cb_endpoints CB allowlist
+    BEFORE urlopen runs. ValueError lets the caller treat it like
+    any other fetch failure (handlers fall back to cache or 502)."""
+    from resources.lib import hls_proxy
+    import pytest
+
+    for bad in (
+        "file:///etc/shadow",
+        "http://192.168.1.1/cgi-bin/admin",
+        "ftp://chaturbate.com/secret",
+        "javascript:alert(1)",
+        "http://localhost:8088/internal",
+    ):
+        with pytest.raises(ValueError, match="untrusted URL"):
+            hls_proxy._fetch(bad, headers={})
+
+
+def test_log_redacts_query_string_entirely() -> None:
+    """v0.7.39 (audit pass #5 HIGH, agent 2): _redact_url now strips
+    the entire query + fragment instead of allowlist-redacting
+    specific keys. Inverted rule: anything past the path is presumed
+    secret. Maintenance-free against future Akamai/CloudFront tokens
+    (hdnts, Signature, KeyPair-Id, etc.) that the previous allowlist
+    didn't cover.
     """
     from resources.lib.hls_proxy import _redact_url
 
     s = "https://edge42.live.mmcdn.com/hls/abc/master.m3u8?token=SECRET&q=2"
     out = _redact_url(s)
     assert "SECRET" not in out
-    assert "token=" in out  # key remains, value redacted
+    assert "token=" not in out, (
+        f"v0.7.39 inversion: query string should be GONE, got {out!r}"
+    )
+    # scheme + host + path preserved for debug context.
+    assert out == "https://edge42.live.mmcdn.com/hls/abc/master.m3u8"
+
+
+def test_log_redact_strips_akamai_token_in_query() -> None:
+    """Future-proof: Akamai's hdnts / hdnea / Signature / Policy /
+    KeyPair-Id and similar -- the v0.7.39 inversion catches them all
+    by definition since EVERY query param is dropped."""
+    from resources.lib.hls_proxy import _redact_url
+
+    s = (
+        "https://cdn.example.com/hls/x/seg.m4s"
+        "?hdnts=exp=1234~hmac=DEADBEEF~acl=/foo&"
+        "Signature=AKIA-MORESECRET&Expires=99999"
+    )
+    out = _redact_url(s)
+    for secret in ("DEADBEEF", "AKIA-MORESECRET", "exp=", "hmac="):
+        assert secret not in out, (
+            f"secret-looking token {secret!r} leaked into {out!r}"
+        )
+
+
+def test_log_redact_strips_url_fragment() -> None:
+    """Some CDN URLs put session info in the fragment too. Drop it."""
+    from resources.lib.hls_proxy import _redact_url
+
+    s = "https://cdn.example.com/hls/x/seg.m4s#session=ABCDEF"
+    out = _redact_url(s)
+    assert "ABCDEF" not in out
+    assert "#" not in out
+
+
+def test_log_redact_passes_through_url_with_no_query_or_fragment() -> None:
+    """No-op for clean URLs."""
+    from resources.lib.hls_proxy import _redact_url
+
+    s = "https://chaturbate.com/alice/"
+    assert _redact_url(s) == s

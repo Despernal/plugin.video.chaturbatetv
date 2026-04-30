@@ -48,23 +48,39 @@ _FetchFn = Callable[..., str]
 def _default_fetch(url: str, body: bytes | None = None,
                    headers: dict[str, str] | None = None,
                    method: str = "GET", timeout: float = 15.0) -> str:
-    """Stdlib urllib fetcher. Imported lazily so unit tests never touch network."""
+    """Stdlib urllib fetcher. Imported lazily so unit tests never touch network.
+
+    v0.7.39 (audit pass #5 HIGH, agent 2): all URL log lines route
+    through ``hls_proxy._redact_url`` to strip query strings before
+    they hit cb_feature.log. Pre-fix, any future caller passing a
+    JWT-bearing URL (CDN sessions, signed Akamai tokens) would leak
+    the secret into a world-readable log file.
+    """
     from urllib.request import Request, urlopen
 
     from resources.lib import logger
+    from resources.lib.hls_proxy import _redact_url
 
-    logger._log(f"cb_client._default_fetch: {method} {url} body_len={len(body) if body else 0}")
+    safe_url = _redact_url(url)
+    logger._log(
+        f"cb_client._default_fetch: {method} {safe_url} "
+        f"body_len={len(body) if body else 0}"
+    )
     req = Request(url, data=body, headers=headers or {}, method=method)  # noqa: S310
     try:
         with urlopen(req, timeout=timeout) as resp:  # noqa: S310
             raw: bytes = resp.read()
             status = getattr(resp, "status", None)
     except Exception as exc:
-        logger._log(f"cb_client._default_fetch: FAIL {method} {url} err={exc!r}")
+        logger._log(
+            f"cb_client._default_fetch: FAIL {method} {safe_url} "
+            f"err={exc!r}"
+        )
         raise
     text = raw.decode("utf-8", errors="replace")
     logger._log(
-        f"cb_client._default_fetch: OK {method} {url} status={status} bytes={len(raw)}"
+        f"cb_client._default_fetch: OK {method} {safe_url} "
+        f"status={status} bytes={len(raw)}"
     )
     return text
 
@@ -144,9 +160,22 @@ def fetch_biocontext(slug: str) -> dict[str, Any]:
     headers["Accept"] = "application/json"
     headers["Cookie"] = "cb_legacy=1; agreeterms=1"
     req = Request(url, headers=headers, method="GET")  # noqa: S310
+    # v0.7.39 (audit pass #5 LOW, agent 3): cap the body to defend
+    # against a malicious / MitM'd biocontext returning multi-MB
+    # payloads that fill the model_meta DB (bio_full_json is stored
+    # verbatim in sqlite). 256 KB is ~5x what a real biocontext is
+    # (~50 KB max observed); anything larger is hostile.
+    _BIOCONTEXT_MAX_BYTES = 256 * 1024
     try:
         with urlopen(req, timeout=12.0) as resp:  # noqa: S310
-            raw: bytes = resp.read()
+            raw: bytes = resp.read(_BIOCONTEXT_MAX_BYTES + 1)
+            if len(raw) > _BIOCONTEXT_MAX_BYTES:
+                logger._log(
+                    f"cb_client.fetch_biocontext: BODY_TOO_LARGE "
+                    f"slug={slug!r} bytes>{_BIOCONTEXT_MAX_BYTES}; "
+                    f"refusing to parse"
+                )
+                return {}
     except urllib.error.HTTPError as exc:
         logger._log(
             f"cb_client.fetch_biocontext: FAIL slug={slug!r} err={exc!r}"
@@ -159,7 +188,7 @@ def fetch_biocontext(slug: str) -> dict[str, Any]:
         return {}
     try:
         data = json.loads(raw.decode("utf-8", errors="replace"))
-    except (json.JSONDecodeError, ValueError):
+    except (json.JSONDecodeError, ValueError, RecursionError):
         logger._log(
             f"cb_client.fetch_biocontext: NON_JSON slug={slug!r} bytes={len(raw)}"
         )
@@ -268,12 +297,16 @@ def fetch_browse_page(url: str, fetch_func: _FetchFn | None = None) -> str:
     if not url:
         raise ValueError("fetch_browse_page requires a non-empty url")
     from resources.lib import logger
-    logger._log(f"cb_client.fetch_browse_page: url={url}")
+    from resources.lib.hls_proxy import _redact_url
+    safe_url = _redact_url(url)
+    logger._log(f"cb_client.fetch_browse_page: url={safe_url}")
     fetch = _resolved(fetch_func)
     headers = dict(HTTP_HEADERS_IPAD)
     headers["Referer"] = "https://chaturbate.com/"
     body = fetch(url, body=None, headers=headers, method="GET")
-    logger._log(f"cb_client.fetch_browse_page: url={url} bytes={len(body)}")
+    logger._log(
+        f"cb_client.fetch_browse_page: url={safe_url} bytes={len(body)}"
+    )
     return body
 
 

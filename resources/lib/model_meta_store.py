@@ -286,6 +286,33 @@ def _tags_to_json_or_none(v: Any) -> str | None:
     return json.dumps([str(t) for t in v])
 
 
+def _strip_bbcode(s: Any) -> str:
+    """Defang BBCode markup in a CB-controlled string before it lands
+    in a Kodi plot / label / dialog.
+
+    v0.7.39 (audit pass #5 MEDIUM, agent 1): biocontext fields
+    (real_name, about_me, wish_list_html, social_medias, last_subject,
+    tag entries) are CB-controlled and may contain `[`, `]` characters
+    that break out of our `[COLOR XXXXXXXX]...[/COLOR]` wrapping or
+    inject `[B]/[I]/[CR]/[BR]/[LIGHT]/[LOWERCASE]` / nested `[COLOR]`
+    markup. Worst case: a model with `about_me = "[/COLOR][COLOR
+    FFff0000]CLICK https://evil[/COLOR]"` impersonates the addon's
+    theme and renders attacker-styled text. Slightly worse: a row
+    with broken close-tags renders as a blank label (Lesson 4
+    territory).
+
+    Replace `[` with `(` and `]` with `)` so the BBCode parser sees
+    no markers. Lossy but bounded; users will see "(B)bold(/B)" as
+    literal text instead of rendering bold. The trade is correctness
+    over fidelity.
+
+    None / non-str -> "".
+    """
+    if not isinstance(s, str):
+        return ""
+    return s.replace("[", "(").replace("]", ")")
+
+
 def _normalize_status(raw: Any) -> str | None:
     """Lowercase + strip a raw status string. Empty / None -> None so
     the COALESCE upsert preserves any existing non-null value rather
@@ -838,17 +865,30 @@ def image_for_row(row: dict[str, Any]) -> str | None:
 
     Returns None if nothing is available so the caller can omit the
     image instead of feeding Kodi an empty path.
+
+    v0.7.39 (audit pass #5 MEDIUM, agent 1): each candidate URL is
+    host-allowlisted via cb_endpoints.is_trusted_url before being
+    returned. Pre-fix, a malicious biocontext field could land an
+    ``http://192.168.1.1:8088/admin`` URL which Kodi's image cache
+    would happily fetch (LAN pivot via Kodi's network identity) or
+    a ``file:///...`` URL pointing at user-private data. Now any
+    non-CB URL is dropped silently and the caller renders without a
+    thumb.
     """
+    from resources.lib.cb_endpoints import is_trusted_url
     for key in ("last_image_url", "last_image_url_thumb",
                 "last_image_url_legacy", "photo_set_cover_url"):
         v = row.get(key)
-        if v:
+        if v and is_trusted_url(str(v)):
             return str(v)
     # Synthesize the static canonical URL when deep refresh confirmed
     # the thumbnail still resolves. Requires a slug.
     if row.get("thumb_available") == 1:
         slug = row.get("slug")
-        if slug:
+        # Only build the synthesized URL if slug is alphanum (defense
+        # against a slug like `../foo` that could escape the path,
+        # though urllib normalizes /..  -- belt and suspenders).
+        if slug and isinstance(slug, str) and slug.replace("_", "").replace(".", "").isalnum():
             return f"https://thumb.live.mmcdn.com/ri/{slug}.jpg"
     return None
 
@@ -913,22 +953,22 @@ def plot_for_offline_row(row: dict[str, Any], now: float | int | None = None) ->
     """
     parts: list[str] = []
 
-    subject = row.get("last_subject")
+    subject = _strip_bbcode(row.get("last_subject"))
     if subject:
-        parts.append(str(subject))
+        parts.append(subject)
     else:
         # v0.7.24: when no broadcast subject is cached but we have a
         # real_name from biocontext, surface that as the heading line
         # so the offline plot doesn't read empty.
-        real_name = row.get("real_name")
+        real_name = _strip_bbcode(row.get("real_name"))
         if real_name:
-            parts.append(str(real_name))
+            parts.append(real_name)
 
     age = row.get("age")
     if age:
         parts.append(f"[COLOR FF00d4ff]Age:[/COLOR] {age}")
 
-    location = row.get("location")
+    location = _strip_bbcode(row.get("location"))
     if location:
         parts.append(f"[COLOR FF00d4ff]Location:[/COLOR] {location}")
 
@@ -961,7 +1001,7 @@ def plot_for_offline_row(row: dict[str, Any], now: float | int | None = None) ->
     elif row.get("last_broadcast_human"):
         parts.append(
             f"[COLOR FF00d4ff]Last broadcast:[/COLOR] "
-            f"{row['last_broadcast_human']}"
+            f"{_strip_bbcode(row['last_broadcast_human'])}"
         )
 
     # v0.7.24: when the deep refresh has touched a slug, render
@@ -978,7 +1018,7 @@ def plot_for_offline_row(row: dict[str, Any], now: float | int | None = None) ->
                 f"[COLOR FF00d4ff]Verified:[/COLOR] {verified_label}"
             )
 
-    status = (row.get("last_room_status") or "").strip()
+    status = _strip_bbcode((row.get("last_room_status") or "").strip())
     if status:
         # Banned / deleted / gone get the warning red so the user sees
         # at a glance which favs aren't coming back. Other statuses
@@ -997,7 +1037,10 @@ def plot_for_offline_row(row: dict[str, Any], now: float | int | None = None) ->
         except (TypeError, ValueError):
             tags = None
         if isinstance(tags, list) and tags:
-            tag_str = ", ".join(f"#{t}" for t in tags)
+            # v0.7.39: defang BBCode in each tag (CB-controlled).
+            tag_str = ", ".join(
+                f"#{_strip_bbcode(str(t))}" for t in tags
+            )
             parts.append(f"[COLOR FF00ff88]{tag_str}[/COLOR]")
 
     return "\n".join(parts)
@@ -1034,7 +1077,7 @@ def bio_field_entries(
             "",
         ))
 
-    location = row.get("location")
+    location = _strip_bbcode(row.get("location"))
     if location:
         entries.append((
             f"[COLOR FF00d4ff]Location:[/COLOR] {location}",
@@ -1083,8 +1126,8 @@ def bio_field_entries(
                 "",
             ))
 
-    body_type = row.get("bio_body_type")
-    decorations = row.get("bio_body_decorations")
+    body_type = _strip_bbcode(row.get("bio_body_type"))
+    decorations = _strip_bbcode(row.get("bio_body_decorations"))
     if body_type or decorations:
         body_bits = [s for s in (body_type, decorations) if s]
         entries.append((
@@ -1092,7 +1135,7 @@ def bio_field_entries(
             "",
         ))
 
-    smoke_drink = row.get("bio_smoke_drink")
+    smoke_drink = _strip_bbcode(row.get("bio_smoke_drink"))
     if smoke_drink:
         entries.append((
             f"[COLOR FF00d4ff]Smoke / Drink:[/COLOR] {smoke_drink}",
@@ -1108,9 +1151,8 @@ def bio_field_entries(
             "",
         ))
 
-    wish = row.get("bio_wish_list_html")
-    if wish:
-        wish_str = str(wish)
+    wish_str = _strip_bbcode(row.get("bio_wish_list_html"))
+    if wish_str:
         # Truncate the label so it fits one line; full text lives in
         # the plot for hover preview, and the textviewer-on-click
         # always shows everything.
@@ -1120,9 +1162,8 @@ def bio_field_entries(
             wish_str,
         ))
 
-    about = row.get("bio_about_html")
-    if about:
-        about_str = str(about)
+    about_str = _strip_bbcode(row.get("bio_about_html"))
+    if about_str:
         snippet = about_str if len(about_str) <= 80 else about_str[:77] + "..."
         entries.append((
             f"[COLOR FF00d4ff]About:[/COLOR] {snippet}",
@@ -1140,8 +1181,8 @@ def bio_field_entries(
             for s in socials:
                 if not isinstance(s, dict):
                     continue
-                plat = (s.get("platform") or "").strip()
-                handle = (s.get("url_or_handle") or "").strip()
+                plat = _strip_bbcode((s.get("platform") or "").strip())
+                handle = _strip_bbcode((s.get("url_or_handle") or "").strip())
                 if plat and handle:
                     chunks.append(f"{plat} {handle}")
                 elif plat:
@@ -1156,7 +1197,12 @@ def bio_field_entries(
                     joined,
                 ))
 
-    status = (row.get("last_room_status") or "").strip()
+    # last_room_status is normalized lowercase enum from a known set;
+    # _STATUS_GONE / _STATUS_BROADCASTING_NON_PUBLIC keys are all
+    # alphanum so no BBCode breakout risk -- but defang anyway in case
+    # a future enum value or an attacker-MitM'd biocontext slips a
+    # `[` past _normalize_status.
+    status = _strip_bbcode((row.get("last_room_status") or "").strip())
     if status:
         status_color = ("FFff8080" if status.lower() in _STATUS_GONE
                         else "FF00d4ff")
@@ -1198,16 +1244,18 @@ def bio_full_plot_for_view_info(
     """
     parts: list[str] = []
 
-    subject = row.get("last_subject")
+    # v0.7.39: defang BBCode in every CB-controlled string before
+    # interpolation into [COLOR XXXXXXXX]...[/COLOR] format strings.
+    subject = _strip_bbcode(row.get("last_subject"))
     if subject:
-        parts.append(str(subject))
+        parts.append(subject)
     else:
-        real_name = row.get("real_name")
+        real_name = _strip_bbcode(row.get("real_name"))
         if real_name:
-            parts.append(str(real_name))
+            parts.append(real_name)
 
-    sex = row.get("bio_sex")
-    subgender = row.get("bio_subgender")
+    sex = _strip_bbcode(row.get("bio_sex"))
+    subgender = _strip_bbcode(row.get("bio_subgender"))
     if sex or subgender:
         sex_parts = [s for s in (sex, subgender) if s]
         parts.append(
@@ -1218,7 +1266,7 @@ def bio_full_plot_for_view_info(
     if age:
         parts.append(f"[COLOR FF00d4ff]Age:[/COLOR] {age}")
 
-    location = row.get("location")
+    location = _strip_bbcode(row.get("location"))
     if location:
         parts.append(f"[COLOR FF00d4ff]Location:[/COLOR] {location}")
 
@@ -1246,7 +1294,7 @@ def bio_full_plot_for_view_info(
     elif row.get("last_broadcast_human"):
         parts.append(
             f"[COLOR FF00d4ff]Last broadcast:[/COLOR] "
-            f"{row['last_broadcast_human']}"
+            f"{_strip_bbcode(row['last_broadcast_human'])}"
         )
 
     check_epoch = row.get("last_status_check_epoch")
@@ -1259,15 +1307,15 @@ def bio_full_plot_for_view_info(
                 f"[COLOR FF00d4ff]Verified:[/COLOR] {verified_label}"
             )
 
-    body_type = row.get("bio_body_type")
-    decorations = row.get("bio_body_decorations")
+    body_type = _strip_bbcode(row.get("bio_body_type"))
+    decorations = _strip_bbcode(row.get("bio_body_decorations"))
     if body_type or decorations:
         body_bits = [s for s in (body_type, decorations) if s]
         parts.append(
             f"[COLOR FF00d4ff]Body:[/COLOR] {', '.join(body_bits)}"
         )
 
-    smoke_drink = row.get("bio_smoke_drink")
+    smoke_drink = _strip_bbcode(row.get("bio_smoke_drink"))
     if smoke_drink:
         parts.append(
             f"[COLOR FF00d4ff]Smoke / Drink:[/COLOR] {smoke_drink}"
@@ -1279,11 +1327,11 @@ def bio_full_plot_for_view_info(
         cost_str = f"{fc_cost} tokens" if fc_cost > 0 else "yes"
         parts.append(f"[COLOR FF00d4ff]Fan club:[/COLOR] {cost_str}")
 
-    wish_list = row.get("bio_wish_list_html")
+    wish_list = _strip_bbcode(row.get("bio_wish_list_html"))
     if wish_list:
         parts.append(f"[COLOR FF00d4ff]Wish list:[/COLOR] {wish_list}")
 
-    about = row.get("bio_about_html")
+    about = _strip_bbcode(row.get("bio_about_html"))
     if about:
         parts.append(f"[COLOR FF00d4ff]About:[/COLOR] {about}")
 
@@ -1298,8 +1346,8 @@ def bio_full_plot_for_view_info(
             for s in socials:
                 if not isinstance(s, dict):
                     continue
-                plat = (s.get("platform") or "").strip()
-                handle = (s.get("url_or_handle") or "").strip()
+                plat = _strip_bbcode((s.get("platform") or "").strip())
+                handle = _strip_bbcode((s.get("url_or_handle") or "").strip())
                 if plat and handle:
                     chunks.append(f"{plat} {handle}")
                 elif plat:
@@ -1311,7 +1359,7 @@ def bio_full_plot_for_view_info(
                     f"[COLOR FF00d4ff]Social:[/COLOR] {', '.join(chunks)}"
                 )
 
-    status = (row.get("last_room_status") or "").strip()
+    status = _strip_bbcode((row.get("last_room_status") or "").strip())
     if status:
         status_color = ("FFff8080" if status.lower() in _STATUS_GONE
                         else "FF00d4ff")
@@ -1326,7 +1374,9 @@ def bio_full_plot_for_view_info(
         except (TypeError, ValueError):
             tags = None
         if isinstance(tags, list) and tags:
-            tag_str = ", ".join(f"#{t}" for t in tags)
+            tag_str = ", ".join(
+                f"#{_strip_bbcode(str(t))}" for t in tags
+            )
             parts.append(f"[COLOR FF00ff88]{tag_str}[/COLOR]")
 
     return "\n".join(parts)

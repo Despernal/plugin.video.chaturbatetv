@@ -1683,17 +1683,57 @@ def test_show_picture_invokes_kodi_builtin(
     """v0.7.27: clicking a photo_set entry fires the show_picture
     handler which calls xbmc.executebuiltin('ShowPicture(<url>)')
     so Kodi opens the cover in its fullscreen picture viewer.
+
+    v0.7.39: URL must be on a trusted CB host (allowlist defense
+    against ShowPicture builtin injection from a malicious cover_url).
     """
     actions = _import()
     actions.show_picture(
         handle=-1,
-        url="https://static-pub.example.com/cover.jpg",
+        url="https://static-pub.highwebmedia.com/cover.jpg",
     )
     bcalls = kodi_mocks["xbmc"].executebuiltin.call_args_list
     cmds = [str(c.args[0]) if c.args else "" for c in bcalls]
     assert any("ShowPicture(" in c
                and "cover.jpg" in c for c in cmds), (
         f"expected ShowPicture(<url>) builtin, got: {cmds!r}"
+    )
+
+
+def test_show_picture_rejects_untrusted_host(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """v0.7.39 (audit pass #5 HIGH, agent 1): a malicious biocontext
+    could publish a photo_set with cover_url pointing at an internal
+    LAN service or a file:// scheme. ShowPicture would happily open
+    the local file in Kodi's picture viewer (info disclosure) or hit
+    the LAN service. Allowlist rejects everything not on a CB host."""
+    actions = _import()
+    actions.show_picture(handle=-1, url="http://192.168.1.1:8088/admin")
+    bcalls = kodi_mocks["xbmc"].executebuiltin.call_args_list
+    cmds = [str(c.args[0]) if c.args else "" for c in bcalls]
+    assert not any("ShowPicture(" in c for c in cmds), (
+        f"untrusted host should NOT fire ShowPicture: {cmds!r}"
+    )
+
+
+def test_show_picture_rejects_url_with_builtin_breakout_char(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """v0.7.39: even a trusted-host URL gets rejected if it contains
+    `)` or `,` (the chars that would break out of the
+    ShowPicture builtin). Belt-and-braces defense."""
+    actions = _import()
+    actions.show_picture(
+        handle=-1,
+        # CB-host URL with crafted ')' that would close ShowPicture(
+        # and let a follow-up builtin run.
+        url="https://thumb.live.mmcdn.com/ri/a.jpg),Quit,XBMC.ShowPicture(",
+    )
+    bcalls = kodi_mocks["xbmc"].executebuiltin.call_args_list
+    cmds = [str(c.args[0]) if c.args else "" for c in bcalls]
+    assert not any("ShowPicture(" in c for c in cmds), (
+        f"URL with ')' must be rejected: {cmds!r}"
     )
 
 

@@ -159,7 +159,7 @@ def parse_affiliate_onlinerooms(
         raw_body = payload
         try:
             payload = json.loads(raw_body)
-        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        except (TypeError, ValueError, json.JSONDecodeError, RecursionError) as exc:
             # v0.7.38 (audit pass #4 HIGH #3): log a snippet of the
             # body so Cloudflare interstitials, rate-limit HTML, and
             # login redirects are diagnosable. Pre-fix the failure
@@ -206,7 +206,7 @@ def parse_roomlist(payload: dict[str, Any] | str | bytes) -> RoomListPage:
         raw_body = payload
         try:
             payload = json.loads(raw_body)
-        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        except (TypeError, ValueError, json.JSONDecodeError, RecursionError) as exc:
             # v0.7.38: snippet logging so Cloudflare HTML / rate-
             # limit pages / login redirects are diagnosable.
             snippet = _payload_snippet(raw_body)

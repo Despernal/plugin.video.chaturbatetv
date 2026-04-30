@@ -12,12 +12,49 @@ our public API and translated to ``offset = (page - 1) * limit``.
 """
 from __future__ import annotations
 
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 from resources.lib.cb_models import Gender
 
 
 BASE_URL = "https://chaturbate.com"
+
+# v0.7.39 (audit pass #5 HIGH, agents 1+2): allowlist of host suffixes
+# the addon trusts as legitimate Chaturbate / mmcdn / highwebmedia
+# origins. Used by hls_proxy._fetch (SSRF defense), addon_actions.
+# show_picture (ShowPicture builtin sandbox), and model_meta_store.
+# image_for_row (Kodi image cache sandbox). Anything outside this
+# list -- file:///, ftp://, javascript:, data:, http://localhost:,
+# http://192.168.x.x -- gets rejected before it hits a network or
+# Kodi sink.
+TRUSTED_HOST_SUFFIXES = (
+    "chaturbate.com",
+    "mmcdn.com",
+    "highwebmedia.com",
+)
+
+
+def is_trusted_url(url: str) -> bool:
+    """Return True iff ``url`` is an http/https URL whose host ends
+    with one of our trusted Chaturbate-CDN suffixes. Guards against
+    file:///, javascript:, ftp://, http://localhost, LAN pivots, and
+    any other non-CB host. Empty / unparseable -> False.
+    """
+    if not url:
+        return False
+    try:
+        parsed = urlparse(url)
+    except (ValueError, TypeError):
+        return False
+    if parsed.scheme not in ("http", "https"):
+        return False
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return False
+    return any(
+        host == suffix or host.endswith("." + suffix)
+        for suffix in TRUSTED_HOST_SUFFIXES
+    )
 ROOMLIST_API = f"{BASE_URL}/api/ts/roomlist/room-list/"
 ONLINEROOMS_AFFILIATE_API = f"{BASE_URL}/affiliates/api/onlinerooms/"
 DOSSIER_AJAX = f"{BASE_URL}/get_edge_hls_url_ajax/"

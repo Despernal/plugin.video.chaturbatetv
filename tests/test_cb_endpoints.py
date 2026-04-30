@@ -184,3 +184,62 @@ def test_room_url_empty_raises() -> None:
 def test_room_url_whitespace_only_raises() -> None:
     with pytest.raises(ValueError):
         room_url("   ")
+
+
+# --------------------------------------------------------------------------- #
+# v0.7.39 (audit pass #5 HIGH): is_trusted_url -- the host-allowlist
+# helper used by hls_proxy._fetch (SSRF defense), addon_actions.
+# show_picture (ShowPicture builtin sandbox), and model_meta_store.
+# image_for_row (Kodi image cache sandbox).
+# --------------------------------------------------------------------------- #
+
+
+def test_is_trusted_url_accepts_chaturbate_apex() -> None:
+    from resources.lib.cb_endpoints import is_trusted_url
+    assert is_trusted_url("https://chaturbate.com/api/foo")
+
+
+def test_is_trusted_url_accepts_subdomains_of_trusted_apex() -> None:
+    from resources.lib.cb_endpoints import is_trusted_url
+    assert is_trusted_url("https://edge42.live.mmcdn.com/hls/abc/master.m3u8")
+    assert is_trusted_url("https://thumb.live.mmcdn.com/ri/alice.jpg")
+    assert is_trusted_url("https://static-pub.highwebmedia.com/cover.jpg")
+
+
+def test_is_trusted_url_rejects_file_scheme() -> None:
+    from resources.lib.cb_endpoints import is_trusted_url
+    assert not is_trusted_url("file:///etc/shadow")
+    assert not is_trusted_url(
+        "file:///storage/.kodi/userdata/passwords.xml"
+    )
+
+
+def test_is_trusted_url_rejects_ftp_javascript_data_schemes() -> None:
+    from resources.lib.cb_endpoints import is_trusted_url
+    assert not is_trusted_url("ftp://chaturbate.com/foo")
+    assert not is_trusted_url("javascript:alert(1)")
+    assert not is_trusted_url("data:text/html,<script>")
+
+
+def test_is_trusted_url_rejects_lan_pivots() -> None:
+    """The LAN-pivot SSRF that the localhost HLS proxy guards against."""
+    from resources.lib.cb_endpoints import is_trusted_url
+    assert not is_trusted_url("http://127.0.0.1:8088/admin")
+    assert not is_trusted_url("http://192.168.1.1/cgi-bin/admin")
+    assert not is_trusted_url("http://192.168.1.1:8088/")
+    assert not is_trusted_url("http://localhost/")
+
+
+def test_is_trusted_url_rejects_lookalike_hosts() -> None:
+    """Common SSRF bypass attempts: substring/lookalike domains."""
+    from resources.lib.cb_endpoints import is_trusted_url
+    # Suffix check -- not a substring match.
+    assert not is_trusted_url("https://evil-chaturbate.com.attacker.tld/")
+    # Different TLD with same prefix.
+    assert not is_trusted_url("https://chaturbate.com.attacker.tld/")
+
+
+def test_is_trusted_url_rejects_empty_or_unparseable() -> None:
+    from resources.lib.cb_endpoints import is_trusted_url
+    assert not is_trusted_url("")
+    assert not is_trusted_url("not-a-url")

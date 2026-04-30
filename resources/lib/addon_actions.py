@@ -9,6 +9,7 @@ public Chaturbate endpoints without authentication.
 """
 from __future__ import annotations
 
+import re
 import threading
 from pathlib import Path
 from typing import Any
@@ -56,6 +57,26 @@ def _notify(heading: str, msg: str) -> None:
         return
 
 
+# v0.7.39 (audit pass #5 LOW, agent 1+3): slugs come from CB JSON
+# AND from ctxmenu URLs (which can be crafted by skins/scripts on the
+# same Kodi). Chaturbate's actual slug rule is alphanumeric +
+# underscore/dot up to ~32 chars. Reject early at every verb entry
+# point so a crafted slug can't reach a string-format URL builder
+# (CRLF injection into Referer), a [B]<name>[/B] dialog (BBCode
+# breakout), or any future code path that interpolates the slug into
+# a filesystem path.
+_VALID_SLUG_RE = re.compile(r"^[A-Za-z0-9_.]{1,64}$")
+
+
+def _is_valid_slug(slug: str) -> bool:
+    """Return True iff the slug matches CB's alphanum+underscore+dot
+    shape. Empty string and None return False; the verbs that need to
+    distinguish "missing" from "invalid" check both."""
+    if not slug:
+        return False
+    return bool(_VALID_SLUG_RE.match(slug))
+
+
 # --------------------------------------------------------------------------- #
 # Favorites verbs
 # --------------------------------------------------------------------------- #
@@ -77,6 +98,10 @@ def fav_add(handle: int, slug: str = "", name: str = "",
     if not slug:
         logger._log("fav_add: missing slug, abort")
         _notify("Chaturbate TV", "Add to favorites: missing slug")
+        return
+    if not _is_valid_slug(slug):
+        logger._log(f"fav_add: invalid slug shape {slug!r}, abort")
+        _notify("Chaturbate TV", "Add to favorites: invalid slug")
         return
     path = store_path if store_path is not None else _favs_path()
     fav = Favorite(
@@ -128,19 +153,27 @@ def fav_remove(handle: int, slug: str = "",
 
 
 def search(handle: int, **_params: Any) -> None:  # pragma: no cover - thin Kodi shim
-    """Prompt the user for a query, then run search_view with it."""
+    """Prompt the user for a query, then run search_view with it.
+
+    v0.7.39 (audit pass #5 MEDIUM, agent 1): the previous f-string
+    interpolation of ``query`` straight into ``Container.Update(...)``
+    let a query containing ``)`` or ``,`` break out of the builtin
+    parser. ``urlencode`` percent-escapes the value so the builtin
+    sees it as a single literal query-string token. Mirrors the
+    pattern every other Container.Update / RunPlugin builder in the
+    codebase already follows.
+    """
     try:
         import xbmc
         import xbmcgui
     except ImportError:
         return
+    from urllib.parse import urlencode
     query = xbmcgui.Dialog().input("Chaturbate Search", "")
     if not query:
         return
-    cmd = (
-        f"Container.Update(plugin://plugin.video.chaturbatetv/?"
-        f"mode=search&query={query})"
-    )
+    qs = urlencode({"mode": "search", "query": query})
+    cmd = f"Container.Update(plugin://plugin.video.chaturbatetv/?{qs})"
     xbmc.executebuiltin(cmd)
 
 
@@ -164,6 +197,9 @@ def playvid(handle: int, slug: str = "", name: str = "",
     if not slug:
         logger._log("playvid: missing slug, abort")
         _notify("Chaturbate TV", "Play: missing slug")
+        return
+    if not _is_valid_slug(slug):
+        logger._log(f"playvid: invalid slug shape {slug!r}, abort")
         return
 
     from resources.lib import playvid_resolver
@@ -465,6 +501,9 @@ def refresh_one_model(
     if not slug:
         logger._log("refresh_one_model: empty slug, skipping")
         return
+    if not _is_valid_slug(slug):
+        logger._log(f"refresh_one_model: invalid slug shape {slug!r}, skipping")
+        return
 
     logger._log(f"refresh_one_model: starting for slug={slug!r}")
     from resources.lib import model_meta_store as mms
@@ -564,6 +603,13 @@ def view_model_info(
     slug = (slug or "").strip()
     if not slug:
         logger._log("view_model_info: empty slug, closing directory")
+        _close_directory_handle(handle)
+        return
+    if not _is_valid_slug(slug):
+        logger._log(
+            f"view_model_info: invalid slug shape {slug!r}, "
+            f"closing directory"
+        )
         _close_directory_handle(handle)
         return
 
@@ -749,6 +795,12 @@ def show_profile(
         logger._log("show_profile: empty slug, closing")
         _close_directory_handle(handle)
         return
+    if not _is_valid_slug(slug):
+        logger._log(
+            f"show_profile: invalid slug shape {slug!r}, closing"
+        )
+        _close_directory_handle(handle)
+        return
 
     logger._log(f"show_profile: slug={slug!r}")
 
@@ -795,12 +847,36 @@ def show_picture(
     viewer via the ShowPicture builtin. Used by photo_set entries to
     surface the cover (the only public image we have for paywalled
     sets) at full resolution on click.
+
+    v0.7.39 (audit pass #5 HIGH, agent 1): the URL is host-allowlisted
+    AND has any ``)``, ``,``, or control chars rejected before being
+    interpolated into the ShowPicture builtin. Pre-fix, a malicious
+    cover_url with a `)` could break out of the builtin and chain
+    another command (Quit, file:// read, etc.). Defense in depth:
+    even if a future code path skipped the URL allowlist, the
+    builtin-injection guard would still block the breakout.
     """
     from resources.lib import logger
+    from resources.lib.cb_endpoints import is_trusted_url
 
     url = (url or "").strip()
     if not url:
         logger._log("show_picture: empty url, closing")
+        _close_directory_handle(handle)
+        return
+    if not is_trusted_url(url):
+        logger._log(
+            "show_picture: REJECTED untrusted URL host "
+            "(scheme/netloc not in CB allowlist)"
+        )
+        _close_directory_handle(handle)
+        return
+    if any(c in url for c in (")", ",", "\n", "\r")):
+        # Belt-and-braces: even an https://*.mmcdn.com URL with a
+        # crafted `)` would break out of ShowPicture(). Reject.
+        logger._log(
+            "show_picture: REJECTED URL with builtin-syntax char"
+        )
         _close_directory_handle(handle)
         return
 
@@ -1629,6 +1705,10 @@ def tv_add(handle: int, slug: str = "", name: str = "",
     from resources.lib import file_lock, logger
     if not slug:
         _notify("Chaturbate TV", "Add to TV: missing slug")
+        return
+    if not _is_valid_slug(slug):
+        logger._log(f"addon_actions.tv_add: invalid slug shape {slug!r}")
+        _notify("Chaturbate TV", "Add to TV: invalid slug")
         return
     path = store_path if store_path is not None else _tv_path()
     target_url = url or f"https://chaturbate.com/{slug}/"

@@ -70,8 +70,32 @@ def _make_stub_handler(state: _StubState) -> type[BaseHTTPRequestHandler]:
 
 
 @pytest.fixture
-def stub_cdn() -> Iterator[tuple[str, _StubState]]:
-    """Run a stub HTTP server on 127.0.0.1:<random> and yield its base URL."""
+def stub_cdn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[tuple[str, _StubState]]:
+    """Run a stub HTTP server on 127.0.0.1:<random> and yield its base URL.
+
+    v0.7.39: production SSRF guard rejects 127.0.0.1; tests
+    monkey-patch ``cb_endpoints.is_trusted_url`` to accept loopback
+    for the test scope (real production hosts still go through the
+    real check). The SSRF guard itself is exercised by dedicated
+    tests in test_hls_proxy_phase4c.
+    """
+    from resources.lib import cb_endpoints
+    real_is_trusted = cb_endpoints.is_trusted_url
+
+    def _test_is_trusted(url: str) -> bool:
+        from urllib.parse import urlparse
+        try:
+            host = (urlparse(url).hostname or "").lower()
+        except (ValueError, TypeError):
+            return real_is_trusted(url)
+        if host in ("127.0.0.1", "localhost"):
+            return True
+        return real_is_trusted(url)
+
+    monkeypatch.setattr(cb_endpoints, "is_trusted_url", _test_is_trusted)
+
     state = _StubState()
     handler = _make_stub_handler(state)
     server = HTTPServer(("127.0.0.1", 0), handler)
