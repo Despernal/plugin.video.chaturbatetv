@@ -730,6 +730,7 @@ def tv_play(
     poll_seconds = max(60, poll_minutes * 60)
 
     consecutive_errors = 0
+    consecutive_stalls = 0
     iter_count = 0
     # Captured by the finally block to fire the right exit-confirmation
     # notification. Assigned before each return statement.
@@ -883,6 +884,10 @@ def tv_play(
                 # v0.7.41 stall watchdog state (see tv_classify.is_progress_stalled).
                 stall_last_pos: float | None = None
                 stall_last_at: float = 0.0
+                # v0.7.42 diagnostics: log the moment a stream first starts
+                # advancing so we can tell "never decoded" from "decoded
+                # then froze" in the post-mortem.
+                logged_first_advance = False
                 while player.isPlaying():
                     if not _should_continue():
                         final_reason = "aborted"
@@ -917,6 +922,7 @@ def tv_play(
                         cur_pos = 0.0
                         is_paused = False
                     now_ts = time.time()
+                    prev_last_pos = stall_last_pos
                     stalled, stall_last_pos, stall_last_at = (
                         tv_classify.is_progress_stalled(
                             cur_position=cur_pos,
@@ -927,12 +933,26 @@ def tv_play(
                             elapsed_in_inner_loop=float(elapsed),
                         )
                     )
+                    # v0.7.42 diagnostic: log the moment getTime() first
+                    # crosses past zero. Tells us "stream actually started
+                    # decoding" vs "live HLS getTime stuck at 0 forever"
+                    # in post-mortem.
+                    if (not logged_first_advance
+                            and prev_last_pos is not None
+                            and cur_pos > 0.1):
+                        logged_first_advance = True
+                        _safe_log(
+                            f"tv_loop.tv_play: iter={iter_count} "
+                            f"first-advance getTime()={cur_pos:.2f}s "
+                            f"(elapsed={elapsed}s); stall watchdog now armed"
+                        )
                     if stalled:
                         stuck_for = now_ts - stall_last_at
                         _safe_log(
                             f"tv_loop.tv_play: iter={iter_count} STALL "
                             f"detected (getTime() stuck at {cur_pos:.1f}s "
-                            f"for {stuck_for:.0f}s past grace); firing stop"
+                            f"for {stuck_for:.0f}s past grace, "
+                            f"is_paused={is_paused}); firing stop"
                         )
                         player.stall_detected = True
                         try:
@@ -1061,15 +1081,86 @@ def tv_play(
                     # may legitimately be 0 (user just sat down) or high
                     # (left the room), and either should rotate, not
                     # exit.
-                    _safe_log(
-                        f"tv_loop.tv_play: iter={iter_count} "
-                        f"stall_detected -> rotate to next iter"
+                    #
+                    # v0.7.42: also mark the stalled slug offline in the
+                    # bulk-live cache so the next pick_target picks a
+                    # DIFFERENT model. Pre-fix, a single-model tier
+                    # whose stream was wedged would re-pick the same
+                    # slug forever, firing "Stream stalled" toasts in a
+                    # tight loop. Bulk refresh re-adds the slug in
+                    # ~10min if Chaturbate's edge recovers.
+                    consecutive_stalls += 1
+                    queued_path = ""
+                    try:
+                        pl = xbmc.PlayList(xbmc.PLAYLIST_VIDEO)
+                        pos = pl.getposition()
+                        size = pl.size()
+                        if 0 <= pos < size:
+                            queued_path = pl[pos].getPath()
+                    except Exception as exc:
+                        _safe_log(
+                            f"tv_loop.tv_play: stall queued-path read "
+                            f"FAIL err={exc!r}"
+                        )
+                        queued_path = ""
+                    stall_slug, fallback_used = _resolve_silent_stub_slug(
+                        queued_path, player.queued_paths,
                     )
+                    if stall_slug:
+                        try:
+                            from resources.lib import addon_actions as _aa
+                            _aa._tv_bulk_mark_offline(stall_slug)
+                            _safe_log(
+                                f"tv_loop.tv_play: iter={iter_count} "
+                                f"stall_detected slug={stall_slug!r}"
+                                + (" (queued_paths fallback)"
+                                   if fallback_used else "")
+                                + f"; marked offline in bulk-live cache "
+                                f"(consecutive_stalls={consecutive_stalls}/5)"
+                            )
+                        except Exception as exc:
+                            _safe_log(
+                                f"tv_loop.tv_play: stall mark FAIL "
+                                f"slug={stall_slug!r} err={exc!r}"
+                            )
+                    else:
+                        _safe_log(
+                            f"tv_loop.tv_play: iter={iter_count} "
+                            f"stall_detected but couldn't extract slug "
+                            f"from queued_path={queued_path!r} or "
+                            f"queued_paths={player.queued_paths!r} "
+                            f"(consecutive_stalls={consecutive_stalls}/5)"
+                        )
+                    if consecutive_stalls >= 5:
+                        # Circuit breaker: if 5 stalls fire back-to-back
+                        # across iters, every model in our reach is
+                        # stalling. Network is broken or Chaturbate is
+                        # rejecting our edge connections. Stop spinning
+                        # and let the user investigate.
+                        _safe_log(
+                            f"tv_loop.tv_play: {consecutive_stalls} "
+                            f"consecutive stalls, exiting TV mode"
+                        )
+                        try:
+                            xbmcgui.Dialog().notification(
+                                "Chaturbate TV",
+                                "Many streams stalling - exiting TV mode",
+                                xbmcgui.NOTIFICATION_WARNING, 5000,
+                            )
+                        except Exception:  # noqa: S110 - best-effort
+                            pass
+                        final_reason = "stalls_exhausted"
+                        return final_reason
                 elif player.user_stopped:
+                    consecutive_stalls = 0  # healthy stop resets the counter
                     decision = _classify_after_stop(player, is_live_func)
                     if decision == "user_stopped":
                         final_reason = "user_stopped"
                         return final_reason
+                else:
+                    # Natural end / takeover already handled higher up;
+                    # any clean iter-end resets the stall counter.
+                    consecutive_stalls = 0
                 consecutive_errors = 0
                 if monitor.waitForAbort(1):
                     final_reason = "aborted"

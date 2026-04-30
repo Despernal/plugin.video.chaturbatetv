@@ -119,6 +119,17 @@ def is_progress_stalled(
     upstream). Without watching ``getTime()``, the loop spins forever
     on a frozen frame.
 
+    v0.7.42 false-positive fix: live HLS streams in Kodi+ISA frequently
+    keep ``getTime()`` pinned at 0.0 for the entire playback session
+    (the stream has no defined seek window or ISA reports the LL-HLS
+    position as 0). Pre-fix, the v0.7.41 watchdog couldn't tell those
+    healthy live streams from a wedged decoder and false-positived
+    every model_e-style live session, killing playback the user was
+    actively watching. The fix: only fire stall after we've seen the
+    position advance past zero. The "never advanced" case is left to
+    the proxy's reconnect-and-give-up path (5 attempts, ~10s) which
+    handles the "no segments ever served" branch separately.
+
     Caller threads ``last_position`` and ``last_advance_at`` across calls.
     Returns ``(stalled, new_last_position, new_last_advance_at)``.
 
@@ -130,6 +141,10 @@ def is_progress_stalled(
     - **First sample** (``last_position is None``): seed both, no stall.
     - **Position advanced** (>0.1s tolerance, accounts for fp jitter):
       refresh both, no stall.
+    - **Position never advanced past zero** (``last_position <= 0.1``):
+      we can't distinguish a frozen decoder from a live HLS whose
+      seek-window getTime() is intrinsically 0. Don't fire; defer to
+      the proxy's segment-fetch reconnect logic.
     - **Position unchanged AND past grace AND no advance for
       stall_seconds**: flag stalled.
 
@@ -143,6 +158,11 @@ def is_progress_stalled(
     if cur_position > last_position + 0.1:
         return (False, cur_position, now)
     # Position hasn't advanced.
+    if last_position <= 0.1:
+        # Never seen progress -- live-HLS-with-zero-getTime case, indistinguishable
+        # from frozen decoder. Don't false-positive; the proxy handles
+        # the never-served-a-segment path.
+        return (False, last_position, last_advance_at)
     if elapsed_in_inner_loop < grace_seconds:
         return (False, last_position, last_advance_at)
     stalled = (now - last_advance_at) >= stall_seconds

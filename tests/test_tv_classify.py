@@ -320,7 +320,10 @@ def test_progress_stalled_floating_point_jitter_tolerance() -> None:
 
 
 def test_progress_stalled_custom_thresholds() -> None:
-    """Caller can pass tighter thresholds for tests or aggressive setups."""
+    """Caller can pass tighter thresholds for tests or aggressive setups.
+    Position has advanced past 0 first so the never-advanced guard doesn't
+    short-circuit."""
+    # First seed with cur=10, then test stuck-at-10 with custom thresholds.
     stalled, _, _ = is_progress_stalled(
         cur_position=10.0,
         last_position=10.0,
@@ -330,5 +333,63 @@ def test_progress_stalled_custom_thresholds() -> None:
         elapsed_in_inner_loop=6.0,
         grace_seconds=2.0,
         stall_seconds=5.0,
+    )
+    assert stalled is True
+
+
+def test_progress_stalled_never_advanced_past_zero_does_not_fire() -> None:
+    """v0.7.42 regression: live HLS streams in Kodi+ISA frequently keep
+    ``getTime()`` pinned at 0.0 even while playing fine. The user reported
+    the v0.7.41 watchdog killing model_e's live stream as a false positive
+    -- she was actively watching the playback when the stall toast fired.
+
+    The fix: only fire stall once we've seen ``last_position`` move past
+    zero. A position that never advanced past 0 is indistinguishable from
+    a healthy live LL-HLS where the seek window's reference time is 0.
+    The proxy's reconnect-and-give-up path (5 attempts, ~10s) covers the
+    genuinely-no-segments-served case separately.
+    """
+    stalled, last_pos, last_at = is_progress_stalled(
+        cur_position=0.0,
+        last_position=0.0,
+        last_advance_at=100.0,
+        is_paused=False,
+        now=200.0,  # 100s past last_advance, far past any stall threshold
+        elapsed_in_inner_loop=120.0,  # well past grace
+    )
+    assert stalled is False
+    # State preserved so a later actual advance will start a fresh window.
+    assert last_pos == 0.0
+    assert last_at == 100.0
+
+
+def test_progress_stalled_zero_then_advance_then_stuck_does_fire() -> None:
+    """Once the position has crossed past zero (stream actually decoded
+    something), a subsequent stuck-window MUST fire stall. This is the
+    original ProcessMoof-corrupt-CMAF case: 17 minutes of clean playback,
+    decoder freezes at position ~1020, getTime stays at 1020 forever.
+    """
+    stalled, _, _ = is_progress_stalled(
+        cur_position=1020.0,
+        last_position=1020.0,
+        last_advance_at=100.0,
+        is_paused=False,
+        now=125.0,  # 25s of no advance, past stall=20s
+        elapsed_in_inner_loop=1100.0,  # well past grace
+    )
+    assert stalled is True
+
+
+def test_progress_stalled_tiny_nonzero_position_can_fire() -> None:
+    """Boundary: position juuust past the 0.1 threshold (first decoded
+    frame would be at ~0.04s for some codecs, but >0.1 is the line)
+    must qualify as "we saw progress" so a subsequent freeze fires."""
+    stalled, _, _ = is_progress_stalled(
+        cur_position=0.5,
+        last_position=0.5,
+        last_advance_at=100.0,
+        is_paused=False,
+        now=125.0,
+        elapsed_in_inner_loop=130.0,
     )
     assert stalled is True
