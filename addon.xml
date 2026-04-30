@@ -30,7 +30,7 @@
 
 (4) **urlencode the search query** in ``addon_actions.search``. Pre-fix, a query containing ``)`` or ``,`` would break out of the ``Container.Update`` builtin and let a follow-up command run.
 
-(5) **`_is_valid_slug`** regex (`[A-Za-z0-9_.]{1,64}`) at every slug-receiving entry point that mutates state or renders BBCode (fav_add, tv_add, playvid, refresh_one_model, view_model_info, show_profile). Reject early so a crafted slug can't reach a ``[B]<name>[/B]`` dialog (BBCode breakout) or interpolate CRLF into a Referer header (request smuggling, currently blocked by stdlib but defense in depth).
+(5) **`_is_valid_slug`** regex (`[A-Za-z0-9_.]{1,64}`) at every slug-receiving entry point that mutates state or renders BBCode (fav_add, tv_add, playvid, refresh_one_model, view_model_info, show_profile). Reject early so a crafted slug can't reach a ``[B]NAME[/B]`` dialog (BBCode breakout) or interpolate CRLF into a Referer header (request smuggling, currently blocked by stdlib but defense in depth).
 
 (6) **`RecursionError` catch + biocontext body-size cap (256 KB)**. Pre-fix, an adversarial deeply-nested JSON could raise RecursionError and crash a TV-loop iter; an oversized biocontext body could be stored verbatim in the DB (disk-fill DoS via the ``bio_full_json`` column).
 
