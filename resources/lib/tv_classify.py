@@ -97,3 +97,53 @@ def decide_after_stop(
     if idle_at_stop < 3 and model_live:
         return False
     return True
+
+
+def is_progress_stalled(
+    *,
+    cur_position: float,
+    last_position: float | None,
+    last_advance_at: float,
+    is_paused: bool,
+    now: float,
+    elapsed_in_inner_loop: float,
+    grace_seconds: float = 10.0,
+    stall_seconds: float = 20.0,
+) -> tuple[bool, float | None, float]:
+    """Detect a player whose ``getTime()`` position has stopped advancing.
+
+    v0.7.41: caught the ISA-side decoder freeze that was invisible to the
+    inner monitor loop. ``isPlaying()`` returns True while the player
+    thread is alive even if ISA can't decode any segment (e.g.,
+    ``ProcessMoof: Cannot get TRAF atom`` on a corrupt CMAF fragment from
+    upstream). Without watching ``getTime()``, the loop spins forever
+    on a frozen frame.
+
+    Caller threads ``last_position`` and ``last_advance_at`` across calls.
+    Returns ``(stalled, new_last_position, new_last_advance_at)``.
+
+    Decision rules:
+
+    - **Paused**: defer the timer (no penalty for paused time). Position
+      stays put, but ``last_advance_at`` is bumped to ``now`` so on
+      resume the player gets a fresh grace window.
+    - **First sample** (``last_position is None``): seed both, no stall.
+    - **Position advanced** (>0.1s tolerance, accounts for fp jitter):
+      refresh both, no stall.
+    - **Position unchanged AND past grace AND no advance for
+      stall_seconds**: flag stalled.
+
+    The grace period covers initial buffering where ``getTime()`` may
+    stay at 0 for several seconds before the demuxer produces a sample.
+    """
+    if is_paused:
+        return (False, last_position, now)
+    if last_position is None:
+        return (False, cur_position, now)
+    if cur_position > last_position + 0.1:
+        return (False, cur_position, now)
+    # Position hasn't advanced.
+    if elapsed_in_inner_loop < grace_seconds:
+        return (False, last_position, last_advance_at)
+    stalled = (now - last_advance_at) >= stall_seconds
+    return (stalled, last_position, last_advance_at)

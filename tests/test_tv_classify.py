@@ -12,6 +12,7 @@ from resources.lib.tv_classify import (
     decide_after_stop,
     is_internal_advance,
     is_natural_playlist_end,
+    is_progress_stalled,
 )
 
 
@@ -176,3 +177,158 @@ def test_decide_after_stop_default_idle_zero() -> None:
 def test_decide_after_stop_negative_idle_treated_as_zero() -> None:
     """Defensive: negative idle (Kodi shouldn't return this) is still a real user stop."""
     assert decide_after_stop(user_stopped=True, model_live=True, idle_at_stop=-1) is False
+
+
+# --------------------------------------------------------------------------- #
+# is_progress_stalled (v0.7.41) - watches getTime() to detect ISA-side
+# decoder stalls that don't surface as onPlayBackStopped events.
+# --------------------------------------------------------------------------- #
+
+
+def test_progress_stalled_first_sample_seeds_state() -> None:
+    """No prior position: seed last_position to current and last_advance_at
+    to now, no stall fires regardless of elapsed."""
+    stalled, last_pos, last_at = is_progress_stalled(
+        cur_position=0.0,
+        last_position=None,
+        last_advance_at=0.0,
+        is_paused=False,
+        now=100.0,
+        elapsed_in_inner_loop=999.0,  # even past grace, no stall on first call
+    )
+    assert stalled is False
+    assert last_pos == 0.0
+    assert last_at == 100.0
+
+
+def test_progress_stalled_advancing_position_resets_timer() -> None:
+    """Position advanced (>0.1s tolerance): refresh both counters, no stall."""
+    stalled, last_pos, last_at = is_progress_stalled(
+        cur_position=12.5,
+        last_position=10.0,
+        last_advance_at=50.0,
+        is_paused=False,
+        now=53.0,
+        elapsed_in_inner_loop=15.0,
+    )
+    assert stalled is False
+    assert last_pos == 12.5
+    assert last_at == 53.0
+
+
+def test_progress_stalled_within_grace_no_stall() -> None:
+    """Position stuck but we're still in the initial buffering grace
+    window: state preserved, no stall."""
+    stalled, last_pos, last_at = is_progress_stalled(
+        cur_position=0.0,
+        last_position=0.0,
+        last_advance_at=100.0,
+        is_paused=False,
+        now=105.0,  # 5s after the first seed
+        elapsed_in_inner_loop=5.0,  # grace=10s default, still inside
+    )
+    assert stalled is False
+    assert last_pos == 0.0
+    assert last_at == 100.0
+
+
+def test_progress_stalled_past_grace_within_stall_window() -> None:
+    """Position stuck, past grace, but the stuck-window hasn't been long
+    enough yet (default stall=20s)."""
+    stalled, _, _ = is_progress_stalled(
+        cur_position=42.0,
+        last_position=42.0,
+        last_advance_at=100.0,
+        is_paused=False,
+        now=115.0,  # 15s since last advance
+        elapsed_in_inner_loop=30.0,  # past grace
+    )
+    assert stalled is False
+
+
+def test_progress_stalled_past_grace_past_stall_fires() -> None:
+    """Position hasn't advanced for >= stall_seconds while past grace:
+    stalled=True. This is the v0.7.41 ISA-decoder-freeze case."""
+    stalled, _, _ = is_progress_stalled(
+        cur_position=42.0,
+        last_position=42.0,
+        last_advance_at=100.0,
+        is_paused=False,
+        now=121.0,  # 21s of no advance, default stall=20s
+        elapsed_in_inner_loop=30.0,
+    )
+    assert stalled is True
+
+
+def test_progress_stalled_paused_does_not_fire_even_past_window() -> None:
+    """User pause should never fire stall, no matter how long. Defer the
+    advance timer to ``now`` so resume gets a fresh window."""
+    stalled, last_pos, last_at = is_progress_stalled(
+        cur_position=42.0,
+        last_position=42.0,
+        last_advance_at=100.0,
+        is_paused=True,
+        now=200.0,  # 100s paused, far past stall window
+        elapsed_in_inner_loop=120.0,
+    )
+    assert stalled is False
+    assert last_pos == 42.0  # position unchanged
+    assert last_at == 200.0  # timer deferred to now
+
+
+def test_progress_stalled_resume_after_pause_gets_fresh_window() -> None:
+    """After a pause defers the timer, the post-resume sample finds a
+    fresh stall_seconds window, NOT the cumulative pre-pause stuck time.
+    """
+    # Step 1: paused for 60s, timer deferred each tick.
+    _, last_pos, last_at = is_progress_stalled(
+        cur_position=42.0,
+        last_position=42.0,
+        last_advance_at=100.0,
+        is_paused=True,
+        now=160.0,
+        elapsed_in_inner_loop=70.0,
+    )
+    assert last_at == 160.0  # deferred to now
+    # Step 2: now resumed but the stream's still genuinely stuck. The
+    # stall window starts counting from the post-pause defer (160).
+    # 5s of no advance after resume should NOT fire yet.
+    stalled, _, _ = is_progress_stalled(
+        cur_position=42.0,
+        last_position=last_pos,
+        last_advance_at=last_at,
+        is_paused=False,
+        now=165.0,
+        elapsed_in_inner_loop=75.0,
+    )
+    assert stalled is False  # only 5s of post-resume stuck time
+
+
+def test_progress_stalled_floating_point_jitter_tolerance() -> None:
+    """Tiny position deltas (<0.1s) shouldn't count as advances - they're
+    typically Kodi's getTime() rounding noise on a stalled stream."""
+    stalled, last_pos, _last_at = is_progress_stalled(
+        cur_position=42.05,
+        last_position=42.0,
+        last_advance_at=100.0,
+        is_paused=False,
+        now=130.0,  # 30s past last_advance, well past stall=20s
+        elapsed_in_inner_loop=40.0,
+    )
+    assert stalled is True
+    assert last_pos == 42.0  # unchanged - sub-tolerance jitter ignored
+
+
+def test_progress_stalled_custom_thresholds() -> None:
+    """Caller can pass tighter thresholds for tests or aggressive setups."""
+    stalled, _, _ = is_progress_stalled(
+        cur_position=10.0,
+        last_position=10.0,
+        last_advance_at=0.0,
+        is_paused=False,
+        now=6.0,
+        elapsed_in_inner_loop=6.0,
+        grace_seconds=2.0,
+        stall_seconds=5.0,
+    )
+    assert stalled is True

@@ -94,6 +94,14 @@ def _build_player_class() -> type:
             self.user_stopped: bool = False
             self.tracked_file: str | None = None
             self.switched: bool = False
+            # v0.7.41: set by the inner monitor loop's stall watchdog
+            # when ``getTime()`` hasn't advanced for ``stall_seconds``.
+            # Distinct from ``user_stopped`` so the post-loop classify
+            # path can fall through cleanly without prompting "Exit TV
+            # mode?". ISA-decoder freezes (corrupt CMAF, ProcessMoof
+            # TRAF errors) leave ``isPlaying()`` returning True forever,
+            # so the loop needs an out-of-band signal.
+            self.stall_detected: bool = False
             self.idle_at_stop: int = 0
             self.current_playlist_path: str = ""
             # v0.7.34: original slug-bearing plugin URL queued for
@@ -121,6 +129,7 @@ def _build_player_class() -> type:
             self.user_stopped = False
             self.tracked_file = None
             self.switched = False
+            self.stall_detected = False
             self.idle_at_stop = 0
             self.current_playlist_path = ""
             self.current_queued_plugin_url = ""
@@ -871,6 +880,9 @@ def tv_play(
                 step = 5
                 ticks_since_log = 0
                 self_promoted = False
+                # v0.7.41 stall watchdog state (see tv_classify.is_progress_stalled).
+                stall_last_pos: float | None = None
+                stall_last_at: float = 0.0
                 while player.isPlaying():
                     if not _should_continue():
                         final_reason = "aborted"
@@ -892,6 +904,50 @@ def tv_play(
                         return final_reason
                     elapsed += step
                     ticks_since_log += 1
+                    # v0.7.41: stall watchdog. ISA-side decoder freezes
+                    # (corrupt CMAF fragment, "ProcessMoof: Cannot get
+                    # TRAF atom") leave isPlaying() True forever -- the
+                    # outer ``while`` would never exit. Watch getTime()
+                    # and force a stop if the position hasn't advanced
+                    # past the grace + stall window.
+                    try:
+                        cur_pos = float(player.getTime())
+                        is_paused = bool(player.isPaused())
+                    except Exception:
+                        cur_pos = 0.0
+                        is_paused = False
+                    now_ts = time.time()
+                    stalled, stall_last_pos, stall_last_at = (
+                        tv_classify.is_progress_stalled(
+                            cur_position=cur_pos,
+                            last_position=stall_last_pos,
+                            last_advance_at=stall_last_at,
+                            is_paused=is_paused,
+                            now=now_ts,
+                            elapsed_in_inner_loop=float(elapsed),
+                        )
+                    )
+                    if stalled:
+                        stuck_for = now_ts - stall_last_at
+                        _safe_log(
+                            f"tv_loop.tv_play: iter={iter_count} STALL "
+                            f"detected (getTime() stuck at {cur_pos:.1f}s "
+                            f"for {stuck_for:.0f}s past grace); firing stop"
+                        )
+                        player.stall_detected = True
+                        try:
+                            xbmc.executebuiltin("PlayerControl(Stop)")
+                        except Exception:  # noqa: S110 - best-effort
+                            pass
+                        try:
+                            xbmcgui.Dialog().notification(
+                                "Chaturbate TV",
+                                "Stream stalled - moving on",
+                                xbmcgui.NOTIFICATION_INFO, 3000,
+                            )
+                        except Exception:  # noqa: S110 - best-effort
+                            pass
+                        break
                     # Heartbeat every 60s of inner-loop time so a
                     # silenced log = something is wedged. We need
                     # enough breadcrumbs to spot a gap.
@@ -996,7 +1052,20 @@ def tv_play(
                             f"{player.queued_paths!r}"
                         )
 
-                if player.user_stopped:
+                if player.stall_detected:
+                    # v0.7.41: stall watchdog tripped. PlayerControl(Stop)
+                    # fired a synthetic onPlayBackStopped which set
+                    # user_stopped=True; bypass _classify_after_stop so
+                    # we never prompt "Exit TV mode?" on a stall, and
+                    # always fall through to the next outer iter. Idle
+                    # may legitimately be 0 (user just sat down) or high
+                    # (left the room), and either should rotate, not
+                    # exit.
+                    _safe_log(
+                        f"tv_loop.tv_play: iter={iter_count} "
+                        f"stall_detected -> rotate to next iter"
+                    )
+                elif player.user_stopped:
                     decision = _classify_after_stop(player, is_live_func)
                     if decision == "user_stopped":
                         final_reason = "user_stopped"

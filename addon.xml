@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <addon id="plugin.video.chaturbatetv"
        name="Chaturbate TV"
-       version="0.7.40"
+       version="0.7.41"
        provider-name="flux">
     <requires>
         <import addon="xbmc.python" version="3.0.0"/>
@@ -20,7 +20,9 @@
             <icon>icon.png</icon>
             <fanart>fanart.jpg</fanart>
         </assets>
-        <news>0.7.40 - Takeover-detection fix for single-model tiers. When the active TV tier held exactly one model and the user clicked a different model in browse, Kodi replaced the playlist with a one-item one (size=1). The pre-fix takeover-detection fallback was ``pl_size == len(queued_paths)`` -- 1 == 1 -- so the heuristic misclassified the user takeover as an internal advance and TV loop kept running invisibly underneath the user's click. Replaced with a queued-URL match: ``pl[pos].getPath() in queued_paths``, which is insensitive to playlist size and cleanly separates "ours" from "theirs." Net: 729 tests, +2 regression guards. Also: addon.xml now has a manifest-validation test gate so a malformed news entry can't ship green again (cf. v0.7.39 news incident).
+        <news>0.7.41 - Stall watchdog for ISA-side decoder freezes. Pre-fix, a corrupt CMAF fragment from upstream (Chaturbate edge CDN occasionally serves segments where ProcessMoof can't find the TRAF atom) would freeze the inputstream.adaptive decoder while ``xbmc.Player().isPlaying()`` kept returning True. The inner monitor loop heartbeated ``playing=True`` forever on a stuck frame, and Kodi never fired ``onPlayBackStopped`` so TV loop never rotated. Repro: model_e stream, 17 minutes of clean playback, then ProcessMoof TRAF errors at decode time, then dead air. Fix: added ``tv_classify.is_progress_stalled`` (pure function, 9 tests covering the state machine), wired it into the inner monitor loop to watch ``getTime()`` per tick. If position hasn't advanced for 20s past a 10s grace window AND the player isn't paused, fire ``PlayerControl(Stop)``, set ``stall_detected``, and bypass ``_classify_after_stop`` so we always rotate to the next iter (never prompt "Exit TV mode?" on a stall, since idle could be 0 or high and either should mean "rotate"). User sees a "Stream stalled - moving on" notification. Net: 738 tests, +9 stall guards.
+
+0.7.40 - Takeover-detection fix for single-model tiers. When the active TV tier held exactly one model and the user clicked a different model in browse, Kodi replaced the playlist with a one-item one (size=1). The pre-fix takeover-detection fallback was ``pl_size == len(queued_paths)`` -- 1 == 1 -- so the heuristic misclassified the user takeover as an internal advance and TV loop kept running invisibly underneath the user's click. Replaced with a queued-URL match: ``pl[pos].getPath() in queued_paths``, which is insensitive to playlist size and cleanly separates "ours" from "theirs." Net: 729 tests, +2 regression guards. Also: addon.xml now has a manifest-validation test gate so a malformed news entry can't ship green again (cf. v0.7.39 news incident).
 
 0.7.39 - Security fixes from audit pass #5. 21 findings, 5 HIGH, all closed by 6 architectural changes. Net: 723 tests.
 
