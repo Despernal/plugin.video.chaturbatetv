@@ -4,9 +4,9 @@
 
 # plugin.video.chaturbatetv
 
-**A standalone Kodi addon for Chaturbate, with first-class TV mode.**
+**A Kodi addon for Chaturbate, with TV mode.**
 
-[![Tests](https://img.shields.io/badge/tests-538%20passing-00d4ff?style=flat-square)]()
+[![Tests](https://img.shields.io/badge/tests-751%20passing-00d4ff?style=flat-square)]()
 [![Type Safety](https://img.shields.io/badge/mypy-strict-00d4ff?style=flat-square)]()
 [![Lint](https://img.shields.io/badge/ruff-clean-00d4ff?style=flat-square)]()
 [![Kodi](https://img.shields.io/badge/Kodi-Matrix%2B-00d4ff?style=flat-square)]()
@@ -18,10 +18,10 @@
 
 ## What this is
 
-A clean-room Kodi addon for Chaturbate built from scratch. No copy-paste from
-existing addons; original code, full TDD, production-tested on
-LibreELEC. Built for people who want a focused, fast, browse-and-watch
-experience with a real **TV mode** at the center.
+A Kodi addon for Chaturbate. Browse rooms by category, keep a favorites
+list, and run a continuous TV-mode autoplay loop driven by your own
+priority list. Built clean-room from scratch, no copy-paste from other
+addons, full pytest suite.
 
 ## Now for the Fun Part
 
@@ -103,102 +103,158 @@ you can unarchive into your plugins.
 Last but not least it like all of us is not perfect :D so somethings it might need help on or it
 doesn't know better like "you got to do x in addon.xml to make it install some dep like ISA"
 
+## Install
+
+1. Download the repo as a zip from GitHub (the green "Code" button,
+   then "Download ZIP").
+2. In Kodi: Settings -> Add-ons -> Install from zip file. Point at the
+   downloaded zip.
+3. First launch: Kodi will prompt to install `inputstream.adaptive` if
+   it isn't already. Accept.
+4. Open the addon. The first action is auto-discovery of online
+   models, which takes a few seconds the first time.
+
+Tested on:
+
+- Kodi 20 (Nexus) and Kodi 21 (Omega) on LibreELEC.
+- Should work on Kodi 19 (Matrix) and any platform that has Python 3.11+
+  and inputstream.adaptive, but those aren't where it gets daily use.
+
+## Getting started
+
+The TV-mode workflow is the headline. Quick run-through:
+
+1. Browse around (Top Cams, Female, etc.) and find some models you
+   want in rotation.
+2. Right-click a row -> "Add to TV". Pick a priority (1-20). Higher
+   number = higher priority.
+3. Repeat for as many models as you want. Same priority? They'll play
+   as a randomized tier.
+4. From the main menu, hit "Play TV". The loop walks the list, picks
+   the highest-priority live target, plays it. When a higher-priority
+   model comes online during a lower-priority playback, the loop
+   promotes to the higher tier on the next iteration.
+5. Hit Stop on the remote when you're done. A confirm dialog asks
+   whether you actually want to exit (sticky-playback default), so an
+   accidental Stop won't kill the loop.
+
+Day-to-day the TV stays on this addon. The screensaver kicks in if no
+priority model is live and there's no fallback; it bounces a label on a
+black background and re-walks the list periodically until something
+comes online or you dismiss it.
+
 ## Features
 
 ### 📺 TV Mode (the centerpiece)
 
-Build a **priority list** of your favorite models. Hit "Play TV" and the
+Build a priority list of your favorite models. Hit "Play TV" and the
 loop walks the list, picks a live target at the highest priority tier,
 plays it, and promotes to a higher tier when one comes online.
 
-- **Priority-tier playback** — multi-member tiers play as a randomized
-  playlist so the same model doesn't dominate
-- **Idle screensaver** when nothing's live — bouncing HALO-cyan label
-  on a fullscreen black background, periodically re-walks the list
-- **Takeover detection** — manually playing something else releases
-  the loop cleanly
-- **ISA-misfire fallback** — Lesson v2: when ISA fires Stopped on a
+- Multi-member tiers play as a randomized playlist so the same model
+  doesn't dominate.
+- Idle screensaver when nothing's live: bouncing label on a fullscreen
+  black background, periodically re-walks the list.
+- Takeover detection: manually playing something else releases the
+  loop cleanly.
+- ISA-misfire fallback: when inputstream.adaptive fires Stopped on a
   still-online stream, we re-check liveness and fall through instead
-  of exiting the loop
-- **Offline auto-skip** — Lesson v6.1: when a tier member goes offline
-  mid-playlist, fire `Action(Next)` so the player advances
-- **State-reset between iterations** — Lesson 10: every long-lived
-  player property is reset between tier-rebuilds so a stop event in
-  iter N doesn't poison iter N+1
-- **Tier-Next button keeps TV mode running** — Lesson 25: clicking
-  Next in the player to switch between live tier members continues TV
-  mode (was firing TAKEOVER because queued plugin URLs got resolved
-  to localhost proxy URLs before onAVStarted saw them; fixed via
-  playlist-coherence fallback)
-- **Bulk live-set** — TV mode uses the single-call affiliate-onlinerooms
+  of exiting the loop.
+- Offline auto-skip: when a tier member goes offline mid-playlist, the
+  player advances to the next member instead of sitting on a black
+  screen.
+- State-reset between iterations: every long-lived player property
+  resets between tier-rebuilds so a stop event in iter N doesn't
+  poison iter N+1.
+- Tier-Next button keeps TV mode running: clicking Next in the player
+  to switch between live tier members continues TV mode (was firing
+  TAKEOVER because queued plugin URLs got resolved to localhost proxy
+  URLs before onAVStarted saw them).
+- Bulk live-set: TV mode uses the single-call affiliate-onlinerooms
   endpoint (1 fetch per poll cycle, ~7MB body, ~5000 live slugs)
   instead of one AJAX-per-slug. Network failure preserves the stale
-  set so a transient 5xx doesn't mark every model offline
+  set so a transient 5xx doesn't mark every model offline.
+- TTL-bounded session blocklist: a slug caught in private/hidden mode
+  gets temporarily blocked from re-pick (anti-thrash), but expires
+  after 15min so a model who recovers gets re-considered.
+- Stall watchdog: detects ISA-side decoder freezes (corrupt CMAF
+  fragments) by watching getTime() for advancement; fires Stop and
+  rotates to the next iter when a frozen stream is identified.
 
 ### 🌐 Browse + Search + Favorites
 
-- **Browse modes**: Top Cams · New Cams · Female · Male · Couple · Trans · Search
-- **Per-gender toggles** in settings to hide categories you don't want
-- **Local favorites** with paginated Online / Offline split (50/page)
-- **State-aware ctxmenu** — every row's right-click shows the right
-  set of actions: Add to TV / In TV / Edit / Remove · Add to / Remove
-  from Favorites
-- **Online favorites render with thumbnails + plot + viewer count**
-  (single-call affiliate-onlinerooms endpoint, sub-second response)
-- **Offline favorites stay bare** by design — we never poll 1000+
-  slugs to fetch stale metadata
-- **30-second in-memory cache** so paging within a session is instant
+- Browse modes: Top Cams, New Cams, Female, Male, Couple, Trans, Search.
+- Per-gender toggles in settings to hide categories you don't want.
+- Local favorites with paginated Online / Offline split.
+- State-aware right-click menu: every row's ctxmenu shows the right
+  set of actions (Add to TV / In TV / Edit / Remove, Add to / Remove
+  from Favorites).
+- Online favorites render with thumbnails, plot, and viewer count
+  via the single-call affiliate endpoint.
+- Offline favorites render from a local meta DB (model_meta.db)
+  populated on every refresh, so Last seen / Last broadcast / cached
+  thumbnail show even for non-live entries.
+- View info ctxmenu: right-click any model anywhere to drop into a
+  per-field profile pane with everything biocontext returns.
+- 30-second in-memory cache so paging within a session is instant.
 
 ### 🎬 Playback
 
-- **Localhost HLS rewriting proxy** — every layer (master, chunklist,
+- Localhost HLS rewriting proxy: every layer (master, chunklist,
   segments, even LL-HLS RENDITION-REPORT URIs) routes through
-  `127.0.0.1` so ISA always uses our headers
-- **Three-tier segment fallback** — current URL → cached CDN URL →
-  latest known segment URL — keeps the buffer warm during edge rotation
-- **Reconnect watchdog** with cached chunklists during refresh
-- **Single-use JWT redaction** in logs so `?token=...` never persists
-  to disk
-- **Matrix+ ISA properties** — the `inputstream` key, NOT the legacy
-  `inputstreamaddon` (silently broken on Nexus+, would just look like
-  playback was off)
-- **Gzip-aware fetcher** + magic-byte fallback for misconfigured edges
-- **Max resolution cap** — opt-in setting (auto / 1080p / 720p / 480p)
+  127.0.0.1 so ISA always uses our headers.
+- Three-tier segment fallback: current URL, then cached CDN URL,
+  then latest known segment URL. Keeps the buffer warm during edge
+  rotation.
+- Reconnect watchdog with cached chunklists during refresh.
+- Single-use JWT redaction in logs so ?token=... never persists to
+  disk.
+- Matrix+ ISA properties: the inputstream key, NOT the legacy
+  inputstreamaddon (silently broken on Nexus+, would just look like
+  playback was off).
+- Gzip-aware fetcher with magic-byte fallback for misconfigured edges.
+- Max resolution cap: opt-in setting (auto / 1080p / 720p / 480p)
   caps ISA's variant pick. Auto by default; set to 720p on
   buffer-prone hosts to stop ISA upshifting past what the connection
-  can sustain
+  can sustain.
+- Cross-process zombie-proxy guard: when the user picks a different
+  model mid-playback, the old proxy's reconnect-give-up no longer
+  fires PlayerControl(Stop) on the new player.
 
 ### 🛠 Maintenance
 
-- **Refresh artwork** — main-menu entry that walks every
-  `Textures*.db` (Kodi 19/20: v13, Kodi 21+: v14) and clears any
-  cached row whose URL contains the addon ID, plus unlinks the
-  cached file in `Thumbnails/`. Fixes the "icon never updates after
-  a new install" Kodi quirk
-- **Restart Kodi** — main-menu entry that runs
-  `xbmc.executebuiltin('Quit')`. On LibreELEC systemd respawns Kodi
-  automatically, so this is the addon equivalent of
-  `systemctl restart kodi` without ssh access. Clears stuck
-  audio-renderer state from LL-HLS cadence drift
+- Refresh artwork: main-menu entry that walks every Textures*.db
+  (Kodi 19/20: v13, Kodi 21+: v14) and clears any cached row whose
+  URL contains the addon ID, plus unlinks the cached file in
+  Thumbnails/. Fixes the "icon never updates after a new install"
+  Kodi quirk.
+- Restart Kodi: main-menu entry that runs xbmc.executebuiltin('Quit').
+  On LibreELEC systemd respawns Kodi automatically, so this is the
+  addon equivalent of `systemctl restart kodi` without ssh access.
+  Clears stuck audio-renderer state from LL-HLS cadence drift.
+- Refresh offline model info / Deep refresh: rebuilds the meta DB
+  from a fresh affiliate fetch (fast) or per-slug AJAX walk (slow,
+  ~20min for 1000 favs).
 
 ### ⚙️ Settings
 
-- **Debug logging** toggle (writes to
-  `special://temp/chaturbatetv_feature.log`)
-- **TV poll interval** (1–60 minutes)
-- **ISA proxy port** (0 = kernel-assigned; useful for locked-down LANs)
-- **Screensaver color** (cyan / green / hotpink, all 8-char AARRGGBB)
-- **Max resolution** (auto / 1080p / 720p / 480p — caps ISA's variant pick)
-- **Per-gender main-menu visibility** (Female / Male / Couple / Trans)
+- Debug logging toggle (writes to special://temp/chaturbatetv_feature.log).
+- TV poll interval (1-60 minutes).
+- ISA proxy port (0 = kernel-assigned; useful for locked-down LANs).
+- Screensaver color (cyan / green / hotpink, all 8-char AARRGGBB).
+- Max resolution (auto / 1080p / 720p / 480p).
+- Per-gender main-menu visibility (Female / Male / Couple / Trans).
+- Deep refresh rate (1-30 sec/slug; ban-risk dial).
+- Dialog timeout (5-60 sec; how long the exit prompt waits before
+  resuming playback).
 
 ## Quality bar
 
-- **538 tests** all passing (`pytest`, no Kodi required)
-- **mypy --strict** clean across `resources/lib/`
-- **ruff** clean
-- **Pre-commit hook** runs all three on every commit
-- Every regression has a **pinned test** before the fix lands
-- Every non-obvious bug pays for itself once via lessons-learned notes
+- 751 tests all passing (`pytest`, no Kodi required).
+- mypy --strict clean across resources/lib/.
+- ruff clean.
+- Pre-commit hook runs all three on every commit.
+- Every regression has a pinned test before the fix lands.
 
 ## Design pillars
 
@@ -226,20 +282,19 @@ tests/                    pytest test suite
   fixtures/               sample JSON for parser tests
   kodi_mock/              Mock Kodi runtime for offline TV-loop tests
   stubs/                  type stubs for xbmc* modules (mypy --strict)
-tools/                    standalone CLIs (icon-design pipeline, migration)
-PLANNING.md               Phased delivery plan + open issues
+tools/                    standalone CLIs (one-shot migration)
 ```
 
 ## Module map
 
 | Module | Responsibility |
 |---|---|
-| `default.py` | Entry point — dispatches via `router` |
+| `default.py` | Entry point, dispatches via `router` |
 | `resources.lib.router` | Mode dispatch from `sys.argv` |
 | `resources.lib.cb_endpoints` | URL builders (room-list, affiliate-onlinerooms, AJAX status) |
 | `resources.lib.cb_client` | HTTP client (iPad UA, injectable fetch) |
-| `resources.lib.cb_listing` | Pure parser — JSON → `Model` |
-| `resources.lib.cb_resolve` | slug → `Resolution` (live + HLS URL + headers) |
+| `resources.lib.cb_listing` | Pure parser: JSON to `Model` |
+| `resources.lib.cb_resolve` | slug to `Resolution` (live + HLS URL + headers) |
 | `resources.lib.cb_models` | Domain types (`Model`, `Favorite`, `TVEntry`, `Gender`) |
 | `resources.lib.browse_views` | Top / New / Female / Male / Couple / Trans / Search views |
 | `resources.lib.favs_views` | Favorites menu + Online/Offline paginated views |
@@ -249,8 +304,9 @@ PLANNING.md               Phased delivery plan + open issues
 | `resources.lib.tv_state` | Single-source-of-truth for `chaturbatetv_active` |
 | `resources.lib.tv_store` | Atomic `tv.json` read/write |
 | `resources.lib.favs_store` | Atomic `favs.json` read/write |
+| `resources.lib.model_meta_store` | sqlite store + render helpers for offline rows |
 | `resources.lib.hls_proxy` | Localhost rewriting proxy (master + chunklist + segment + RENDITION-REPORT) |
-| `resources.lib.playvid_resolver` | slug → ListItem with ISA props |
+| `resources.lib.playvid_resolver` | slug to ListItem with ISA props |
 | `resources.lib.screensaver` | Idle screensaver Window + bouncing label |
 | `resources.lib.ctxmenu` | State-aware context menu builder |
 | `resources.lib.kodi_helpers` | Thin Kodi UI wrappers |
@@ -272,15 +328,15 @@ disable it.
 
 ## View modes
 
-For best UX, set the view mode to **InfoWall** or **MediaList** in
-Kodi's view-selector when browsing — puts thumbnails on the right and
-the room info on the left.
+For best UX, set the view mode to InfoWall or MediaList in Kodi's
+view-selector when browsing. Puts thumbnails on the right and the room
+info on the left.
 
 ## Migration from cumination
 
-`tools/migrate_from_cumination.py` reads cumination's `tv.json` +
-`favorites.db` + `cookies.lwp` and writes them into chaturbatetv's
-userdata. Idempotent — safe to re-run.
+`tools/migrate_from_cumination.py` reads cumination's `tv.json`,
+`favorites.db`, and `cookies.lwp` and writes them into chaturbatetv's
+userdata. Idempotent: safe to re-run.
 
 ```bash
 python3 tools/migrate_from_cumination.py \
@@ -293,43 +349,63 @@ DBs, and orphaned cookies all fall through gracefully.
 
 ## Status
 
-All phases through 5 are shipped and battle-tested. v0.6.x focused on
-QA + favorites correctness; v0.7.x is the polish pass for tier-Next
-behavior, ISA resolution capping, and user-facing maintenance verbs.
+Phases 1 through 5 plus QA pass and v0.7.x polish are all shipped and
+running on the live install. Followed-cams (login required) is the only
+remaining feature on the conditional list.
 
 | Phase | Status |
 |---|---|
-| 1 — pure modules + tests | ✅ shipped |
-| 2 — browse + favorites + migration | ✅ shipped |
-| 3 — followed-cams stub | ✅ deferred to Phase 7 |
-| 4a — MVP HLS proxy | ✅ shipped |
-| 4b — playvid + ISA props | ✅ shipped |
-| 4c — proxy hardening | ✅ shipped |
-| 5 — TV mode + screensaver + ctxmenus | ✅ shipped |
-| QA pass — CRITICAL/HIGH/MEDIUM/LOW | ✅ shipped |
-| 6 — polish + cutover | ⏳ in progress |
-| 7 — login + followed-cams | ⏸ conditional |
+| 1: pure modules + tests | shipped |
+| 2: browse + favorites + migration | shipped |
+| 3: followed-cams stub | deferred to Phase 7 |
+| 4a: MVP HLS proxy | shipped |
+| 4b: playvid + ISA props | shipped |
+| 4c: proxy hardening | shipped |
+| 5: TV mode + screensaver + ctxmenus | shipped |
+| QA pass: CRITICAL/HIGH/MEDIUM/LOW | shipped |
+| 6: polish + cutover | shipped |
+| 7: login + followed-cams | conditional |
 
 ### Recent ship list
 
 | Version | Headline |
 |---|---|
-| 0.7.1 | `refresh_artwork` walks Textures14.db too (Kodi 21+) |
-| 0.7.0 | Tier-Next button fix · `max_resolution` setting · Refresh artwork + Restart Kodi menu items |
-| 0.6.9 | TV mode bulk affiliate endpoint · hls_proxy race fix · MEDIUM/LOW QA bundle |
-| 0.6.8 | Client-side viewer sort · per-gender toggles |
-| 0.6.7 | Drop disk cache · fix online favs missing thumbnails |
+| 0.7.45 | TTL on silent-stub session blocklist; recovered models get re-considered after 15min |
+| 0.7.44 | Cross-process zombie-proxy guard via getPlayingFile() |
+| 0.7.43 | Zombie-proxy guard for takeover playback |
+| 0.7.42 | Stall watchdog false-positive fix + mark-offline rotation |
+| 0.7.41 | Stall watchdog for ISA-side decoder freezes |
+| 0.7.40 | Takeover detection robust to single-model tiers |
+| 0.7.39 | Security fixes from audit pass #5 + manifest news escape guard |
+| 0.7.38 | Error-handling + resource-leak fixes from audit pass #4 |
+| 0.7.37 | Race-audit fixes (4 architectural changes) |
+| 0.7.36 | Audit pass #3: backfill missing test coverage on critical paths |
+| 0.7.35 | Audit pass: defensive polish in fetch + parser symmetry |
+| 0.7.34 | Browse views show non-public state badges instead of trapping clicks |
+| 0.7.33 | Anti-thrash session blocklist for slugs caught in non-public state |
+| 0.7.32 | Affiliate parser honors current_show; non-public rooms stay out of TV pick |
+| 0.7.30 | Pagination removed from offline favs (single-batch render) |
+| 0.7.29 | Silent-stub mark-offline via queued-paths fallback |
+| 0.7.28 | Last-broadcast Pacific-tz fix; biocontext-404 marks gone; Add-to-TV back-out |
+| 0.7.27 | View info gets per-field directory + working clicks |
+| 0.7.25 | View info ctxmenu + rich profile pane |
+| 0.7.24 | biocontext breakthrough: full public profile JSON via Referer |
+| 0.7.20 | Refresh offline model info menu entry |
+| 0.7.19 | Render offline favs and TV-list rows from cached meta DB |
+| 0.7.18 | Foundation: model_meta.db sqlite store |
+| 0.7.15 | Silent stub for offline-tier playback (no more "playback failed" dialog) |
+| 0.7.13 | Sticky-playback enforcement: Yes/No exit dialog, no double-press gestures |
+| 0.7.10 | TV-mode resilience fix: PlayerControl(Next) + cache invalidation |
+| 0.7.9 | Auto-stop previous proxy + STOP REINFORCED on chunklist failures |
+| 0.7.7 | Terminal-chunklist fix: VOD body + PlayerControl(Stop) |
+| 0.7.6 | TV mode list sorts highest-priority on top |
+| 0.7.0 | Tier-Next button fix; max_resolution setting; Refresh artwork + Restart Kodi menu items |
+| 0.6.9 | TV mode bulk affiliate endpoint; hls_proxy race fix; MEDIUM/LOW QA bundle |
 | 0.6.6 | Single-call affiliate-onlinerooms endpoint |
-| 0.6.5 | Online favs render with thumbnails + plot |
-| 0.6.4 | URGENT: API limit drift fix (`limit=100` cap) |
-| 0.6.3 | Favs pagination · busy-dialog dismiss · log spam reduction |
-| 0.6.2 | HIGH bundle: RENDITION-REPORT URI rewrite · slug-from-URL · migration tolerance |
-| 0.6.1 | CRITICAL bundle: Search wiring · TV-mode offline auto-skip · settings actually read |
+| 0.6.4 | URGENT: API limit drift fix (limit=100 cap) |
 | 0.6.0 | Phase 5 ships: TV mode + screensaver + state-aware ctxmenus |
 
-See [`PLANNING.md`](PLANNING.md) for phase details and
-[`docs/LESSONS-LEARNED.md`](docs/LESSONS-LEARNED.md) for the full
-debugging history.
+See `addon.xml` for the full per-version notes.
 
 ## License
 
