@@ -5,8 +5,8 @@ encode the lessons we've learned the hard way (ISA misfires, double-tap
 stop, takeover detection, natural playlist end). All pure - inputs are
 ints, floats, sets, strings; outputs are bool.
 
-Every classifier here has a corresponding bug story in the 
-TV history; treat them as load-bearing.
+Every classifier here has a corresponding bug story in the TV-mode
+history; treat them as load-bearing.
 """
 from __future__ import annotations
 

@@ -2,7 +2,6 @@
 
 The script:
 
-- Reads cumination's tv.json and writes our tv_store-compatible copy.
 - Reads cumination's favorites.db (sqlite), filters
   ``mode='chaturbate.Playvid'``, strips the [COLOR ...] markup from
   the name, extracts the slug from the URL, and writes via favs_store.
@@ -82,72 +81,6 @@ def test_slug_from_url_with_query_string() -> None:
 def test_slug_from_url_invalid_returns_empty() -> None:
     mod = _import()
     assert mod.slug_from_url("not a url") == ""
-
-
-# --------------------------------------------------------------------------- #
-# migrate_tv_json
-# --------------------------------------------------------------------------- #
-
-
-def test_migrate_tv_json_copies_entries(tmp_path: Path) -> None:
-    mod = _import()
-    src = tmp_path / "src" / "tv.json"
-    dst = tmp_path / "dst" / "tv.json"
-    src.parent.mkdir(parents=True)
-    src.write_text(json.dumps({
-        "models": [
-            {"url": "https://chaturbate.com/alice/", "name": "alice", "priority": 10},
-            {"url": "https://chaturbate.com/bob/", "name": "bob", "priority": 5},
-        ],
-    }), encoding="utf-8")
-
-    count = mod.migrate_tv_json(src, dst)
-
-    assert count == 2
-    saved = json.loads(dst.read_text(encoding="utf-8"))
-    assert len(saved["models"]) == 2
-    slugs = [m["url"] for m in saved["models"]]
-    assert "https://chaturbate.com/alice/" in slugs
-
-
-def test_migrate_tv_json_dry_run_does_not_write(tmp_path: Path) -> None:
-    mod = _import()
-    src = tmp_path / "tv.json"
-    dst = tmp_path / "dst" / "tv.json"
-    src.write_text(json.dumps({
-        "models": [{"url": "https://x/a/", "name": "a", "priority": 1}],
-    }), encoding="utf-8")
-
-    count = mod.migrate_tv_json(src, dst, dry_run=True)
-
-    assert count == 1
-    assert not dst.exists()
-
-
-def test_migrate_tv_json_missing_source_returns_zero(tmp_path: Path) -> None:
-    mod = _import()
-    src = tmp_path / "missing.json"
-    dst = tmp_path / "dst" / "tv.json"
-    assert mod.migrate_tv_json(src, dst) == 0
-    assert not dst.exists()
-
-
-def test_migrate_tv_json_idempotent_merge(tmp_path: Path) -> None:
-    """Running twice must not duplicate entries."""
-    mod = _import()
-    src = tmp_path / "src" / "tv.json"
-    dst = tmp_path / "dst" / "tv.json"
-    src.parent.mkdir(parents=True)
-    src.write_text(json.dumps({
-        "models": [{"url": "https://chaturbate.com/alice/", "name": "alice",
-                    "priority": 10}],
-    }), encoding="utf-8")
-
-    mod.migrate_tv_json(src, dst)
-    mod.migrate_tv_json(src, dst)
-
-    saved = json.loads(dst.read_text(encoding="utf-8"))
-    assert len(saved["models"]) == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -349,17 +282,12 @@ def test_main_runs_full_migration(tmp_path: Path) -> None:
     dst = tmp_path / "dst"
     src.mkdir()
 
-    (src / "tv.json").write_text(json.dumps({
-        "models": [{"url": "https://chaturbate.com/alice/",
-                    "name": "alice", "priority": 5}],
-    }), encoding="utf-8")
     _build_sample_db(src / "favorites.db")
     _build_sample_cookies(src / "cookies.lwp")
 
     rc = mod.main(["--src", str(src), "--dst", str(dst)])
     assert rc == 0
 
-    assert (dst / "tv.json").exists()
     assert (dst / "favs.json").exists()
     assert (dst / "cookies.lwp").exists()
 
@@ -369,10 +297,7 @@ def test_main_dry_run_writes_nothing(tmp_path: Path) -> None:
     src = tmp_path / "src"
     dst = tmp_path / "dst"
     src.mkdir()
-    (src / "tv.json").write_text(json.dumps({
-        "models": [{"url": "https://chaturbate.com/alice/",
-                    "name": "alice", "priority": 5}],
-    }), encoding="utf-8")
+    _build_sample_db(src / "favorites.db")
 
     rc = mod.main(["--src", str(src), "--dst", str(dst), "--dry-run"])
     assert rc == 0

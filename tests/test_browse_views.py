@@ -220,8 +220,8 @@ def test_top_cams_view_sorts_by_viewers_descending(
     """Regression: chaturbate's room-list API returns rooms in mixed
     order (top ~8 high-traffic then a roughly-random tail). Browse views
     must client-side sort by num_users descending so the user sees
-    most-watched on top - which is what their site does, what 
-    would do if they sorted, and what the user expects for "top cams".
+    most-watched on top - which is what their site does, and what the
+    user expects for "top cams".
     """
     bv = _import()
     body = json.dumps({

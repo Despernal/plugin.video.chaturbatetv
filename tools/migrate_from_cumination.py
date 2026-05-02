@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """Migrate cumination's chaturbate user data into chaturbatetv's userdata.
 
-Reads three files from cumination's ``addon_data`` dir:
+Reads two files from cumination's ``addon_data`` dir:
 
-- ``tv.json``       - same schema we use; just copy-and-validate.
 - ``favorites.db``  - SQLite. Filter ``mode='chaturbate.Playvid'``,
                       strip ``[COLOR ...]`` markup from name, derive
-                      slug from URL.
-- ``cookies.lwp``   - LWP cookie jar. Keep only chaturbate.com.
+                      slug from URL. Result lands in our ``favs.json``.
+- ``cookies.lwp``   - LWP cookie jar. Keep only chaturbate.com cookies.
 
 Writes into chaturbatetv's userdata. Idempotent: re-running merges
-without dups via favs_store.add and tv_store.save (which writes a
-fresh JSON each time).
+without dups via favs_store.add (which writes a fresh JSON each time).
+
+TV-mode priority lists are this addon's concept, not cumination's, so
+there's nothing to migrate for that. After migration, set up your TV
+list via the right-click "Add to TV" entry on any model.
 
 Usage::
 
@@ -36,8 +38,8 @@ _HERE = Path(__file__).resolve().parent
 _REPO = _HERE.parent
 sys.path.insert(0, str(_REPO))
 
-from resources.lib import favs_store, tv_store  # noqa: E402
-from resources.lib.cb_models import Favorite, Gender, TVEntry  # noqa: E402
+from resources.lib import favs_store  # noqa: E402
+from resources.lib.cb_models import Favorite, Gender  # noqa: E402
 
 _DEFAULT_SRC = "/storage/.kodi/userdata/addon_data/plugin.video.cumination/"
 _DEFAULT_DST = "/storage/.kodi/userdata/addon_data/plugin.video.chaturbatetv/"
@@ -72,26 +74,6 @@ def slug_from_url(url: str) -> str:
 # --------------------------------------------------------------------------- #
 
 
-def migrate_tv_json(src: Path, dst: Path, dry_run: bool = False) -> int:
-    """Copy cumination's tv.json into our tv_store. Returns row count."""
-    if not src.exists():
-        return 0
-    entries = tv_store.load(src)
-    if dry_run:
-        return len(entries)
-    # Merge with existing dst (idempotent re-runs).
-    existing = tv_store.load(dst)
-    seen = {e.url for e in existing}
-    merged = list(existing)
-    for e in entries:
-        if e.url in seen:
-            continue
-        merged.append(e)
-        seen.add(e.url)
-    tv_store.save(dst, merged)
-    return len(entries)
-
-
 def migrate_favorites_db(src: Path, dst: Path, dry_run: bool = False) -> int:
     """Convert cumination's chaturbate favorites into our favs.json."""
     if not src.exists():
@@ -110,8 +92,8 @@ def migrate_favorites_db(src: Path, dst: Path, dry_run: bool = False) -> int:
             rows = cur.fetchall()
         except sqlite3.Error:
             # Table missing, columns missing, db corrupt - skip gracefully
-            # rather than crashing the whole migration. Other steps (tv.json,
-            # cookies) may still be salvageable.
+            # rather than crashing the whole migration. Cookies migration
+            # may still be salvageable.
             return 0
     finally:
         conn.close()
@@ -192,15 +174,12 @@ def main(argv: list[str] | None = None) -> int:
     if not args.dry_run:
         dst.mkdir(parents=True, exist_ok=True)
 
-    tv_count = migrate_tv_json(src / "tv.json", dst / "tv.json",
-                               dry_run=args.dry_run)
     fav_count = migrate_favorites_db(src / "favorites.db", dst / "favs.json",
                                      dry_run=args.dry_run)
     cookie_count = migrate_cookies(src / "cookies.lwp", dst / "cookies.lwp",
                                    dry_run=args.dry_run)
 
     flag = " (dry-run)" if args.dry_run else ""
-    print(f"tv.json       : {tv_count} entries{flag}")
     print(f"favorites.db  : {fav_count} chaturbate favorites{flag}")
     print(f"cookies.lwp   : {cookie_count} chaturbate cookies{flag}")
     return 0

@@ -344,9 +344,9 @@ info on the left.
 
 ## Migration from cumination
 
-`tools/migrate_from_cumination.py` reads cumination's `tv.json`,
-`favorites.db`, and `cookies.lwp` and writes them into chaturbatetv's
-userdata. Idempotent: safe to re-run.
+`tools/migrate_from_cumination.py` reads cumination's `favorites.db`
+and `cookies.lwp` and writes them into chaturbatetv's userdata.
+Idempotent: safe to re-run.
 
 ```bash
 python3 tools/migrate_from_cumination.py \
@@ -356,6 +356,11 @@ python3 tools/migrate_from_cumination.py \
 
 Migration is tolerant: missing source files, schema-drifted favorites
 DBs, and orphaned cookies all fall through gracefully.
+
+TV-mode priority lists are this addon's own concept (cumination doesn't
+have one), so there's nothing to migrate for that. After your favorites
+land, set up your TV list via the right-click "Add to TV" entry on any
+model.
 
 ## Status
 
