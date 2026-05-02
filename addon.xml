@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <addon id="plugin.video.chaturbatetv"
        name="Chaturbate TV"
-       version="0.7.45"
+       version="0.7.46"
        provider-name="flux">
     <requires>
         <import addon="xbmc.python" version="3.0.0"/>
@@ -15,12 +15,14 @@
         <description lang="en_GB">Standalone Chaturbate Kodi addon with priority-based TV mode, local favorites, and HLS playback through a localhost rewriting proxy.</description>
         <platform>all</platform>
         <license>GPL-2.0-or-later</license>
-        <source>https:///flux/plugin.video.chaturbatetv</source>
+        <source>https://github.com/Despernal/plugin.video.chaturbatetv</source>
         <assets>
             <icon>icon.png</icon>
             <fanart>fanart.jpg</fanart>
         </assets>
-        <news>0.7.45 - TTL on the silent-stub session blocklist. Real-world repro (model_a): TV mode tried her at 17:05 while she was in private show (AJAX returned status='private', is_live=False); silent stub fired; ``_tv_bulk_mark_offline`` added her to ``_OFFLINE_SESSION_SLUGS``. She returned to public broadcast around 19:30 but every subsequent bulk_refresh kept logging "session-blocked 1" -- her -- while a lower-priority model played at P12 instead of her P17 tier. Pre-fix the blocklist was session-long: once added, a slug stayed filtered until tv_stop or process restart. The v0.7.33 anti-thrash intent was right (don't bounce on a model whose affiliate-feed status flips every TTL window), but the lifetime was too aggressive -- a model who legitimately recovered from private/hidden mode was still blocked. Fix: ``_OFFLINE_SESSION_SLUGS`` is now ``dict[str, float]`` (slug -> blocked-at epoch); ``_tv_bulk_refresh`` prunes entries older than ``_OFFLINE_BLOCK_TTL_SEC`` (15min) at the top of each refresh. After the TTL, the model gets a fresh chance on the next bulk fetch. Added log line "pruned N slugs from offline blocklist (TTL 900s elapsed)" for diagnostics. Net: 751 tests, +2 TTL regression guards. Discovered by user noticing model_a was online but TV mode hadn't promoted to her -- caught from the live system, not a hypothesis.
+        <news>0.7.46 - Public release housekeeping: source URL in addon.xml now points at the GitHub repo (was a broken placeholder left over from internal-gitea hosting). No code change.
+
+0.7.45 - TTL on the silent-stub session blocklist. Real-world repro (model_a): TV mode tried her at 17:05 while she was in private show (AJAX returned status='private', is_live=False); silent stub fired; ``_tv_bulk_mark_offline`` added her to ``_OFFLINE_SESSION_SLUGS``. She returned to public broadcast around 19:30 but every subsequent bulk_refresh kept logging "session-blocked 1" -- her -- while a lower-priority model played at P12 instead of her P17 tier. Pre-fix the blocklist was session-long: once added, a slug stayed filtered until tv_stop or process restart. The v0.7.33 anti-thrash intent was right (don't bounce on a model whose affiliate-feed status flips every TTL window), but the lifetime was too aggressive -- a model who legitimately recovered from private/hidden mode was still blocked. Fix: ``_OFFLINE_SESSION_SLUGS`` is now ``dict[str, float]`` (slug -> blocked-at epoch); ``_tv_bulk_refresh`` prunes entries older than ``_OFFLINE_BLOCK_TTL_SEC`` (15min) at the top of each refresh. After the TTL, the model gets a fresh chance on the next bulk fetch. Added log line "pruned N slugs from offline blocklist (TTL 900s elapsed)" for diagnostics. Net: 751 tests, +2 TTL regression guards. Discovered by user noticing model_a was online but TV mode hadn't promoted to her -- caught from the live system, not a hypothesis.
 
 0.7.44 - Cross-process zombie-proxy guard. The v0.7.43 in-process guard via ``_active_proxy`` only caught siblings WITHIN one Python process. But each Kodi-spawned ``playvid`` runs in its OWN process, so ``_active_proxy`` is process-local: process B's zombie still sees ITSELF as the in-process active proxy. Real-world repro post-v0.7.43 (cron log check at 14:30): rapid model-switching model_a -> model_b -> model_c had three sibling proxies running across three playvid processes, and old proxies kept firing ``PlayerControl(Stop)`` when their reconnect-give-up exhausted -- killing whichever sibling proxy the player was actually serving. The fix uses ``xbmc.Player().getPlayingFile()`` -- a Kodi-global state visible across addon processes -- and bails when the player's URL doesn't contain this proxy's bound port token (``:PORT/``). Stashed the bound port on ``_State.port`` after server.bind() so the cross-process check has the comparison value. Net: 749 tests, +4 cross-process zombie guards. The v0.7.43 in-process guard is preserved as defense-in-depth for the test harness scenarios where one process holds two proxies. Discovered by the autonomous log-check cron's manual fire today -- it found multiple post-v0.7.43 ``force_player_stop`` firings with no corresponding "skipped" log line, proving the in-process guard wasn't catching the sibling-process case.
 
