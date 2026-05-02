@@ -124,7 +124,7 @@ def is_progress_stalled(
     (the stream has no defined seek window or ISA reports the LL-HLS
     position as 0). Pre-fix, the v0.7.41 watchdog couldn't tell those
     healthy live streams from a wedged decoder and false-positived
-    every model_e-style live session, killing playback the user was
+    every model_a-style live session, killing playback the user was
     actively watching. The fix: only fire stall after we've seen the
     position advance past zero. The "never advanced" case is left to
     the proxy's reconnect-and-give-up path (5 attempts, ~10s) which

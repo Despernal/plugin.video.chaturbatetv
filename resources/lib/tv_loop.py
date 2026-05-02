@@ -1,11 +1,10 @@
 """TV mode outer loop and ``_TVPlayer`` subclass.
 
-Loop shape mirrors 's v11 TVPlay - the bug-survivor
-algorithm we earned over eleven iterations:
+Bug-survivor loop shape we earned over many iterations:
 
 1. Outer guard: refuse to start if ``chaturbatetv_active`` is already
-   ``"1"`` ( Lesson 12 - manual reset path is provided
-   separately, but we won't double-spawn the loop).
+   ``"1"`` (manual reset path is provided separately, but we won't
+   double-spawn the loop).
 2. Set ``chaturbatetv_active=1``.
 3. Outer iter (try/except, consecutive-error cap):
    a. Load + sort the tv.json list.

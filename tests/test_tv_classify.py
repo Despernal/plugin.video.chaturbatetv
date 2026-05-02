@@ -1,9 +1,8 @@
 """Tests for resources.lib.tv_classify - pure classifiers for the TV loop.
 
-Ported (rewritten) from the  snippet tests for
-_cb_tv_is_natural_playlist_end, _cb_tv_classify_stop,
-_cb_tv_is_internal_advance, plus _cb_decide_after_stop from the
-reconnect snippet.
+Covers is_natural_playlist_end, classify_stop,
+is_internal_advance, plus decide_after_stop on the
+reconnect path.
 """
 from __future__ import annotations
 
@@ -340,7 +339,7 @@ def test_progress_stalled_custom_thresholds() -> None:
 def test_progress_stalled_never_advanced_past_zero_does_not_fire() -> None:
     """v0.7.42 regression: live HLS streams in Kodi+ISA frequently keep
     ``getTime()`` pinned at 0.0 even while playing fine. The user reported
-    the v0.7.41 watchdog killing model_e's live stream as a false positive
+    the v0.7.41 watchdog killing model_a's live stream as a false positive
     -- she was actively watching the playback when the stall toast fired.
 
     The fix: only fire stall once we've seen ``last_position`` move past

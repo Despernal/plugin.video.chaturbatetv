@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Migrate 's chaturbate user data into chaturbatetv's userdata.
+"""Migrate cumination's chaturbate user data into chaturbatetv's userdata.
 
-Reads three files from 's ``addon_data`` dir:
+Reads three files from cumination's ``addon_data`` dir:
 
 - ``tv.json``       - same schema we use; just copy-and-validate.
 - ``favorites.db``  - SQLite. Filter ``mode='chaturbate.Playvid'``,
@@ -15,8 +15,8 @@ fresh JSON each time).
 
 Usage::
 
-    python3 tools/migrate_from_.py \
-        --src /storage/.kodi/userdata/addon_data/plugin.video./ \
+    python3 tools/migrate_from_cumination.py \
+        --src /storage/.kodi/userdata/addon_data/plugin.video.cumination/ \
         --dst /storage/.kodi/userdata/addon_data/plugin.video.chaturbatetv/
 
 Pass ``--dry-run`` to print actions without writing.
@@ -39,7 +39,7 @@ sys.path.insert(0, str(_REPO))
 from resources.lib import favs_store, tv_store  # noqa: E402
 from resources.lib.cb_models import Favorite, Gender, TVEntry  # noqa: E402
 
-_DEFAULT_SRC = "/storage/.kodi/userdata/addon_data/plugin.video./"
+_DEFAULT_SRC = "/storage/.kodi/userdata/addon_data/plugin.video.cumination/"
 _DEFAULT_DST = "/storage/.kodi/userdata/addon_data/plugin.video.chaturbatetv/"
 
 _COLOR_RE = re.compile(r"\[/?(?:COLOR(?:\s+[^\]]+)?|B|I)\]", re.IGNORECASE)
@@ -73,7 +73,7 @@ def slug_from_url(url: str) -> str:
 
 
 def migrate_tv_json(src: Path, dst: Path, dry_run: bool = False) -> int:
-    """Copy 's tv.json into our tv_store. Returns row count."""
+    """Copy cumination's tv.json into our tv_store. Returns row count."""
     if not src.exists():
         return 0
     entries = tv_store.load(src)
@@ -93,7 +93,7 @@ def migrate_tv_json(src: Path, dst: Path, dry_run: bool = False) -> int:
 
 
 def migrate_favorites_db(src: Path, dst: Path, dry_run: bool = False) -> int:
-    """Convert 's chaturbate favorites into our favs.json."""
+    """Convert cumination's chaturbate favorites into our favs.json."""
     if not src.exists():
         return 0
     try:
@@ -176,10 +176,10 @@ def migrate_cookies(src: Path, dst: Path, dry_run: bool = False) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Migrate 's chaturbate data to chaturbatetv.",
+        description="Migrate cumination's chaturbate data to chaturbatetv.",
     )
     parser.add_argument("--src", default=_DEFAULT_SRC,
-                        help=" addon_data dir (default: %(default)s)")
+                        help="cumination addon_data dir (default: %(default)s)")
     parser.add_argument("--dst", default=_DEFAULT_DST,
                         help="chaturbatetv addon_data dir (default: %(default)s)")
     parser.add_argument("--dry-run", action="store_true",

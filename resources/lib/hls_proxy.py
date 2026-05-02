@@ -77,8 +77,8 @@ _FETCH_TIMEOUT = 10.0
 # Chaturbate's chunklist URLs follow ``chunklist_<bandwidth>_<track>``;
 # we extract a stable "short name" key so we can map the same logical
 # chunklist across session rotations. The middle token can be ``w12345``
-# style on real chaturbate edges, ``\d+`` style on 's stub,
-# and a-zA-Z digits in either - so we just match a word-class run.
+# style on real chaturbate edges and ``\d+`` style on test stubs, so we
+# just match a word-class run.
 # We also accept ``audio_*`` short names (EXT-X-MEDIA AUDIO entries are
 # their own chunklists and must be proxied too).
 _CHUNKLIST_NAME_RE = re.compile(r"((?:chunklist|audio)_\w+)")
@@ -175,9 +175,9 @@ class _State:
     # Timestamp of the last ``PlayerControl(Stop)`` we fired during the
     # terminal-flag fast path. ISA ignores HTTP 410 on chunklists and
     # an empty EXT-X-ENDLIST body on chunklists too, hammering retry at
-    # ~30 req/sec. 's escape: fire ``PlayerControl(Stop)``
-    # from inside the handler so Kodi forcibly stops the player. Rate-
-    # limited via this timestamp so we don't flood Kodi's event queue.
+    # ~30 req/sec. The escape: fire ``PlayerControl(Stop)`` from inside
+    # the handler so Kodi forcibly stops the player. Rate-limited via
+    # this timestamp so we don't flood Kodi's event queue.
     last_force_stop: float = 0.0
     # v0.7.37 (race audit pass 1, agent 2 HIGH #2 + #3): monotonic
     # counter incremented under state.lock by _refresh_session every
@@ -668,8 +668,8 @@ def _run_reconnect(state: _State) -> None:
             # ISA stops requesting after we go terminal (e.g. it gave
             # up on its own), the chunklist handler's PlayerControl(Stop)
             # never fires and Kodi's player stays stuck on the last frame
-            # showing a buffer wheel forever. 's _force_stop
-            # fires here for exactly that case.
+            # showing a buffer wheel forever. Fire the hammer here too
+            # so the bg-thread covers the case where ISA went silent.
             _force_player_stop(state)
 
 
@@ -766,7 +766,7 @@ def _force_player_stop(state: _State) -> None:
     process so module-level globals are process-local. Process B's
     zombie still saw ITSELF as the in-process active. Real-world repro
     persisted into v0.7.43: rapid model-switching across playvid
-    invocations (model_b -> model_c -> model_d) had each
+    invocations (model_a -> model_b -> model_c) had each
     playvid's old proxy fire ``PlayerControl(Stop)`` on its
     reconnect-give-up, killing whichever sibling-process proxy the
     player was actually serving. The cross-process check below queries
@@ -888,9 +888,9 @@ def _make_handler(host: str, port: int, state: _State,
             # at the Kodi side. Two earlier attempts loop-trapped:
             # - 0.7.3 served empty ENDLIST -> ISA "No segments" -> retry
             # - 0.7.4 served HTTP 410 -> ISA "Download failed" -> retry
-            # 's working escape: fire PlayerControl(Stop) from
-            # inside the handler. Rate-limited so we don't flood Kodi's
-            # event queue when ISA is hammering us at 30+ req/sec.
+            # Working escape: fire PlayerControl(Stop) from inside the
+            # handler. Rate-limited so we don't flood Kodi's event queue
+            # when ISA is hammering us at 30+ req/sec.
             if state.terminal:
                 _log("handler: chunklist terminal-flag -> ENDLIST + PlayerControl(Stop)")
                 self._send_body(_ENDLIST_BODY, "application/vnd.apple.mpegurl")
@@ -929,8 +929,8 @@ def _make_handler(host: str, port: int, state: _State,
                     f"handler: chunklist FAIL name={name!r} "
                     f"url={_redact_url(cdn_url)!r} err={exc!r}"
                 )
-                # STOP REINFORCED ('s pattern): if upstream
-                # fails AND we're already stopping/terminal, don't waste
+                # STOP REINFORCED: if upstream fails AND we're already
+                # stopping/terminal, don't waste
                 # time on cache fallback - serve ENDLIST + hammer
                 # PlayerControl(Stop). This catches the race where
                 # reconnect just exhausted but ISA is still firing
@@ -1136,7 +1136,7 @@ def _stop_active_proxy() -> None:
     # reconnect thread bails on its next ``not state.stopping`` check
     # without waiting for the daemon-cleanup thread to call .stop()
     # (which can lag several seconds when server.shutdown() drains
-    # in-flight handlers). The reconnect-give-up race -- model_e's
+    # in-flight handlers). The reconnect-give-up race -- model_a's
     # zombie proxy firing PlayerControl(Stop) on model_b's player --
     # opened during exactly this gap.
     prev._state.stopping = True

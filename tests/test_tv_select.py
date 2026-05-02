@@ -1,8 +1,7 @@
 """Tests for resources.lib.tv_select - priority sort + tier picker.
 
-Ported (rewritten, with TVEntry dataclasses) from the  snippet
-tests for _cb_tv_priority_sort, _cb_tv_pick_target, _cb_tv_collect_live_tier,
-_cb_tv_walk_live.
+Covers priority_sort, pick_target, collect_live_tier, walk_live
+(typed against our TVEntry dataclass).
 """
 from __future__ import annotations
 

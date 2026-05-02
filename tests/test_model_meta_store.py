@@ -909,8 +909,8 @@ def test_upsert_biocontext_writes_all_known_fields(tmp_path: Path) -> None:
     new fields without a re-crawl. Fields the response doesn't carry
     leave the existing column value alone (sticky-on-non-null COALESCE)."""
     conn = _open(tmp_path)
-    mms.upsert_biocontext(conn, "model_i", _BIOCONTEXT_SAMPLE, now=2_000_000)
-    row = mms.get_model(conn, "model_i")
+    mms.upsert_biocontext(conn, "model_a", _BIOCONTEXT_SAMPLE, now=2_000_000)
+    row = mms.get_model(conn, "model_a")
     assert row is not None
     # identity + appearance
     assert row["real_name"] == "Evelyn"
@@ -1008,18 +1008,18 @@ def test_image_for_row_falls_back_to_synthesized_thumb_no_photoset() -> None:
     """Without a photo_set_cover but with thumb_available=1 we still
     synthesize the canonical static URL."""
     row = {
-        "slug": "model_i",
+        "slug": "model_a",
         "last_image_url": None, "last_image_url_thumb": None,
         "last_image_url_legacy": None,
         "photo_set_cover_url": None,
         "thumb_available": 1,
     }
-    assert mms.image_for_row(row) == "https://thumb.live.mmcdn.com/ri/model_i.jpg"
+    assert mms.image_for_row(row) == "https://thumb.live.mmcdn.com/ri/model_a.jpg"
 
 
 def test_image_for_row_no_synth_when_thumb_unavailable() -> None:
     row = {
-        "slug": "model_i",
+        "slug": "model_a",
         "last_image_url": None, "last_image_url_thumb": None,
         "last_image_url_legacy": None,
         "thumb_available": 0,

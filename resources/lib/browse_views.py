@@ -139,7 +139,7 @@ def _render_models(handle: int, models: list[Model]) -> None:
     Also attaches a state-aware context menu (Add to TV / In TV /
     Add to Favorites / Remove from Favorites) per :func:`ctxmenu.build_ctxmenu`.
     Loads tv.json + favs.json once per render so the membership lookup is
-    cheap regardless of model count (Lesson 13 from -patches).
+    cheap regardless of model count.
 
     v0.7.32: non-public broadcasters (hidden, private, away,
     password-protected) get an amber prefix and route to

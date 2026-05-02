@@ -144,8 +144,7 @@ def parse_affiliate_onlinerooms(
 
     Unlike room-list (which is a paginated dict), this endpoint returns
     a flat JSON array of every currently-online model in a single call.
-    Single-call = no pagination = the live-favs view becomes instant
-    ('s pattern, ported wholesale).
+    Single-call = no pagination = the live-favs view becomes instant.
 
     Tolerant: garbage input collapses to an empty list rather than
     raising; one malformed entry gets skipped, not propagated.
@@ -315,9 +314,8 @@ def _seconds_online_from_room(room: dict[str, Any], now: float | None = None) ->
 def plot_for(room: dict[str, Any], now: float | None = None) -> str:
     """Build a Kodi plot line for a list item from a room dict.
 
-    Format mirrors the  layout (Subject / Age / Location /
-    Watching / Followers / Online / Tags) but uses HALO cyan accents
-    instead of 's deeppink, and HALO green for the tag line.
+    Format: Subject / Age / Location / Watching / Followers / Online /
+    Tags, with HALO cyan accents and HALO green for the tag line.
 
     ``now`` is exposed for tests; production callers leave it at None
     so the helper falls back to ``time.time()``.

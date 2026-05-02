@@ -1,15 +1,14 @@
 """Tests for resources.lib.tv_loop - the TV mode orchestration loop.
 
 We exercise the loop through the kodi_mock harness so we don't need
-to  round-trip every iteration. Strategy:
+to round-trip every iteration. Strategy:
 
 - Use ``MockMonitor`` / ``MockPlayer`` / ``MockPlayList`` /
   ``MockWindow`` from tests/kodi_mock.
 - Inject these into the loop via dependency injection so the production
   module never imports xbmc unless real Kodi is around.
 
-The lessons we explicitly cover are listed in PLANNING.md and the
--patches LESSONS-LEARNED.md:
+The lessons we explicitly cover:
 
 - Lesson 2: ISA misfire (stop fires on offline) -> _cb_decide_after_stop
   should fall through.
@@ -458,16 +457,16 @@ def test_tvplayer_single_model_tier_user_direct_play_fires_takeover(
     insensitive to playlist size: queued URL match -> internal, non-
     match -> takeover.
 
-    Real-world repro: tier P7 had only one model (model_h), user
+    Real-world repro: tier P7 had only one model (model_a), user
     browsed Female and clicked vesia, log showed
     ``onAVStarted: internal advance to ...`` instead of the expected
     ``TAKEOVER detected`` line.
     """
     tl = _import()
     p = tl._TVPlayer()
-    model_h_queued = tl._build_playlist_url("model_h", "model_h")
-    p.queued_paths = {model_h_queued}  # tier of exactly 1 model
-    p.tracked_file = "http://127.0.0.1:43415/master.m3u8"  # model_h's proxy
+    model_a_queued = tl._build_playlist_url("model_a", "model_a")
+    p.queued_paths = {model_a_queued}  # tier of exactly 1 model
+    p.tracked_file = "http://127.0.0.1:43415/master.m3u8"  # model_a's proxy
 
     # User clicked vesia in Female browse. Kodi replaces the playlist
     # with a one-item playlist whose plugin URL is vesia's, NOT in our
@@ -501,7 +500,7 @@ def test_tvplayer_single_model_tier_internal_does_not_fire_takeover(
     """
     tl = _import()
     p = tl._TVPlayer()
-    queued = tl._build_playlist_url("model_h", "model_h")
+    queued = tl._build_playlist_url("model_a", "model_a")
     p.queued_paths = {queued}
     p.tracked_file = "http://127.0.0.1:43415/master.m3u8"  # old port
     _patch_playlist_with_queued(

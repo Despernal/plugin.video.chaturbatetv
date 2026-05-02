@@ -53,7 +53,7 @@ def test_clear_resets_flag() -> None:
 
 def test_state_uses_chaturbatetv_active_key() -> None:
     """The key must be chaturbatetv_active so we don't collide with
-    's cb_tv_active during the transition window.
+    legacy ``cb_tv_active`` keys from older addons during a transition.
     """
     store, state = _stubs()
     state.set_active(True)

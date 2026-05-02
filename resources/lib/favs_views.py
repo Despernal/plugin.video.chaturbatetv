@@ -47,12 +47,10 @@ _BULK_CACHE_TTL = 30.0
 # slug-only-vs-model-rich semantics.
 _BULK_CACHE_FILE = "bulk_live_cache.json"
 
-# Affiliate watermarks ('s rotating array). The affiliate API
-# requires a wm= param to return data; without one it hands back []. The
-# watermark is the affiliate's tracking ID.  ships a rotating
-# array so any single tracker doesn't get all the credit; we copy that
-# pattern verbatim. This was already the user's de-facto behavior under
-#  - swapping addons doesn't change the affiliate distribution.
+# Affiliate watermarks (rotating array). The affiliate API requires a
+# wm= param to return data; without one it hands back []. The watermark
+# is the affiliate's tracking ID. We rotate through a small array so any
+# single tracker doesn't get all the credit.
 _AFFILIATE_WATERMARKS = (
     "C9m5N", "tfZSl", "jQrKO", "5XO2a", "WXomN",
     "zM6MR", "Lb2aB", "cIbs3", "mnzQo", "N6TZA",
@@ -145,8 +143,8 @@ def _bulk_live_slugs(
     slugs: set[str] = set()
     models_by_slug: dict[str, Model] = {}
     # Single-call affiliate endpoint: returns ALL online rooms in one
-    # GET (~5-10MB body). This is 's pattern - way faster than
-    # walking 50 pages of the room-list endpoint.
+    # GET (~5-10MB body); way faster than walking 50 pages of the
+    # room-list endpoint.
     import random
     wm = random.choice(_AFFILIATE_WATERMARKS)
     url = online_rooms_affiliate_url(wm)
@@ -222,10 +220,10 @@ def _favs_path() -> Path:
 
 
 def _dismiss_busy_dialog() -> None:
-    """Close any lingering Kodi busy dialog. Some legacy code paths
-    ('s pattern) leave it stuck open if the previous addon
-    invocation timed out; dismissing on view entry clears it so the user
-    isn't staring at a spinner over a working video."""
+    """Close any lingering Kodi busy dialog. The previous addon
+    invocation can leave it stuck open after a timeout; dismissing on
+    view entry clears it so the user isn't staring at a spinner over a
+    working video."""
     try:
         import xbmc
         xbmc.executebuiltin("Dialog.Close(busydialognocancel)")
@@ -384,7 +382,7 @@ def online_favs_view(handle: int, store_path: Path | None = None,
     """Currently-live favorites in one shot.
 
     v0.7.30 dropped pagination: the bulk-live cache + meta DB make
-    rendering all entries cheap enough on  that the 50/page
+    rendering all entries cheap enough that the 50/page
     pagination from the Pi-era was just extra clicks. Stray ``page``
     kwargs from old links are swallowed by ``**_params``.
     """

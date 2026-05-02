@@ -346,8 +346,8 @@ def tv_play(handle: int, store_path: Path | None = None,
         return
     # Dismiss any lingering Kodi busy dialog before we start the long-
     # running TV loop. Kodi shows one when a previous addon invocation
-    # took too long to return ('s pattern - dismiss on entry
-    # to every long-running verb).
+    # took too long to return; dismiss on entry to every long-running
+    # verb so the spinner never stays up over playing video.
     try:
         import xbmc
         xbmc.executebuiltin("Dialog.Close(busydialognocancel)")
@@ -1203,9 +1203,7 @@ def refresh_artwork(handle: int, **_params: Any) -> None:
     Thumbnails/, and removes the DB row. The next directory render
     re-caches from disk.
 
-    's ``clean_database`` for chaturbate room thumbs is the
-    reference implementation; we narrow the scope to the addon's own
-    artwork only.
+    Scope is narrowed to the addon's own artwork only.
     """
     from resources.lib import logger
     import sqlite3
@@ -1298,10 +1296,27 @@ _TV_BULK_CACHE: dict[str, Any] = {
 # unwatchable from us (geo-block, region wall, transient cmaf, or a
 # v0.7.31-style hidden show that briefly toggled public mid-poll), it
 # would get re-added to the cache and the TV loop would chase it
-# again. Subtracting this set after each refresh stops the bounce.
+# again. Subtracting this dict after each refresh stops the bounce.
 # Cleared when TV mode exits (``tv_stop`` flips chaturbatetv_active
 # off) so a session-long quirk doesn't permanently hide a model.
-_OFFLINE_SESSION_SLUGS: set[str] = set()
+#
+# v0.7.45 (model_a repro): the v0.7.33 design was a session-long
+# ``set[str]``. A model marked offline (e.g., found in private show
+# mode at the moment we tried her) would stay blocked for the rest
+# of the session even if she returned to public broadcast hours
+# later. model_a was caught in private show at 17:05; transitioned
+# to public around 19:30; bulk_refresh logs from 19:13 onward show
+# "session-blocked 1" filtering her out every cycle while
+# model_b played at a lower priority tier. Fix: track the
+# blocked-at epoch per slug and prune entries older than
+# ``_OFFLINE_BLOCK_TTL_SEC`` at the top of each ``_tv_bulk_refresh``.
+# After the TTL expires, the model gets a fresh chance.
+_OFFLINE_SESSION_SLUGS: dict[str, float] = {}
+# 15 minutes -- long enough to suppress private/public flapping in
+# the affiliate feed (the original v0.7.33 bounce we want to keep
+# preventing) but short enough that a model who recovers from a
+# transient state gets re-considered within a single TV-mode session.
+_OFFLINE_BLOCK_TTL_SEC: float = 900.0
 
 # Non-blocking lock that serializes _tv_bulk_refresh() callers.
 # Multiple call sites converge on this function: the TV loop's
@@ -1361,7 +1376,7 @@ def _tv_cache_snapshot() -> frozenset[str]:
 # always-overwrite-friendly so concurrent writes converge correctly).
 _DEEP_REFRESH_LOCK = threading.Lock()
 
-# Affiliate watermarks ('s rotating array; same set favs_views uses).
+# Affiliate watermarks (rotating array; same set favs_views uses).
 _TV_BULK_WATERMARKS = (
     "C9m5N", "tfZSl", "jQrKO", "5XO2a", "WXomN",
     "zM6MR", "Lb2aB", "cIbs3", "mnzQo", "N6TZA",
@@ -1436,11 +1451,29 @@ def _tv_bulk_refresh() -> bool:
         # lock so a concurrent _tv_bulk_mark_offline can't add to it
         # mid-iteration (Python sets aren't thread-safe across
         # add+iter; RuntimeError or silent drop possible).
+        # v0.7.45: prune entries older than _OFFLINE_BLOCK_TTL_SEC
+        # before snapshotting. Pre-fix the blocklist was session-long
+        # and a model who recovered from private/hidden mode (e.g.,
+        # model_a 17:05 private -> 19:30 public) stayed blocked
+        # for the rest of the session while a lower-tier model played.
+        now_ts = _time.time()
         with _TV_CACHE_LOCK:
-            offline_snapshot = frozenset(_OFFLINE_SESSION_SLUGS)
+            expired = [
+                slug for slug, blocked_at in _OFFLINE_SESSION_SLUGS.items()
+                if now_ts - blocked_at > _OFFLINE_BLOCK_TTL_SEC
+            ]
+            for slug in expired:
+                del _OFFLINE_SESSION_SLUGS[slug]
+            offline_snapshot = frozenset(_OFFLINE_SESSION_SLUGS.keys())
             new_slugs = public_slugs - offline_snapshot
             _TV_BULK_CACHE["slugs"] = new_slugs
-            _TV_BULK_CACHE["ts"] = _time.time()
+            _TV_BULK_CACHE["ts"] = now_ts
+        if expired:
+            logger._log(
+                f"addon_actions._tv_bulk_refresh: pruned {len(expired)} "
+                f"slugs from offline blocklist (TTL "
+                f"{_OFFLINE_BLOCK_TTL_SEC:.0f}s elapsed): {expired!r}"
+            )
         session_blocked = len(public_slugs) - len(new_slugs)
         logger._log(
             f"addon_actions._tv_bulk_refresh: refreshed slugs={len(new_slugs)} "
@@ -1492,10 +1525,16 @@ def _tv_bulk_mark_offline(slug: str) -> None:
     refresh's iteration-difference.
 
     Idempotent for cache eviction; always records to the session set.
+
+    v0.7.45: stores the blocked-at epoch instead of just adding to a
+    plain set. ``_tv_bulk_refresh`` prunes entries older than
+    ``_OFFLINE_BLOCK_TTL_SEC`` so a recovered model gets re-considered
+    within the same TV session.
     """
+    import time as _time
     from resources.lib import logger
     with _TV_CACHE_LOCK:
-        _OFFLINE_SESSION_SLUGS.add(slug)
+        _OFFLINE_SESSION_SLUGS[slug] = _time.time()
         current = _TV_BULK_CACHE["slugs"]
         if slug not in current:
             return
@@ -1566,8 +1605,8 @@ def _make_bulk_is_live_func(poll_minutes: int) -> Any:
 def tv_stop(handle: int, **_params: Any) -> None:
     """Clear the chaturbatetv_active flag so the running loop exits.
 
-    Equivalent to 's ResetTVMode - if the loop self-locked
-    due to a glitch, this is the user-facing recovery path.
+    User-facing recovery path: if the loop self-locked due to a
+    glitch, this clears the flag so it can exit cleanly.
 
     v0.7.33: also clears _OFFLINE_SESSION_SLUGS so a session-long
     block doesn't permanently hide a slug. Next TV-mode start is a

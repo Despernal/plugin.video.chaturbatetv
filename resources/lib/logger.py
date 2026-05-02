@@ -1,4 +1,4 @@
-"""Gated debug logger that mirrors 's cb_feature.log helper.
+"""Gated debug logger that writes to a feature log on demand.
 
 A single function ``_log`` is exposed. It only writes when the addon's
 ``enh_debug`` boolean setting is on; otherwise it drops silently. Any

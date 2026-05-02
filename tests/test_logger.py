@@ -4,7 +4,7 @@ The logger reads ``enh_debug`` from xbmcaddon.Addon().getSettingBool() and
 writes lines to ``chaturbatetv_feature.log`` under
 ``special://temp/`` (or, in tests, a tmp_path we feed in).
 
-Pattern lifted from 's cb_feature.log helper:
+Pattern:
 
 - enh_debug=True  -> write the line, with a timestamp.
 - enh_debug=False -> silently drop.

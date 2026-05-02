@@ -1,9 +1,9 @@
-"""Tests for tools/migrate_from_.py.
+"""Tests for tools/migrate_from_cumination.py.
 
 The script:
 
-- Reads 's tv.json and writes our tv_store-compatible copy.
-- Reads 's favorites.db (sqlite), filters
+- Reads cumination's tv.json and writes our tv_store-compatible copy.
+- Reads cumination's favorites.db (sqlite), filters
   ``mode='chaturbate.Playvid'``, strips the [COLOR ...] markup from
   the name, extracts the slug from the URL, and writes via favs_store.
 - Reads cookies.lwp, filters chaturbate.com cookies, saves through
@@ -36,9 +36,9 @@ def _restore_path() -> None:
 
 
 def _import() -> object:
-    if "migrate_from_" in sys.modules:
-        del sys.modules["migrate_from_"]
-    import migrate_from_ as mod  # type: ignore
+    if "migrate_from_cumination" in sys.modules:
+        del sys.modules["migrate_from_cumination"]
+    import migrate_from_cumination as mod  # type: ignore
     return mod
 
 
@@ -156,7 +156,7 @@ def test_migrate_tv_json_idempotent_merge(tmp_path: Path) -> None:
 
 
 def _build_sample_db(path: Path) -> None:
-    """Create a tiny sqlite db that mirrors 's schema."""
+    """Create a tiny sqlite db that mirrors cumination's schema."""
     conn = sqlite3.connect(path)
     conn.execute("""
         CREATE TABLE favorites (

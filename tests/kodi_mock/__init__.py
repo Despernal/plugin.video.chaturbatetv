@@ -1,6 +1,6 @@
 """Lightweight mocks of Kodi runtime objects for offline TV-loop tests.
 
-The TV loop tests use these so we don't have to  round-trip every
+The TV loop tests use these so we don't have to round-trip every
 iteration. Self-tests in ``test_kodi_mock_harness.py`` keep the mocks
 honest.
 

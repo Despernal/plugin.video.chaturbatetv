@@ -502,7 +502,7 @@ def test_playvid_does_not_set_legacy_inputstreamaddon_key(
     key. We assert the resolver-built ListItem reaches setResolvedUrl
     with the Matrix+ key, never the legacy one.
 
-    This is the single most expensive bug to chase on  (Kodi
+    This is the single most expensive bug to chase in production (Kodi
     silently fails to invoke ISA), so we pin it at the action layer
     too, not just at the resolver layer.
     """
@@ -824,7 +824,11 @@ def test_tv_bulk_mark_offline_records_in_session_set(
     """v0.7.33: marking a slug offline must record it in
     _OFFLINE_SESSION_SLUGS so the next bulk-cache refresh subtracts
     it instead of re-adding the just-marked slug from the affiliate
-    feed. Idempotent across calls."""
+    feed. Idempotent across calls.
+
+    v0.7.45: storage is now a ``dict[str, float]`` mapping slug to
+    blocked-at epoch (was set[str]); membership semantics preserved
+    via ``in`` / ``.keys()``."""
     actions = _import()
     actions._OFFLINE_SESSION_SLUGS.clear()
     actions._TV_BULK_CACHE["slugs"] = frozenset({"alice", "bob"})
@@ -833,9 +837,9 @@ def test_tv_bulk_mark_offline_records_in_session_set(
     assert "alice" in actions._OFFLINE_SESSION_SLUGS
     assert actions._TV_BULK_CACHE["slugs"] == frozenset({"bob"})
 
-    # Idempotent: marking again is fine, set stays consistent.
+    # Idempotent: marking again is fine, dict stays consistent.
     actions._tv_bulk_mark_offline("alice")
-    assert actions._OFFLINE_SESSION_SLUGS == {"alice"}
+    assert set(actions._OFFLINE_SESSION_SLUGS.keys()) == {"alice"}
 
     # A slug not in the cache still gets recorded so a future bulk
     # refresh that re-introduces it gets blocked.
@@ -856,7 +860,9 @@ def test_tv_bulk_refresh_subtracts_session_offline_slugs(
     import json as _json
     actions = _import()
     actions._OFFLINE_SESSION_SLUGS.clear()
-    actions._OFFLINE_SESSION_SLUGS.add("model_a")
+    # v0.7.45: dict shape -- value is blocked-at epoch.
+    import time as _t
+    actions._OFFLINE_SESSION_SLUGS["model_a"] = _t.time()
 
     rooms = [
         {"username": "alice", "current_show": "public", "num_users": 1,
@@ -888,17 +894,124 @@ def test_tv_bulk_refresh_subtracts_session_offline_slugs(
     actions._OFFLINE_SESSION_SLUGS.clear()
 
 
+def test_tv_bulk_refresh_unblocks_slug_after_ttl_expires(
+    kodi_mocks: dict[str, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """v0.7.45 regression: model_a real-world repro. TV mode tried
+    her at 17:05 while she was in private show; AJAX returned
+    is_live=False; silent stub fired; ``_tv_bulk_mark_offline`` added
+    her to _OFFLINE_SESSION_SLUGS. She returned to public broadcast
+    around 19:30 but every bulk_refresh kept logging "session-blocked
+    1" -- her -- while a lower-priority model played at P12. Pre-fix
+    the blocklist was session-long. Fix: TTL-bound each entry; entries
+    older than ``_OFFLINE_BLOCK_TTL_SEC`` are pruned at the top of
+    each refresh, so a recovered model gets re-added to the cache.
+    """
+    import json as _json
+    import time as _t
+    actions = _import()
+    actions._OFFLINE_SESSION_SLUGS.clear()
+    # Simulate "marked offline 16 minutes ago" -- past the 15min TTL.
+    actions._OFFLINE_SESSION_SLUGS["model_a"] = (
+        _t.time() - actions._OFFLINE_BLOCK_TTL_SEC - 60
+    )
+
+    rooms = [
+        {"username": "model_a", "current_show": "public",
+         "num_users": 100, "gender": "f", "image_url": "",
+         "room_subject": ""},
+        {"username": "alice", "current_show": "public", "num_users": 1,
+         "gender": "f", "image_url": "", "room_subject": ""},
+    ]
+
+    def fake_fetch(url: str, *a: Any, **kw: Any) -> str:
+        return _json.dumps(rooms)
+
+    import resources.lib.cb_client as cb_client_mod
+    monkeypatch.setattr(cb_client_mod, "fetch_browse_page", fake_fetch)
+    monkeypatch.setattr(actions, "_model_meta_db_path",
+                        lambda: tmp_path / "meta.db")
+
+    actions._TV_BULK_CACHE["slugs"] = frozenset()
+    ok = actions._tv_bulk_refresh()
+
+    assert ok is True
+    # model_a's expired blocklist entry was pruned, AND she's now
+    # in the cache because the affiliate feed had her current_show=public.
+    assert "model_a" in actions._TV_BULK_CACHE["slugs"], (
+        f"after TTL expiry, recovered model must be re-added; "
+        f"got {actions._TV_BULK_CACHE['slugs']!r}"
+    )
+    assert "model_a" not in actions._OFFLINE_SESSION_SLUGS, (
+        "expired entry should have been pruned from the blocklist"
+    )
+
+    actions._OFFLINE_SESSION_SLUGS.clear()
+
+
+def test_tv_bulk_refresh_keeps_slug_blocked_within_ttl(
+    kodi_mocks: dict[str, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """v0.7.45 sibling: a slug recently marked offline (within the
+    TTL window) MUST still be filtered out. This preserves the v0.7.33
+    anti-thrash behavior: a model whose affiliate-feed status flips
+    quickly between public and non-public shouldn't get re-picked
+    every TTL window. Only after ``_OFFLINE_BLOCK_TTL_SEC`` does the
+    blocklist release her.
+    """
+    import json as _json
+    import time as _t
+    actions = _import()
+    actions._OFFLINE_SESSION_SLUGS.clear()
+    # Marked 60 seconds ago -- well within the 15min TTL.
+    actions._OFFLINE_SESSION_SLUGS["alice"] = _t.time() - 60
+
+    rooms = [
+        {"username": "alice", "current_show": "public", "num_users": 1,
+         "gender": "f", "image_url": "", "room_subject": ""},
+    ]
+
+    def fake_fetch(url: str, *a: Any, **kw: Any) -> str:
+        return _json.dumps(rooms)
+
+    import resources.lib.cb_client as cb_client_mod
+    monkeypatch.setattr(cb_client_mod, "fetch_browse_page", fake_fetch)
+    monkeypatch.setattr(actions, "_model_meta_db_path",
+                        lambda: tmp_path / "meta.db")
+
+    actions._TV_BULK_CACHE["slugs"] = frozenset()
+    ok = actions._tv_bulk_refresh()
+
+    assert ok is True
+    # alice still in blocklist + still filtered from cache.
+    assert "alice" not in actions._TV_BULK_CACHE["slugs"], (
+        "within TTL, blocklisted slug must NOT come back"
+    )
+    assert "alice" in actions._OFFLINE_SESSION_SLUGS, (
+        "within TTL, blocklist entry must persist"
+    )
+
+    actions._OFFLINE_SESSION_SLUGS.clear()
+
+
 def test_tv_stop_clears_offline_session_slugs(
     kodi_mocks: dict[str, MagicMock],
 ) -> None:
     """v0.7.33: tv_stop must reset _OFFLINE_SESSION_SLUGS so a slug
     blocked from a prior session can be reconsidered in a new one
-    (a model who was hidden an hour ago might be public now)."""
+    (a model who was hidden an hour ago might be public now).
+
+    v0.7.45: storage is dict[str, float] (slug -> blocked-at)."""
+    import time as _t
     actions = _import()
-    actions._OFFLINE_SESSION_SLUGS.add("alice")
-    actions._OFFLINE_SESSION_SLUGS.add("bob")
+    actions._OFFLINE_SESSION_SLUGS["alice"] = _t.time()
+    actions._OFFLINE_SESSION_SLUGS["bob"] = _t.time()
     actions.tv_stop(handle=42)
-    assert actions._OFFLINE_SESSION_SLUGS == set()
+    assert actions._OFFLINE_SESSION_SLUGS == {}
 
 
 def test_refresh_offline_meta_swallows_refresh_exception(
@@ -1938,7 +2051,9 @@ def test_tv_bulk_mark_offline_under_concurrent_refresh_doesnt_lose_eviction(
             # Simulate refresh writing a fresh set.
             refresh_done.wait(timeout=2.0)
             actions._TV_BULK_CACHE["slugs"] = frozenset(
-                {"alice", "bob"} - actions._OFFLINE_SESSION_SLUGS
+                {"alice", "bob"} - frozenset(
+                    actions._OFFLINE_SESSION_SLUGS.keys()
+                )
             )
 
     t = threading.Thread(target=fake_concurrent_refresh)
@@ -2218,7 +2333,7 @@ def test_make_bulk_is_live_func_uses_affiliate_endpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """TV mode's is_live check should hit the single-call affiliate
-    endpoint ('s pattern), NOT call is_model_live per slug.
+    endpoint, NOT call is_model_live per slug.
     For a 60-entry TV list this turns 60 sequential AJAX calls per
     poll cycle into 1 affiliate call.
     """
@@ -2470,7 +2585,7 @@ def test_tv_list_rows_carry_ctxmenu_with_edit_and_remove(
     """Regression: tv_list rows MUST carry the state-aware ctxmenu so
     the user can right-click an entry and Edit Priority or Remove it
     from the list. Earlier shipped versions called ``add_play_item``
-    without ``ctx_items``, dropping 's right-click parity.
+    without ``ctx_items``, dropping the right-click parity.
     """
     from resources.lib import tv_store
     from resources.lib.cb_models import TVEntry

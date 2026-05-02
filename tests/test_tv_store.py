@@ -1,8 +1,8 @@
 """Tests for resources.lib.tv_store.
 
-Adapted from the  snippet's _cb_tv_load / _cb_tv_save tests, but
-typed against our TVEntry dataclass. Same edge cases (missing file,
-malformed JSON, missing 'models' key, atomic-write parent-dir creation).
+Covers load / save typed against our TVEntry dataclass. Edge cases:
+missing file, malformed JSON, missing 'models' key, atomic-write
+parent-dir creation.
 """
 from __future__ import annotations
 

@@ -20,9 +20,88 @@
 
 A clean-room Kodi addon for Chaturbate built from scratch. No copy-paste from
 existing addons; original code, full TDD, production-tested on
-LibreELEC. Designed to replace 's chaturbate handler for
-people who want a focused, fast, browse-and-watch experience with a
-real **TV mode** at the center.
+LibreELEC. Built for people who want a focused, fast, browse-and-watch
+experience with a real **TV mode** at the center.
+
+## Now for the Fun Part
+
+So where to begin on this, I was working on a HLS proxy for another addon
+to help get CB working again for them and I had a thought because i used a
+AI to help with another fix of some html parsing and regex stuff cause
+honestly I was in a hurry and working on other stuff at the time.
+
+It got me thinking what does a plugin look like completely wrote by AI but
+done under some very strict guidlines and with a helping hand.
+
+This plugin is the result of that, let me explain how this all came about.
+
+1. I got the AI to look at the proxy and then setup a base repo and then pull
+all the stuff i had done from the patch for the other plugin
+2. I then helped it along setting up everything and getting the base running.
+3. Now for the fun part, I took a old tv and a new kodi box and set them up in
+my house. I gave access to the AI to this kodi box so it could do anything it
+wants.
+4. I setup the AI to be complete able to do whatever it wants on this box and
+the dev instance it runs on to maintain the code. This includes access to a local
+repo because I don't want to just release unrestricted to GH not yet at least.
+5. I helped it make the first steps to making tv mode, we got that going but
+as you can guess there was lots of bugs and edge cases I left in the proxy.
+6. I also helped it get the first features setup like the ability to just play
+a room. This plugin you can use to just watch CB in none TV mode aswell.
+
+Now for the even crazier stuff.
+
+7. I thought to myself why stop here so I setup the AI to watch CB lmao.
+8. I setup some very strict guidelines first tho all development has to be done
+with TDD red/green testing. There has to be a over abundance of logging so much
+logging its kinda funny. It has to always keep tv mode working and it has to
+always be watching CB.
+9. I set out to set all this harness up and get it working, I let it pick a random
+set of models mostly at night because I can't sleep most of the time so I was helping
+the AI work mostly then. It chose the ones it wanted in the list itself I have no idea
+why its chooses were them. My only requirement was female models because literally
+this TV now plays CB 24/7 at my house. Have to remember to turn the TV off at times
+now.
+10. So basically its directive is to constantly watch CB TV and if kodi locks up
+has a issue with the stream, reconnects just anything its directive is to always keep
+the TV going. What it does is when a issue happens it looks at the logs and begins
+a cycle of fixing out what the problem is, doing a Red/Green TDD fix then deploying it
+on the kodi box, rebooting kodi and then restarting tv mode and waiting to see if it gets
+fixed or if new problems happen. So its basically just doing like a human would do. Trying
+to think logically looking at debug info and it also runs tests and one off commands on the
+kodi box to test stuff aswell. Anything it thinks will help with the debuging and fixing of
+the problem. And the logic I set forth for TV mode and the proxy. When it feels the fix is in
+it makes a commit to the repo.
+11. Let the iteration begin, at first it would lock up a lot make mistakes on stuff or just
+run into wild things but it always fixed it and after awhile its just been working now. It
+controls the repo too.
+12. It handles all the documentation and comments and all commit histories.
+
+So now i just look at what its done over the last few days make suggestions about features I
+would like have discussions with it about choices it made and sometimes it wins the discussions
+and sometimes I do.
+
+Its realy a wild experiment that has turned into something like really usable with a lot of neat
+features and lol always evolving stability.
+
+And I made a AI thats into CB now lol and watchs it all day which is neat to me at least.
+
+## Now for a few things
+
+I don't have a repo setup for this right now to automate installs on kodi boxes, well I do but
+its local.
+
+Its more of a safety business for people so if you are worried about Skynet taking over your kodi
+box you can look at the changes the AI made to the code each time you want to deploy.
+
+I might make one later if people are into it. That along with i might make pre packaged tgz or
+something but honestly i would rather this be fully open until people get comfortable.
+
+For the time being you can always just download the zip of the plugin from GH to get a package
+you can unarchive into your plugins.
+
+Last but not least it like all of us is not perfect :D so somethings it might need help on or it
+doesn't know better like "you got to do x in addon.xml to make it install some dep like ISA"
 
 ## Features
 
@@ -119,16 +198,14 @@ plays it, and promotes to a higher tier when one comes online.
 - **ruff** clean
 - **Pre-commit hook** runs all three on every commit
 - Every regression has a **pinned test** before the fix lands
-- Every non-obvious bug pays for itself once via
-  [`docs/LESSONS-LEARNED.md`](docs/LESSONS-LEARNED.md) — 28 lessons and
-  counting
+- Every non-obvious bug pays for itself once via lessons-learned notes
 
 ## Design pillars
 
 | Pillar | What it means |
 |---|---|
 | 🧪 **TDD strict** | Every change starts with a failing test |
-| 🔒 **Original code** | No copy-paste from ; clean-room rewrite |
+| 🔒 **Original code** | Clean-room rewrite, no copy-paste from existing addons |
 | 📊 **Gated logging** | `_log` everywhere, off by default, redacts secrets |
 | 🌐 **JSON over HTML** | All listings via the JSON API; no HTML scraping |
 | 🚦 **Boundary tolerance** | Every parser tolerates malformed input |
@@ -145,8 +222,6 @@ resources/
   language/               strings.po
   media/                  icons, screensaver assets
   settings.xml            User-facing settings declarations
-docs/
-  LESSONS-LEARNED.md      Every non-obvious bug and how to avoid it twice
 tests/                    pytest test suite
   fixtures/               sample JSON for parser tests
   kodi_mock/              Mock Kodi runtime for offline TV-loop tests
@@ -199,23 +274,17 @@ disable it.
 
 For best UX, set the view mode to **InfoWall** or **MediaList** in
 Kodi's view-selector when browsing — puts thumbnails on the right and
-the room info on the left, matching 's layout.
+the room info on the left.
 
-## Distribution
+## Migration from cumination
 
-Built as a standard Kodi addon zip. Companion repo
-[`repository.flux-kodi`](https:///flux/repository.flux-kodi)
-hosts the addons.xml + zips for one-click install in Kodi.
-
-## Migration from 
-
-`tools/migrate_from_.py` reads 's `tv.json` +
+`tools/migrate_from_cumination.py` reads cumination's `tv.json` +
 `favorites.db` + `cookies.lwp` and writes them into chaturbatetv's
 userdata. Idempotent — safe to re-run.
 
 ```bash
-python3 tools/migrate_from_.py \
-    --src /storage/.kodi/userdata/addon_data/plugin.video./ \
+python3 tools/migrate_from_cumination.py \
+    --src /storage/.kodi/userdata/addon_data/plugin.video.cumination/ \
     --dst /storage/.kodi/userdata/addon_data/plugin.video.chaturbatetv/
 ```
 
@@ -223,8 +292,6 @@ Migration is tolerant: missing source files, schema-drifted favorites
 DBs, and orphaned cookies all fall through gracefully.
 
 ## Status
-
-✅ **v0.7.1 deployed and stable on  (LibreELEC).**
 
 All phases through 5 are shipped and battle-tested. v0.6.x focused on
 QA + favorites correctness; v0.7.x is the polish pass for tier-Next
@@ -237,11 +304,10 @@ behavior, ISA resolution capping, and user-facing maintenance verbs.
 | 3 — followed-cams stub | ✅ deferred to Phase 7 |
 | 4a — MVP HLS proxy | ✅ shipped |
 | 4b — playvid + ISA props | ✅ shipped |
-| 4c — proxy hardening (11  lessons) | ✅ shipped |
+| 4c — proxy hardening | ✅ shipped |
 | 5 — TV mode + screensaver + ctxmenus | ✅ shipped |
-| 5.5 — gitea + nginx kodi-repo | ✅ shipped |
-| QA pass — CRITICAL/HIGH/MEDIUM/LOW | ✅ shipped (28 lessons captured) |
-| 6 — polish +  cutover | ⏳ in progress |
+| QA pass — CRITICAL/HIGH/MEDIUM/LOW | ✅ shipped |
+| 6 — polish + cutover | ⏳ in progress |
 | 7 — login + followed-cams | ⏸ conditional |
 
 ### Recent ship list

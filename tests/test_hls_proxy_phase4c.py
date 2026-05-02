@@ -464,9 +464,9 @@ def test_force_player_stop_skips_when_proxy_no_longer_active(
 ) -> None:
     """v0.7.43 regression: an abandoned proxy (replaced by a newer one
     via playvid takeover) must NOT fire PlayerControl(Stop) when its
-    own reconnect-give-up path runs. Pre-fix repro from : TV mode
-    played model_e, user picked model_b from TV List, takeover released
-    TV mode and model_b started -- but model_e's old proxy was still
+    own reconnect-give-up path runs. Pre-fix repro: TV mode played
+    model_a, user picked model_b from TV List, takeover released TV
+    mode and model_b started -- but model_a's old proxy was still
     grinding through its 5-attempt 403-reconnect chain. When that
     exhausted, it fired PlayerControl(Stop), killing model_b's playback.
 
@@ -481,9 +481,13 @@ def test_force_player_stop_skips_when_proxy_no_longer_active(
     monkeypatch.setitem(sys.modules, "xbmc", fake_xbmc)
 
     from resources.lib import hls_proxy
-    zombie_state = hls_proxy._State(stream_url="https://model_e", headers={})
+    zombie_state = hls_proxy._State(
+        stream_url="https://edge1.example.com/abc/master.m3u8", headers={},
+    )
     zombie_state.last_force_stop = 0.0
-    active_state = hls_proxy._State(stream_url="https://model_b", headers={})
+    active_state = hls_proxy._State(
+        stream_url="https://edge2.example.com/xyz/master.m3u8", headers={},
+    )
 
     # Build a minimal handle that ``_active_proxy`` can hold and whose
     # ``_state`` attribute exposes the active state.
@@ -517,7 +521,9 @@ def test_force_player_stop_fires_when_proxy_is_active(
     monkeypatch.setitem(sys.modules, "xbmc", fake_xbmc)
 
     from resources.lib import hls_proxy
-    state = hls_proxy._State(stream_url="https://model_e", headers={})
+    state = hls_proxy._State(
+        stream_url="https://edge1.example.com/abc/master.m3u8", headers={},
+    )
     state.last_force_stop = 0.0
     fake_active_handle = MagicMock()
     fake_active_handle._state = state  # this proxy IS active
@@ -584,8 +590,8 @@ def test_force_player_stop_skips_when_player_on_different_port(
     from unittest.mock import MagicMock
 
     fake_xbmc = MagicMock()
-    # Player is currently serving port 35655 (model_b); this proxy is
-    # the zombie at port 41575 (model_e).
+    # Player is currently serving port 35655 (model_a); this proxy is
+    # the zombie at port 41575 (model_b).
     fake_xbmc.Player.return_value.getPlayingFile.return_value = (
         "http://127.0.0.1:35655/master.m3u8"
     )
@@ -593,7 +599,9 @@ def test_force_player_stop_skips_when_player_on_different_port(
 
     from resources.lib import hls_proxy
     monkeypatch.setattr(hls_proxy, "_active_proxy", None)
-    state = hls_proxy._State(stream_url="https://model_e", headers={})
+    state = hls_proxy._State(
+        stream_url="https://edge1.example.com/abc/master.m3u8", headers={},
+    )
     state.port = 41575  # zombie port
     state.last_force_stop = 0.0
 
@@ -626,7 +634,9 @@ def test_force_player_stop_fires_when_player_on_matching_port(
 
     from resources.lib import hls_proxy
     monkeypatch.setattr(hls_proxy, "_active_proxy", None)
-    state = hls_proxy._State(stream_url="https://model_e", headers={})
+    state = hls_proxy._State(
+        stream_url="https://edge1.example.com/abc/master.m3u8", headers={},
+    )
     state.port = 41575  # matches what the player is on
     state.last_force_stop = 0.0
 
@@ -1182,8 +1192,8 @@ def test_chunklist_endpoint_returns_finished_vod_when_no_cache_and_upstream_fail
 ) -> None:
     """No cache yet AND upstream failing -> finished-VOD ENDLIST body
     + force player stop. ISA logs "Download failed" on 410 and retries
-    even on terminal, so we use 's tested pattern: serve a
-    body that LOOKS like a completed VOD playlist and fire
+    even on terminal, so we use the tested escape: serve a body that
+    LOOKS like a completed VOD playlist and fire
     ``PlayerControl(Stop)`` to tear the player down at the Kodi side.
     """
     from resources.lib import hls_proxy
@@ -1292,8 +1302,8 @@ def test_trigger_reconnect_is_lock_protected_against_duplicate_threads(
     stub_cdn: tuple[str, _StubState],
 ) -> None:
     """Concurrent _trigger_reconnect calls must spawn at most ONE
-    reconnect thread WHILE the first is still in flight ('s
-    race with check-then-set on the reconnecting flag).
+    reconnect thread WHILE the first is still in flight (otherwise
+    we race with check-then-set on the reconnecting flag).
 
     Test strategy: fail the master URL so each refresh_session attempt
     blocks/fails (the dedupe-within-2s clause keeps subsequent refreshes
@@ -1350,7 +1360,7 @@ def test_chunklist_endpoint_returns_finished_vod_when_terminal_flag_set(
     Three earlier attempts loop-trapped:
     - 0.7.3 served empty ENDLIST -> ISA "No segments" -> retry 30+/sec
     - 0.7.4 served HTTP 410 -> ISA "Download failed" -> retry 30+/sec
-    - 0.7.7 settles on 's pattern: VOD-ish body + executebuiltin
+    - 0.7.7 settles on the working pattern: VOD-ish body + executebuiltin
     """
     from resources.lib import hls_proxy
 

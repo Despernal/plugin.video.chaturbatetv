@@ -19,6 +19,6 @@ htmlcov/
 special:/
 *.log
 
-# Pre-public-release: never ship CB-derivative artwork
-tools/icon-design/seeds/*.png
-tools/icon-design/candidates/cb_*.png
+# Local-only dev tooling and internal docs (never published)
+tools-local/
+docs/
