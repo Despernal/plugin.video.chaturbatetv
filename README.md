@@ -323,8 +323,18 @@ uv pip install --python .venv/bin/python pytest pytest-randomly mypy ruff
 MYPYPATH=tests/stubs .venv/bin/python -m mypy --strict resources/lib/
 ```
 
-The `.git/hooks/pre-commit` hook runs all three on every commit. Don't
-disable it.
+If you're sending a PR, please run all three (pytest, ruff, mypy --strict)
+before opening it. The bar for a merge is: tests green, ruff clean,
+mypy --strict clean. A small shell snippet you can drop into
+`.git/hooks/pre-commit` to enforce locally:
+
+```bash
+#!/usr/bin/env bash
+set -e
+.venv/bin/python -m pytest -q
+.venv/bin/python -m ruff check resources/ tests/
+MYPYPATH=tests/stubs .venv/bin/python -m mypy --strict resources/lib/
+```
 
 ## View modes
 
