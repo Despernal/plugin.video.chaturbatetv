@@ -1073,6 +1073,115 @@ def test_classify_high_idle_stop_falls_through_no_dialog(
     assert not captured, "dialog should NOT fire on idle (ISA-misfire) stop"
 
 
+def test_classify_after_stop_recent_pending_play_falls_through(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """v0.7.47 regression: when the user clicks a different model from
+    inside the addon (TV list, favs, etc.) while TV mode is playing,
+    the playvid handler sets a Window property
+    ``chaturbatetv_pending_play_epoch`` to mark "a switch is in flight".
+
+    Without this guard, the stop event for the OLD playback fires
+    onPlayBackStopped with idle=0, model_live=True (still live), which
+    decide_after_stop classifies as a real user stop -> EXIT. The
+    existing TAKEOVER fix in onAVStarted never gets a chance because
+    the loop dies before Kodi resolves the new item.
+
+    With the guard: _classify_after_stop checks the Window property;
+    if it was set within the last 5 seconds, treat as fall_through (a
+    switch is in progress, let onAVStarted handle it).
+    """
+    import time as _time
+    tl = _import()
+
+    # Simulate playvid having just been invoked: pending epoch = now.
+    fake_window = kodi_mods["xbmcgui"].Window.return_value
+    fake_window.getProperty.return_value = str(_time.time())
+
+    class _State:
+        user_stopped = True
+        idle_at_stop = 0
+        current_playlist_path = ""
+        current_queued_plugin_url = (
+            "plugin://plugin.video.chaturbatetv/"
+            "?mode=playvid&slug=alice&name=alice"
+        )
+        playlist_ended_naturally = False
+        previous_user_stop_time = 0.0
+
+    s = _State()
+    decision = tl._classify_after_stop(s, lambda url: True)
+    assert decision == "fall_through", (
+        "user-stop within 5s of a pending playvid invocation should be "
+        "treated as a switch-in-flight, not exit"
+    )
+
+
+def test_classify_after_stop_stale_pending_play_still_exits(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """Sister test: if the pending-play marker is OLDER than 5 seconds,
+    don't suppress the exit -- it's a stale marker from a previous
+    switch that already completed. Real user stop should still exit
+    cleanly.
+    """
+    import time as _time
+    tl = _import()
+
+    fake_window = kodi_mods["xbmcgui"].Window.return_value
+    # 30 seconds ago = stale marker, should be ignored.
+    fake_window.getProperty.return_value = str(_time.time() - 30.0)
+
+    class _State:
+        user_stopped = True
+        idle_at_stop = 0
+        current_playlist_path = ""
+        current_queued_plugin_url = (
+            "plugin://plugin.video.chaturbatetv/"
+            "?mode=playvid&slug=alice&name=alice"
+        )
+        playlist_ended_naturally = False
+        previous_user_stop_time = 0.0
+
+    s = _State()
+    decision = tl._classify_after_stop(s, lambda url: True)
+    assert decision == "user_stopped", (
+        "stale pending-play marker (>5s old) should NOT suppress exit; "
+        "real user stop should still exit"
+    )
+
+
+def test_classify_after_stop_no_pending_play_exits_normally(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """Sister test: with NO pending-play marker (empty string from
+    getProperty), behavior is unchanged from pre-fix: real user stop
+    on a still-live model exits cleanly.
+    """
+    tl = _import()
+
+    fake_window = kodi_mods["xbmcgui"].Window.return_value
+    fake_window.getProperty.return_value = ""
+
+    class _State:
+        user_stopped = True
+        idle_at_stop = 0
+        current_playlist_path = ""
+        current_queued_plugin_url = (
+            "plugin://plugin.video.chaturbatetv/"
+            "?mode=playvid&slug=alice&name=alice"
+        )
+        playlist_ended_naturally = False
+        previous_user_stop_time = 0.0
+
+    s = _State()
+    decision = tl._classify_after_stop(s, lambda url: True)
+    assert decision == "user_stopped", (
+        "no pending-play marker = unchanged behavior, real user stop "
+        "should exit"
+    )
+
+
 def test_user_stop_with_low_idle_exits(kodi_mods: dict[str, Any]) -> None:
     """Mid-playlist user stop (idle < 3s, model still live) -> real
     user stop, exit cleanly.

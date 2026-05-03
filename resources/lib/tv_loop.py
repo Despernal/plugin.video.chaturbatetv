@@ -55,6 +55,29 @@ def _safe_log(msg: str) -> None:
         return
 
 
+_PENDING_PLAY_KEY = "chaturbatetv_pending_play_epoch"
+_PENDING_PLAY_TTL_SEC = 5.0
+
+
+def _pending_play_recent() -> bool:
+    """True if the playvid handler stamped the in-addon-switch marker
+    within the last ``_PENDING_PLAY_TTL_SEC`` seconds.
+
+    Marker lives on the global Kodi home window (id 10000) so it's
+    visible across the addon's separate playvid + tv_loop processes.
+    Empty / missing / unparseable / stale: False.
+    """
+    try:
+        import time as _time
+        import xbmcgui
+        raw = xbmcgui.Window(10000).getProperty(_PENDING_PLAY_KEY)
+        if not raw:
+            return False
+        return (_time.time() - float(raw)) < _PENDING_PLAY_TTL_SEC
+    except Exception:
+        return False
+
+
 def _current_dialog_id() -> int:
     """Return the id of the topmost Kodi modal dialog, or 0 if none.
 
@@ -426,6 +449,22 @@ def _classify_after_stop(
     if natural:
         return "natural_end"
     if not tv_classify.decide_after_stop(user_stopped, model_live, idle):
+        # v0.7.47: in-addon-switch guard. When the user clicks a different
+        # model from inside the addon (TV list, favs, etc.), the playvid
+        # handler stamps a Window property with the current epoch. The
+        # OLD playback's Stop event then fires here with idle=0 +
+        # model_live=True, which decide_after_stop classifies as a real
+        # user stop -> EXIT. But the user wasn't exiting; they were
+        # switching. The TAKEOVER fix in onAVStarted would have handled
+        # this correctly, but the loop dies here BEFORE Kodi resolves
+        # the new item. Suppress the exit when the marker is fresh
+        # (<5s) so onAVStarted gets a chance to run.
+        if _pending_play_recent():
+            _safe_log(
+                "_classify_after_stop: pending playvid within 5s -> "
+                "fall_through (in-addon switch in flight)"
+            )
+            return "fall_through"
         return "user_stopped"
 
     # We're going to continue (ISA misfire / model offline / idle stop).

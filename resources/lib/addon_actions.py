@@ -202,6 +202,20 @@ def playvid(handle: int, slug: str = "", name: str = "",
         logger._log(f"playvid: invalid slug shape {slug!r}, abort")
         return
 
+    # v0.7.47: stamp the in-addon-switch marker on the Kodi home window
+    # so the running TV-loop's _classify_after_stop can tell "this stop
+    # is a switch in flight" from "this stop is the user pressing Stop
+    # to exit". Cross-process visibility because playvid and tv_loop
+    # run in separate Python invocations.
+    try:
+        import time as _time
+        import xbmcgui
+        xbmcgui.Window(10000).setProperty(
+            "chaturbatetv_pending_play_epoch", str(_time.time()),
+        )
+    except Exception:  # noqa: S110 - best-effort marker
+        pass
+
     from resources.lib import playvid_resolver
     result = playvid_resolver.resolve_to_listitem(slug=slug, name=name or slug)
     logger._log(f"playvid: resolve_to_listitem success={result.success} slug={slug!r}")
