@@ -6,7 +6,7 @@
 
 **A Kodi addon for Chaturbate, with TV mode.**
 
-[![Tests](https://img.shields.io/badge/tests-751%20passing-00d4ff?style=flat-square)]()
+[![Tests](https://img.shields.io/badge/tests-750%20passing-00d4ff?style=flat-square)]()
 [![Type Safety](https://img.shields.io/badge/mypy-strict-00d4ff?style=flat-square)]()
 [![Lint](https://img.shields.io/badge/ruff-clean-00d4ff?style=flat-square)]()
 [![Kodi](https://img.shields.io/badge/Kodi-Matrix%2B-00d4ff?style=flat-square)]()
@@ -250,7 +250,7 @@ plays it, and promotes to a higher tier when one comes online.
 
 ## Quality bar
 
-- 751 tests all passing (`pytest`, no Kodi required).
+- 750 tests all passing (`pytest`, no Kodi required).
 - mypy --strict clean across resources/lib/.
 - ruff clean.
 - Pre-commit hook runs all three on every commit.
@@ -385,6 +385,8 @@ remaining feature on the conditional list.
 
 | Version | Headline |
 |---|---|
+| 0.7.47 | In-addon-switch guard: clicking a different model from TV list / favs no longer misclassified as a real user-stop |
+| 0.7.46 | Fix the addon.xml `<source>` URL pointing at the public GitHub repo (housekeeping after going public) |
 | 0.7.45 | TTL on silent-stub session blocklist; recovered models get re-considered after 15min |
 | 0.7.44 | Cross-process zombie-proxy guard via getPlayingFile() |
 | 0.7.43 | Zombie-proxy guard for takeover playback |
