@@ -57,6 +57,9 @@ def _safe_log(msg: str) -> None:
 
 _PENDING_PLAY_KEY = "chaturbatetv_pending_play_epoch"
 _PENDING_PLAY_TTL_SEC = 5.0
+_SILENT_STUB_SLUG_KEY = "chaturbatetv_silent_stub_slug"
+_SILENT_STUB_EPOCH_KEY = "chaturbatetv_silent_stub_epoch"
+_SILENT_STUB_TTL_SEC = 5.0
 
 
 def _pending_play_recent() -> bool:
@@ -76,6 +79,39 @@ def _pending_play_recent() -> bool:
         return (_time.time() - float(raw)) < _PENDING_PLAY_TTL_SEC
     except Exception:
         return False
+
+
+def _silent_stub_pending_slug() -> str:
+    """Return the slug for which playvid recently served a silent stub,
+    or empty string if no fresh marker is set.
+
+    v0.7.48 fix: when an old zombie proxy fires PlayerControl(Stop) at
+    the exact moment the silent stub is starting (cross-process race),
+    Kodi never fires onAVStarted for the stub, so ``tracked_file``
+    stays None. The pre-fix mark-offline gate keyed off tracked_file
+    alone and so silently no-op'd, leaving the slug in the cache and
+    the loop re-picking it forever (eventually wedging Kodi's player).
+
+    playvid stamps Window(10000) properties when serving the silent
+    stub: the slug + the current epoch. We read both here. If the
+    epoch is fresh (< ``_SILENT_STUB_TTL_SEC`` old), return the slug;
+    else return "" (stale, never set, malformed).
+    """
+    try:
+        import time as _time
+        import xbmcgui
+        win = xbmcgui.Window(10000)
+        slug = win.getProperty(_SILENT_STUB_SLUG_KEY)
+        if not slug:
+            return ""
+        epoch_raw = win.getProperty(_SILENT_STUB_EPOCH_KEY)
+        if not epoch_raw:
+            return ""
+        if (_time.time() - float(epoch_raw)) >= _SILENT_STUB_TTL_SEC:
+            return ""
+        return slug
+    except Exception:
+        return ""
 
 
 def _current_dialog_id() -> int:
@@ -324,7 +360,12 @@ def _should_attempt_silent_stub_mark(player_state: Any) -> bool:
     """
     if getattr(player_state, "switched", False):
         return False
-    return _was_silent_stub_played(getattr(player_state, "tracked_file", None))
+    if _was_silent_stub_played(getattr(player_state, "tracked_file", None)):
+        return True
+    # v0.7.48 fallback: zombie-old-proxy Stop racing the silent stub
+    # leaves tracked_file=None (onAVStarted never fires). Detect via
+    # the playvid-stamped Window marker so mark-offline still runs.
+    return bool(_silent_stub_pending_slug())
 
 
 def _resolve_silent_stub_slug(
@@ -357,6 +398,13 @@ def _resolve_silent_stub_slug(
         slug = _slug_from_playlist_path(only_path)
         if slug:
             return slug, True
+    # v0.7.48 fallback: ambiguous queue (multi-slug or empty). The
+    # playvid handler stamps the slug it just served the silent stub
+    # for on a Window property — read it as the tiebreaker so we can
+    # mark-offline correctly even when neither path source resolves.
+    pending = _silent_stub_pending_slug()
+    if pending:
+        return pending, True
     return "", False
 
 

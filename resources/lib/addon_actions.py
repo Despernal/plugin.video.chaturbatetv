@@ -258,6 +258,19 @@ def playvid(handle: int, slug: str = "", name: str = "",
                 f"playvid: TV active + offline -> "
                 f"silent stub setResolvedUrl(True) for slug={slug!r}"
             )
+            # v0.7.48: stamp slug + epoch on Window(10000) so the
+            # tv_loop's mark-offline gate can fall back to this when
+            # tracked_file ends up None (zombie-old-proxy Stop racing
+            # the silent stub start, observed 2026-05-04 with a model
+            # in private show after a 403 storm).
+            try:
+                import time as _time
+                import xbmcgui
+                win = xbmcgui.Window(10000)
+                win.setProperty("chaturbatetv_silent_stub_slug", slug)
+                win.setProperty("chaturbatetv_silent_stub_epoch", str(_time.time()))
+            except Exception:  # noqa: S110 - best-effort marker
+                pass
             xbmcplugin.setResolvedUrl(handle, True, _silent_stub_listitem())
             return
         xbmcplugin.setResolvedUrl(handle, False, _empty_listitem())

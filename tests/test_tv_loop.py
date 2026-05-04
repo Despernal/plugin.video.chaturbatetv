@@ -250,6 +250,118 @@ def test_should_attempt_silent_stub_mark_skips_on_real_playback(
     assert tl._should_attempt_silent_stub_mark(_State()) is False
 
 
+def test_should_attempt_silent_stub_mark_fallback_via_window_marker(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """v0.7.48 regression: when an OLD zombie proxy fires
+    PlayerControl(Stop) at the same instant the silent stub is
+    starting (cross-process race), Kodi never fires onAVStarted for
+    the stub, so tracked_file stays None. The pre-fix
+    _was_silent_stub_played(None) returns False, so the mark-offline
+    branch is skipped, the slug stays in the cache, and the loop
+    re-picks it forever (eventually wedging on Kodi's side).
+
+    Real-world repro on 2026-05-04 at 05:14:30 with model_a:
+    iter=2 had a 403 storm + reconnect-give-up. iter=3 picked the
+    same slug, AJAX reported room_status='private', silent stub set
+    up, but the OLD proxy from iter=2 fired its terminal+Stop at the
+    exact moment Kodi was transitioning to the silent stub. iter=3
+    exited with tracked_file=None and dialog_id=10138 (some modal
+    popped open). iter=4 immediately re-picked model_a and
+    hung in xbmc.Player().play().
+
+    Fix: playvid stamps a Window(10000) property
+    ``chaturbatetv_silent_stub_slug`` plus ``_epoch`` when it serves
+    the silent stub. The mark-offline gate falls back to this property
+    when tracked_file is None: if the marker is fresh (<5s old) and
+    not yet consumed, treat as silent-stub-played and mark the
+    recorded slug offline.
+    """
+    import time as _time
+    tl = _import()
+
+    fake_window = kodi_mods["xbmcgui"].Window.return_value
+    # Simulate playvid having just stamped the marker:
+    def fake_get(key: str) -> str:
+        if key == "chaturbatetv_silent_stub_slug":
+            return "model_a"
+        if key == "chaturbatetv_silent_stub_epoch":
+            return str(_time.time())
+        return ""
+    fake_window.getProperty.side_effect = fake_get
+
+    class _State:
+        tracked_file = None  # ← onAVStarted never fired (zombie-stop race)
+        switched = False
+        user_stopped = False
+
+    assert tl._should_attempt_silent_stub_mark(_State()) is True, (
+        "fallback via Window property must fire mark-offline when "
+        "playvid recently stamped a silent-stub marker, even when "
+        "tracked_file is None due to the zombie-stop race"
+    )
+
+
+def test_should_attempt_silent_stub_mark_stale_window_marker_does_not_fire(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """Sister test: a stale (>5s old) silent-stub marker is ignored.
+    Otherwise we'd risk false-positive mark-offline on a slug that
+    played fine in a later iter."""
+    import time as _time
+    tl = _import()
+
+    fake_window = kodi_mods["xbmcgui"].Window.return_value
+    def fake_get(key: str) -> str:
+        if key == "chaturbatetv_silent_stub_slug":
+            return "model_a"
+        if key == "chaturbatetv_silent_stub_epoch":
+            return str(_time.time() - 30.0)  # 30s old, stale
+        return ""
+    fake_window.getProperty.side_effect = fake_get
+
+    class _State:
+        tracked_file = None
+        switched = False
+        user_stopped = False
+
+    assert tl._should_attempt_silent_stub_mark(_State()) is False, (
+        "stale silent-stub marker (>5s) must not fire mark-offline; "
+        "would risk false-positive on later-iter slugs"
+    )
+
+
+def test_resolve_silent_stub_slug_uses_window_marker_when_no_paths(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """v0.7.48: when the live playlist path is empty AND queued_paths
+    can't disambiguate, fall back to the Window-property slug stamped
+    by playvid. Returns (slug, fallback_used=True) so the caller logs
+    the branch.
+    """
+    import time as _time
+    tl = _import()
+
+    fake_window = kodi_mods["xbmcgui"].Window.return_value
+    def fake_get(key: str) -> str:
+        if key == "chaturbatetv_silent_stub_slug":
+            return "model_a"
+        if key == "chaturbatetv_silent_stub_epoch":
+            return str(_time.time())
+        return ""
+    fake_window.getProperty.side_effect = fake_get
+
+    # Empty live path + multi-slug queued (which the existing fallback
+    # would refuse) — Window property breaks the tie.
+    queued = {
+        "plugin://plugin.video.chaturbatetv/?mode=playvid&slug=alice",
+        "plugin://plugin.video.chaturbatetv/?mode=playvid&slug=bob",
+    }
+    skip_slug, fallback = tl._resolve_silent_stub_slug("", queued)
+    assert skip_slug == "model_a"
+    assert fallback is True
+
+
 def test_resolve_silent_stub_slug_uses_live_path_when_present(
     kodi_mods: dict[str, Any],
 ) -> None:
