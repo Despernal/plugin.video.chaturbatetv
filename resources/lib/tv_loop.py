@@ -59,7 +59,13 @@ _PENDING_PLAY_KEY = "chaturbatetv_pending_play_epoch"
 _PENDING_PLAY_TTL_SEC = 5.0
 _SILENT_STUB_SLUG_KEY = "chaturbatetv_silent_stub_slug"
 _SILENT_STUB_EPOCH_KEY = "chaturbatetv_silent_stub_epoch"
-_SILENT_STUB_TTL_SEC = 5.0
+# v0.7.49: bumped from 5.0s. Production wedge 2026-05-08 10:47 CDT:
+# the zombie-stop race takes ~5+ seconds end-to-end (5 proxy reconnect
+# attempts at ~1s each + exit-log overhead), so the v0.7.48 5s TTL
+# missed the live case. Diff was exactly 5.0s -> fallback returned
+# empty -> mark-offline skipped -> next iter re-picked offline slug ->
+# wedge in xbmc.Player().play(). 15s gives plenty of headroom.
+_SILENT_STUB_TTL_SEC = 15.0
 
 
 def _pending_play_recent() -> bool:
@@ -94,8 +100,8 @@ def _silent_stub_pending_slug() -> str:
 
     playvid stamps Window(10000) properties when serving the silent
     stub: the slug + the current epoch. We read both here. If the
-    epoch is fresh (< ``_SILENT_STUB_TTL_SEC`` old), return the slug;
-    else return "" (stale, never set, malformed).
+    epoch is fresh (< ``_SILENT_STUB_TTL_SEC`` old, currently 15s),
+    return the slug; else return "" (stale, never set, malformed).
     """
     try:
         import time as _time

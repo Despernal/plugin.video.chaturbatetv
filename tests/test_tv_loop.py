@@ -305,7 +305,7 @@ def test_should_attempt_silent_stub_mark_fallback_via_window_marker(
 def test_should_attempt_silent_stub_mark_stale_window_marker_does_not_fire(
     kodi_mods: dict[str, Any],
 ) -> None:
-    """Sister test: a stale (>5s old) silent-stub marker is ignored.
+    """Sister test: a stale (>15s old) silent-stub marker is ignored.
     Otherwise we'd risk false-positive mark-offline on a slug that
     played fine in a later iter."""
     import time as _time
@@ -326,8 +326,53 @@ def test_should_attempt_silent_stub_mark_stale_window_marker_does_not_fire(
         user_stopped = False
 
     assert tl._should_attempt_silent_stub_mark(_State()) is False, (
-        "stale silent-stub marker (>5s) must not fire mark-offline; "
+        "stale silent-stub marker (>15s) must not fire mark-offline; "
         "would risk false-positive on later-iter slugs"
+    )
+
+
+def test_should_attempt_silent_stub_mark_marker_within_extended_ttl_fires(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """v0.7.49 regression: 2026-05-08 production wedge. The v0.7.48 fix
+    used a 5.0s TTL on the Window-property fallback, but the actual
+    zombie-stop race takes ~5+ seconds end-to-end (5 proxy reconnect
+    attempts at ~1s each, plus the inner-loop exit overhead). On bcore
+    at 10:47 CDT we observed:
+
+      10:47:14 silent-stub setResolvedUrl + Window-property stamp
+      10:47:14 force_player_stop fires (zombie iter=1 proxy give-up)
+      10:47:19 iter=2 exits with tracked_file=None dialog_id=10138
+
+    Diff = exactly 5.0s. The old TTL check ``diff >= 5.0`` returned True
+    -> fallback returned empty -> mark-offline skipped -> iter=3
+    re-picked the same offline slug -> Kodi wedged on player.play().
+
+    Fix: bump ``_SILENT_STUB_TTL_SEC`` to 15.0s. This regression test
+    uses an 8s-old marker which must now fire (was stale under v0.7.48,
+    fresh under v0.7.49).
+    """
+    import time as _time
+    tl = _import()
+
+    fake_window = kodi_mods["xbmcgui"].Window.return_value
+    def fake_get(key: str) -> str:
+        if key == "chaturbatetv_silent_stub_slug":
+            return "model_a"
+        if key == "chaturbatetv_silent_stub_epoch":
+            return str(_time.time() - 8.0)  # 8s old: fresh under v0.7.49
+        return ""
+    fake_window.getProperty.side_effect = fake_get
+
+    class _State:
+        tracked_file = None
+        switched = False
+        user_stopped = False
+
+    assert tl._should_attempt_silent_stub_mark(_State()) is True, (
+        "8s-old silent-stub marker must still fire mark-offline; "
+        "the zombie-stop race takes >5s end-to-end so v0.7.48's 5s TTL "
+        "missed the live production case observed 2026-05-08"
     )
 
 
