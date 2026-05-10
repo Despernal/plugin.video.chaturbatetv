@@ -1591,3 +1591,115 @@ def test_at_end_stop_keeps_rebuilding_forever(
     # -> continue. The loop runs to max_iters without exiting.
     assert iterations["n"] == 4
     assert out["exit_reason"] == "max_iters"
+
+
+# ---------------------------------------------------------------------------
+# v0.7.50: caching-wedge watchdog (Player.Caching stuck-True detection).
+#
+# Real-world wedge observed 2026-05-10 ~07:30 CDT: TV mode iter=15 ran for 84
+# minutes on the same model with frozen video + audio creeping wildly out of
+# sync (1603-89463s ActiveAE drift). The v0.7.42 watchdog watches getTime()
+# advancement but audio creeping kept getTime() moving, so the watchdog stayed
+# armed without firing. Meanwhile Kodi was actively showing a "Loading 25%"
+# overlay -- meaning Kodi already KNEW the player was stalled via the
+# Player.Caching condition. We just weren't reading it.
+#
+# Fix: add a separate caching-wedge guard that reads xbmc.getCondVisibility(
+# "Player.Caching"). If True for more than _CACHING_WEDGE_GRACE_SEC of
+# wall-clock (default 120s), trip the same recovery path the v0.7.42 stall
+# watchdog uses (player.stall_detected=True, mark slug offline, rotate).
+#
+# The pure helper _is_caching_wedged() is the test target: given a tracked
+# "first-seen-caching" timestamp + the current is_caching value + the current
+# wall-clock now + grace window, it returns (wedged, new_started_at). The
+# integration in the inner monitor loop is verified by production observation.
+# ---------------------------------------------------------------------------
+
+
+def test_caching_wedge_first_seen_starts_timer_no_trip(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """First time Caching=True is observed, start the timer; don't trip yet."""
+    tl = _import()
+    wedged, new_at = tl._is_caching_wedged(
+        caching_started_at=None,
+        is_caching_now=True,
+        now=1000.0,
+        grace_sec=120.0,
+    )
+    assert wedged is False
+    assert new_at == 1000.0
+
+
+def test_caching_wedge_within_grace_no_trip(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """Caching for less than grace -> still no trip; preserve start time.
+
+    Transient buffer dips during normal playback (HLS chunklist refresh, segment
+    boundary) can flip Player.Caching=True for a few seconds. Don't false-fire
+    on those.
+    """
+    tl = _import()
+    wedged, new_at = tl._is_caching_wedged(
+        caching_started_at=1000.0,
+        is_caching_now=True,
+        now=1059.0,  # 59s of caching, grace is 120
+        grace_sec=120.0,
+    )
+    assert wedged is False
+    assert new_at == 1000.0  # start time preserved
+
+
+def test_caching_wedge_past_grace_trips(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """Caching past the grace window -> trip; this is the production wedge."""
+    tl = _import()
+    wedged, new_at = tl._is_caching_wedged(
+        caching_started_at=1000.0,
+        is_caching_now=True,
+        now=1121.0,  # 121s of caching, grace is 120
+        grace_sec=120.0,
+    )
+    assert wedged is True
+    assert new_at == 1000.0  # started_at unchanged so we can log the duration
+
+
+def test_caching_wedge_recovery_clears_timer(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """Caching flipped back to False before grace -> clear the timer.
+
+    Healthy buffer recovery: after a transient dip, Player.Caching=False
+    again. We must zero the stored start time so the next dip starts fresh,
+    not stacked on the previous one.
+    """
+    tl = _import()
+    wedged, new_at = tl._is_caching_wedged(
+        caching_started_at=1000.0,  # was caching
+        is_caching_now=False,         # now recovered
+        now=1090.0,
+        grace_sec=120.0,
+    )
+    assert wedged is False
+    assert new_at is None
+
+
+def test_caching_wedge_never_caching_no_state(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """Healthy stream with Caching=False throughout -> no state, no trip.
+
+    The expected steady-state for a working stream. Verified live on bcore
+    2026-05-10: cond_Player.Caching=False, info_Player.CacheLevel='100'.
+    """
+    tl = _import()
+    wedged, new_at = tl._is_caching_wedged(
+        caching_started_at=None,
+        is_caching_now=False,
+        now=1000.0,
+        grace_sec=120.0,
+    )
+    assert wedged is False
+    assert new_at is None

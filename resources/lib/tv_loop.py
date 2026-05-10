@@ -57,6 +57,17 @@ def _safe_log(msg: str) -> None:
 
 _PENDING_PLAY_KEY = "chaturbatetv_pending_play_epoch"
 _PENDING_PLAY_TTL_SEC = 5.0
+# v0.7.50: caching-wedge watchdog. Closes the gap left by the v0.7.42
+# stall watchdog. The 0.7.42 watchdog watches getTime() advancement, but
+# a decoder freeze where audio creeps wildly out-of-sync (1603-89463s
+# drift observed 2026-05-10 07:30 CDT) keeps getTime() moving slowly so
+# 0.7.42 never trips. Meanwhile Kodi already knows the stream is wedged
+# -- it draws a "Loading X%" overlay -- via the Player.Caching condition.
+# Read it directly and trip if Caching is True for more than the grace
+# window. Verified on bcore via probe-xbmc: cond Player.Caching is the
+# exact source of truth for the on-screen caching overlay.
+_CACHING_WEDGE_GRACE_SEC = 120.0
+
 _SILENT_STUB_SLUG_KEY = "chaturbatetv_silent_stub_slug"
 _SILENT_STUB_EPOCH_KEY = "chaturbatetv_silent_stub_epoch"
 # v0.7.49: bumped from 5.0s. Production wedge 2026-05-08 10:47 CDT:
@@ -118,6 +129,52 @@ def _silent_stub_pending_slug() -> str:
         return slug
     except Exception:
         return ""
+
+
+def _read_caching_state() -> tuple[bool, str]:
+    """Read Kodi's current Player.Caching condition + Player.CacheLevel.
+
+    These are the same values Kodi uses internally to render the
+    "Loading X%" buffering overlay. Best-effort: if xbmc isn't
+    importable (test context) returns (False, '?') so the watchdog
+    never trips spuriously when the API isn't available.
+    """
+    try:
+        import xbmc
+        is_caching = bool(xbmc.getCondVisibility("Player.Caching"))
+        level = xbmc.getInfoLabel("Player.CacheLevel") or ""
+        return is_caching, level
+    except Exception:
+        return False, "?"
+
+
+def _is_caching_wedged(
+    caching_started_at: float | None,
+    is_caching_now: bool,
+    now: float,
+    grace_sec: float,
+) -> tuple[bool, float | None]:
+    """v0.7.50 pure helper: track how long Player.Caching has been True.
+
+    Returns ``(wedged, new_caching_started_at)``. The caller threads the
+    state through the per-tick monitor loop:
+
+    - ``is_caching_now`` False -> clear the timer; (False, None)
+    - first tick of caching=True -> start the timer; (False, now)
+    - caching continues within grace -> (False, started_at) preserve
+    - caching exceeds grace -> (True, started_at) trip + keep the
+      original start time so the caller can log how long it was stuck
+
+    Pure function: no xbmc imports, no time.time() calls, fully
+    deterministic given inputs. Tests pin the boundary behavior.
+    """
+    if not is_caching_now:
+        return False, None
+    if caching_started_at is None:
+        return False, now
+    if (now - caching_started_at) > grace_sec:
+        return True, caching_started_at
+    return False, caching_started_at
 
 
 def _current_dialog_id() -> int:
@@ -980,6 +1037,10 @@ def tv_play(
                 # advancing so we can tell "never decoded" from "decoded
                 # then froze" in the post-mortem.
                 logged_first_advance = False
+                # v0.7.50 caching-wedge watchdog state. None = not currently
+                # caching; float = wall-clock when Caching first flipped
+                # True. Reset to None when Caching flips back to False.
+                caching_started_at: float | None = None
                 while player.isPlaying():
                     if not _should_continue():
                         final_reason = "aborted"
@@ -1055,6 +1116,60 @@ def tv_play(
                             xbmcgui.Dialog().notification(
                                 "Chaturbate TV",
                                 "Stream stalled - moving on",
+                                xbmcgui.NOTIFICATION_INFO, 3000,
+                            )
+                        except Exception:  # noqa: S110 - best-effort
+                            pass
+                        break
+                    # v0.7.50 caching-wedge watchdog. Closes the gap from
+                    # 0.7.42: a decoder freeze where audio creeps wildly
+                    # out-of-sync keeps getTime() moving slowly so the
+                    # progress watchdog never trips, but Kodi already
+                    # knows the stream is wedged via Player.Caching ==
+                    # True. If that condition holds for >120s of wall
+                    # clock, trip the same recovery path.
+                    is_caching_now, cache_level = _read_caching_state()
+                    prev_caching_started_at = caching_started_at
+                    caching_wedged, caching_started_at = _is_caching_wedged(
+                        caching_started_at,
+                        is_caching_now,
+                        now_ts,
+                        _CACHING_WEDGE_GRACE_SEC,
+                    )
+                    # State-tracking diagnostic: log only on transitions so
+                    # the heartbeat stays clean.
+                    if (prev_caching_started_at is None
+                            and caching_started_at is not None):
+                        _safe_log(
+                            f"tv_loop.tv_play: iter={iter_count} "
+                            f"Player.Caching=True (cache_level={cache_level}); "
+                            f"watchdog grace {_CACHING_WEDGE_GRACE_SEC:.0f}s"
+                        )
+                    elif (prev_caching_started_at is not None
+                            and caching_started_at is None):
+                        recovered_after = now_ts - prev_caching_started_at
+                        _safe_log(
+                            f"tv_loop.tv_play: iter={iter_count} "
+                            f"Player.Caching=False (recovered after "
+                            f"{recovered_after:.0f}s)"
+                        )
+                    if caching_wedged:
+                        stuck_for = now_ts - (caching_started_at or now_ts)
+                        _safe_log(
+                            f"tv_loop.tv_play: iter={iter_count} "
+                            f"CACHING-WEDGE detected (Player.Caching=True "
+                            f"for {stuck_for:.0f}s, cache_level="
+                            f"{cache_level!r}); firing stop"
+                        )
+                        player.stall_detected = True
+                        try:
+                            xbmc.executebuiltin("PlayerControl(Stop)")
+                        except Exception:  # noqa: S110 - best-effort
+                            pass
+                        try:
+                            xbmcgui.Dialog().notification(
+                                "Chaturbate TV",
+                                "Stream caching stuck - moving on",
                                 xbmcgui.NOTIFICATION_INFO, 3000,
                             )
                         except Exception:  # noqa: S110 - best-effort
