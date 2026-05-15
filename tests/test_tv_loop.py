@@ -337,7 +337,7 @@ def test_should_attempt_silent_stub_mark_marker_within_extended_ttl_fires(
     """v0.7.49 regression: 2026-05-08 production wedge. The v0.7.48 fix
     used a 5.0s TTL on the Window-property fallback, but the actual
     zombie-stop race takes ~5+ seconds end-to-end (5 proxy reconnect
-    attempts at ~1s each, plus the inner-loop exit overhead). On bcore
+    attempts at ~1s each, plus the inner-loop exit overhead). In production
     at 10:47 CDT we observed:
 
       10:47:14 silent-stub setResolvedUrl + Window-property stamp
@@ -1691,7 +1691,7 @@ def test_caching_wedge_never_caching_no_state(
 ) -> None:
     """Healthy stream with Caching=False throughout -> no state, no trip.
 
-    The expected steady-state for a working stream. Verified live on bcore
+    The expected steady-state for a working stream. Verified live in production
     2026-05-10: cond_Player.Caching=False, info_Player.CacheLevel='100'.
     """
     tl = _import()

@@ -64,7 +64,7 @@ _PENDING_PLAY_TTL_SEC = 5.0
 # 0.7.42 never trips. Meanwhile Kodi already knows the stream is wedged
 # -- it draws a "Loading X%" overlay -- via the Player.Caching condition.
 # Read it directly and trip if Caching is True for more than the grace
-# window. Verified on bcore via probe-xbmc: cond Player.Caching is the
+# window. Verified in production via probe-xbmc: cond Player.Caching is the
 # exact source of truth for the on-screen caching overlay.
 _CACHING_WEDGE_GRACE_SEC = 120.0
 

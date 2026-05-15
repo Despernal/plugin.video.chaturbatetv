@@ -152,7 +152,7 @@ def fav_remove(handle: int, slug: str = "",
 # --------------------------------------------------------------------------- #
 
 
-def search(handle: int, **_params: Any) -> None:  # pragma: no cover - thin Kodi shim
+def search(handle: int, **_params: Any) -> None:
     """Prompt the user for a query, then run search_view with it.
 
     v0.7.39 (audit pass #5 MEDIUM, agent 1): the previous f-string
@@ -162,19 +162,48 @@ def search(handle: int, **_params: Any) -> None:  # pragma: no cover - thin Kodi
     sees it as a single literal query-string token. Mirrors the
     pattern every other Container.Update / RunPlugin builder in the
     codebase already follows.
+
+    v0.7.51 (search bug fix): when invoked via the main-menu Search
+    item, this handler runs as a directory click. Kodi expects every
+    directory-click handler to either populate a directory or call
+    ``endOfDirectory``; without that, Kodi treats the click as
+    "GetDirectory failed" and the dialog input is cancelled before
+    the user can submit. Adding ``_close_directory_handle`` after
+    the action (whether the user submits or cancels) lets the dialog
+    flow complete cleanly. Also added logging so we can trace the
+    prompt -> submit -> Container.Update chain via feature.log.
     """
+    from resources.lib import logger
+    logger._log(f"addon_actions.search: prompt opening handle={handle}")
     try:
-        import xbmc
         import xbmcgui
     except ImportError:
+        logger._log("addon_actions.search: xbmcgui unavailable, bail")
         return
-    from urllib.parse import urlencode
     query = xbmcgui.Dialog().input("Chaturbate Search", "")
+    logger._log(
+        f"addon_actions.search: prompt closed query_len={len(query or '')}"
+    )
     if not query:
+        # Cancel/empty-query path: close the directory cleanly so Kodi
+        # clears its busy spinner and the user stays on the parent menu.
+        _close_directory_handle(handle)
         return
-    qs = urlencode({"mode": "search", "query": query})
-    cmd = f"Container.Update(plugin://plugin.video.chaturbatetv/?{qs})"
-    xbmc.executebuiltin(cmd)
+    # v0.7.53: Container.Update was a misdirection. The plugin handler
+    # is invoked as a directory-load on a real handle; Kodi expects that
+    # handle to be POPULATED with a listing. Returning without populating
+    # it triggers Kodi's "GetDirectory failed" error AND drops the user
+    # at parent menu - regardless of whether endOfDirectory was called
+    # or what builtins we queued. Calling search_view directly on the
+    # current handle populates THIS directory with results - no redirect
+    # race, no failed-directory error. URL stays as ?mode=search_prompt
+    # in the breadcrumb (so Back re-prompts), but actually shows results.
+    from resources.lib import browse_views
+    logger._log(
+        f"addon_actions.search: invoking search_view query={query!r} "
+        f"on handle={handle}"
+    )
+    browse_views.search_view(handle=handle, query=query, page=1)
 
 
 # --------------------------------------------------------------------------- #

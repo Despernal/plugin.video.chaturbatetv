@@ -2841,3 +2841,98 @@ def test_tv_remove_unknown_entry_is_no_op(
                       store_path=tv_path)
     # alice still there.
     assert len(tv_store.load(tv_path)) == 1
+
+
+# --------------------------------------------------------------------------- #
+# search (the prompt-and-redirect shim)
+# v0.7.51: pin the spinner-fix behavior. The search prompt is invoked as a
+# directory click (`plugin://...?mode=search_prompt`); Kodi waits for an
+# endOfDirectory call before the dialog input can complete. Without it,
+# Kodi logs "GetDirectory failed" and the dialog never gets a chance to
+# return a value to the shim.
+# --------------------------------------------------------------------------- #
+
+
+def test_search_empty_query_still_closes_directory(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """User cancels dialog (or types nothing): we still close the
+    directory so Kodi clears its busy spinner."""
+    # Default _Dialog.input returns "" -> empty query path
+    actions = _import()
+    actions.search(handle=42)
+    # Container.Update should NOT be fired for empty query
+    builtins = [
+        call.args[0] for call in
+        kodi_mocks["xbmc"].executebuiltin.call_args_list
+    ]
+    assert not any("Container.Update" in b for b in builtins), \
+        f"Container.Update fired on empty query: {builtins}"
+    # endOfDirectory MUST be called
+    kodi_mocks["xbmcplugin"].endOfDirectory.assert_called_with(
+        42, succeeded=False
+    )
+
+
+def test_search_with_query_invokes_search_view_directly(
+    kodi_mocks: dict[str, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """User types a query and submits: shim calls
+    ``browse_views.search_view(handle, query=...)`` DIRECTLY on the
+    current handle to populate the search_prompt directory in place.
+
+    v0.7.53: Container.Update was a misdirection. The plugin handler
+    is invoked as a directory load on a real handle; Kodi expects
+    that handle to be populated. Returning without populating it
+    triggers Kodi's "GetDirectory failed" error AND drops the user
+    back at parent - regardless of whether endOfDirectory was called
+    or what builtins we queued. Live trace 2026-05-15
+    16:53:21: Container.Update fired (logged), but next dispatch
+    was still mode='' (main_menu), AND kodi.log still had the
+    GetDirectory failed error. The race wasn't winnable.
+
+    Calling search_view directly with the same handle is the only
+    reliable pattern: dialog returns the query, shim populates THIS
+    directory, Kodi shows results.
+    """
+    # Override the dialog to return a non-empty query
+    class _DialogWithQuery:
+        def input(self, *args: Any, **kwargs: Any) -> str:
+            return "model_a"
+
+        def notification(self, *args: Any, **kwargs: Any) -> None:
+            return None
+
+    monkeypatch.setattr(kodi_mocks["xbmcgui"], "Dialog", _DialogWithQuery)
+
+    # Patch browse_views.search_view to a spy so we can verify the call
+    spy = MagicMock()
+    monkeypatch.setattr(
+        "resources.lib.browse_views.search_view", spy
+    )
+
+    actions = _import()
+    actions.search(handle=42)
+
+    # search_view must be called with handle=42 and the query
+    spy.assert_called_once()
+    call_kwargs = spy.call_args.kwargs
+    assert call_kwargs.get("handle") == 42, \
+        f"search_view called with wrong handle: {spy.call_args}"
+    assert call_kwargs.get("query") == "model_a", \
+        f"search_view called with wrong query: {spy.call_args}"
+
+    # Container.Update must NOT be fired - we're populating in-place
+    builtins = [
+        call.args[0] for call in
+        kodi_mocks["xbmc"].executebuiltin.call_args_list
+    ]
+    assert not any("Container.Update" in b for b in builtins), \
+        f"Container.Update should not fire when invoking search_view directly: {builtins}"
+
+    # endOfDirectory: search_view itself handles the listing close,
+    # so the shim should NOT call _close_directory_handle on submit.
+    assert not kodi_mocks["xbmcplugin"].endOfDirectory.called, \
+        ("endOfDirectory must not be called by the shim on submit - "
+         "search_view itself closes the listing")
