@@ -1703,3 +1703,234 @@ def test_caching_wedge_never_caching_no_state(
     )
     assert wedged is False
     assert new_at is None
+
+
+# ---------------------------------------------------------------------------
+# v0.7.52 post-Stop wedge watchdog tests
+#
+# Production wedge 2026-05-17 01:16:56 CDT: hls_proxy fired
+# PlayerControl(Stop) (3x in quick succession after the 5-attempt
+# reconnect GIVE UP on slug model_a). The player NEVER acknowledged the
+# Stop -- xbmc.Player().isPlaying() stayed True forever. Result: the
+# inner monitor loop's ``while player.isPlaying():`` condition stayed
+# True, no heartbeat for 7+ hours, Kodi UI stuck on a busy spinner.
+#
+# Root cause: ``PlayerControl(Stop)`` is fire-and-forget. If Kodi's
+# main thread is wedged (libcurl hang, decoder lockup, ...) the stop
+# request is queued but never processed. The watchdog v0.7.41
+# (getTime) and v0.7.50 (Caching) both keyed off the *player's*
+# self-reported state -- but here the player was unresponsive to ALL
+# state queries, so those watchdogs didn't fire either.
+#
+# The new watchdog keys off an EXTERNAL signal: hls_proxy stamps
+# Window(10000).chaturbatetv_force_stop_at when it fires
+# PlayerControl(Stop). The tv_loop reads the timestamp every tick and
+# trips if isPlaying() is still True after grace_sec past the most
+# recent stop request. Recovery path: stall_detected=True + break
+# (same as the v0.7.41 / v0.7.50 paths).
+#
+# The pure helper _is_stop_wedged() is the test target. The
+# Window-property plumbing in the inner loop is verified by production
+# observation. ---------------------------------------------------------
+
+
+def test_stop_wedge_no_request_no_state(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """No stop has been requested -> no state, no trip.
+
+    The expected steady-state during normal playback: hls_proxy hasn't
+    needed to call force_player_stop, so the Window property is unset
+    and the helper sees ``force_stop_at=None``.
+    """
+    tl = _import()
+    wedged, new_at = tl._is_stop_wedged(
+        force_stop_at=None,
+        is_playing_now=True,
+        now=1000.0,
+        grace_sec=30.0,
+    )
+    assert wedged is False
+    assert new_at is None
+
+
+def test_stop_wedge_player_not_playing_clears(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """isPlaying=False after a stop request -> stop worked, clear state.
+
+    Normal recovery: hls_proxy fired Stop, Kodi honored it, isPlaying()
+    flipped False. The inner ``while player.isPlaying():`` will exit on
+    its own; the watchdog clears its timer so the next iteration starts
+    fresh.
+    """
+    tl = _import()
+    wedged, new_at = tl._is_stop_wedged(
+        force_stop_at=1000.0,
+        is_playing_now=False,  # stop worked
+        now=1015.0,
+        grace_sec=30.0,
+    )
+    assert wedged is False
+    assert new_at is None
+
+
+def test_stop_wedge_within_grace_no_trip(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """Stop requested, still playing, within grace -> preserve, don't trip.
+
+    Kodi normally takes <1s to honor PlayerControl(Stop) but the inner
+    loop ticks every 5s and pathological cases can take longer. Grace
+    is 30s so we don't false-fire on the normal-but-slow stop path.
+    """
+    tl = _import()
+    wedged, new_at = tl._is_stop_wedged(
+        force_stop_at=1000.0,
+        is_playing_now=True,
+        now=1025.0,  # 25s since stop request, grace is 30
+        grace_sec=30.0,
+    )
+    assert wedged is False
+    assert new_at == 1000.0  # timer preserved
+
+
+def test_stop_wedge_past_grace_trips(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """Stop requested + still playing past grace -> trip.
+
+    This is the production wedge. Kodi's player has wedged and is no
+    longer responding to PlayerControl(Stop). We must break the inner
+    loop ourselves to recover.
+    """
+    tl = _import()
+    wedged, new_at = tl._is_stop_wedged(
+        force_stop_at=1000.0,
+        is_playing_now=True,
+        now=1035.0,  # 35s past stop request, grace is 30
+        grace_sec=30.0,
+    )
+    assert wedged is True
+    assert new_at == 1000.0  # preserved so caller can log how long stuck
+
+
+def test_stop_wedge_recovery_after_request_clears(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """Player flipped to not-playing AFTER we'd armed the timer -> clear.
+
+    Mirror of the v0.7.50 recovery test: once isPlaying() is False, the
+    outer loop is about to exit naturally. Clearing the timer here is
+    cosmetic but keeps state hygiene right for the next iteration.
+    """
+    tl = _import()
+    wedged, new_at = tl._is_stop_wedged(
+        force_stop_at=1000.0,  # was armed
+        is_playing_now=False,  # now recovered
+        now=1010.0,
+        grace_sec=30.0,
+    )
+    assert wedged is False
+    assert new_at is None
+
+
+def test_stop_wedge_request_updated_resets_grace(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """A more recent stop request resets the grace window.
+
+    Production observed: 3 force_player_stop calls within 50s. Each
+    new call updates Window(10000).chaturbatetv_force_stop_at. The
+    helper must measure against the LATEST timestamp, not the first.
+    """
+    tl = _import()
+    # First request at 1000, would be past grace if it stuck:
+    # but caller passes the LATEST timestamp (1050) - 1010 = -40
+    # would underflow grace. The helper handles "fresh request" via
+    # the same code path as "first request" because both just compare
+    # now - force_stop_at.
+    wedged, new_at = tl._is_stop_wedged(
+        force_stop_at=1050.0,  # latest (most-recent) stop request
+        is_playing_now=True,
+        now=1060.0,  # only 10s since the latest, within grace
+        grace_sec=30.0,
+    )
+    assert wedged is False
+    assert new_at == 1050.0
+
+
+# ---------------------------------------------------------------------------
+# v0.7.53 stale-stamp filter tests
+#
+# Production false-positive 2026-05-17 10:11-10:33 CDT: the
+# v0.7.52 watchdog tripped 6 times on HEALTHY streams because the
+# Window(10000).chaturbatetv_force_stop_at prop persists across iters.
+# When iter=N's hls_proxy fires force_player_stop on the way out, it
+# stamps the prop. The NEXT iter (iter=N+1) starts a fresh play with
+# a different slug + port, but immediately reads the stale stamp.
+# Within 30s, _is_stop_wedged trips on a stream that was never wedged.
+# Killed 6 healthy streams in 22 minutes; TV mode bailed via
+# consecutive_stalls=5/5.
+#
+# Fix: _select_stop_signal() filters out stamps from before the
+# current play started. The inner monitor loop captures play_start_at
+# at the top and passes it in. Only stamps >= play_start_at are
+# treated as in-session signals; older stamps are zeroed to None.
+# ---------------------------------------------------------------------------
+
+
+def test_select_stop_signal_none_input_passes_through(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """No stamp at all -> still None regardless of play_start_at."""
+    tl = _import()
+    assert tl._select_stop_signal(None, 1000.0) is None
+
+
+def test_select_stop_signal_stale_stamp_filtered(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """Stamp older than play_start_at -> filtered to None.
+
+    The production bug: iter=3 started a fresh play at ~10:11:28; the
+    Window prop held a stamp from 10:11:17 (a force_player_stop from
+    iter=2's exit path). Without filtering, the watchdog adopts the
+    stale stamp, sees isPlaying=True 31s later, trips, kills the
+    healthy stream.
+    """
+    tl = _import()
+    # stamp from BEFORE this play started
+    stamp = 1000.0
+    play_start = 1010.0
+    assert tl._select_stop_signal(stamp, play_start) is None
+
+
+def test_select_stop_signal_fresh_stamp_passes_through(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """Stamp from after play started -> in-session, pass through.
+
+    The green path: this play's own hls_proxy fired a real Stop. The
+    watchdog should react to this one.
+    """
+    tl = _import()
+    play_start = 1000.0
+    stamp = 1015.0  # fired 15s into this play
+    assert tl._select_stop_signal(stamp, play_start) == 1015.0
+
+
+def test_select_stop_signal_exact_equal_passes_through(
+    kodi_mods: dict[str, Any],
+) -> None:
+    """Stamp == play_start_at -> in-session edge case, pass through.
+
+    Picking >= vs > on the boundary matters under clock-jitter cases
+    where the stamp gets written within the same microsecond as the
+    play_start capture. Prefer the inclusive bound so we don't lose a
+    legitimately concurrent signal.
+    """
+    tl = _import()
+    play_start = 1000.0
+    stamp = 1000.0
+    assert tl._select_stop_signal(stamp, play_start) == 1000.0

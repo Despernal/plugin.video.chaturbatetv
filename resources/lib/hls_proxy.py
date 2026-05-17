@@ -816,6 +816,19 @@ def _force_player_stop(state: _State) -> None:
         xbmc.executebuiltin("PlayerControl(Stop)")
     except Exception as exc:
         _log(f"force_player_stop: failed err={exc!r}")
+    # v0.7.52 post-Stop wedge signal: stamp the Kodi-global Window so
+    # tv_loop (in a different addon process) can detect when the
+    # player wedges and never honors this Stop. tv_loop trips its
+    # POST-STOP-WEDGE watchdog if isPlaying() is still True
+    # grace-seconds past this timestamp. Best-effort - we already
+    # fired the Stop; the signal is a backstop.
+    try:
+        import xbmcgui
+        xbmcgui.Window(10000).setProperty(
+            "chaturbatetv_force_stop_at", str(nowt)
+        )
+    except Exception:  # noqa: S110 - best-effort, signal is backstop
+        pass
 
 
 def _make_handler(host: str, port: int, state: _State,

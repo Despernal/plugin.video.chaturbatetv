@@ -68,6 +68,22 @@ _PENDING_PLAY_TTL_SEC = 5.0
 # exact source of truth for the on-screen caching overlay.
 _CACHING_WEDGE_GRACE_SEC = 120.0
 
+# v0.7.52: post-Stop wedge watchdog. Production wedge 2026-05-17:
+# hls_proxy fired PlayerControl(Stop) 3x after a 5-attempt
+# reconnect GIVE UP, but Kodi's player never honored any of them --
+# isPlaying() stayed True for 7+ hours, the inner monitor loop's
+# ``while player.isPlaying():`` never exited, no heartbeats, Kodi UI
+# stuck on a busy spinner.
+#
+# Both the v0.7.41 stall watchdog (getTime) and the v0.7.50 caching
+# watchdog (Player.Caching) queried the *player* for state -- but the
+# player itself was unresponsive, so neither tripped. The fix uses
+# an EXTERNAL signal: hls_proxy stamps this Window(10000) property
+# every time it fires force_player_stop, and tv_loop trips if
+# isPlaying() is still True grace_sec past the most recent stamp.
+_FORCE_STOP_AT_KEY = "chaturbatetv_force_stop_at"
+_STOP_WEDGE_GRACE_SEC = 30.0
+
 _SILENT_STUB_SLUG_KEY = "chaturbatetv_silent_stub_slug"
 _SILENT_STUB_EPOCH_KEY = "chaturbatetv_silent_stub_epoch"
 # v0.7.49: bumped from 5.0s. Production wedge 2026-05-08 10:47 CDT:
@@ -175,6 +191,82 @@ def _is_caching_wedged(
     if (now - caching_started_at) > grace_sec:
         return True, caching_started_at
     return False, caching_started_at
+
+
+def _read_force_stop_at() -> float | None:
+    """Read the most recent force_player_stop wall-clock from Window(10000).
+
+    hls_proxy._force_player_stop stamps Window(10000).chaturbatetv_force_stop_at
+    with str(time.time()) right after firing PlayerControl(Stop). We read it
+    here from the tv_loop process (separate from the playvid/hls_proxy
+    process). Best-effort: missing / unparseable / xbmcgui-not-importable
+    (test context) returns None so the watchdog never trips spuriously.
+    """
+    try:
+        import xbmcgui
+        raw = xbmcgui.Window(10000).getProperty(_FORCE_STOP_AT_KEY)
+        if not raw:
+            return None
+        return float(raw)
+    except Exception:
+        return None
+
+
+def _select_stop_signal(
+    new_stop_at: float | None,
+    play_start_at: float,
+) -> float | None:
+    """v0.7.53 pure helper: gate Window-prop stamps to current play session.
+
+    The v0.7.52 watchdog tripped on stale stamps from prior iters because
+    Window(10000).chaturbatetv_force_stop_at persists across iter
+    rotations (it lives on the Kodi-global window, not per-iter local
+    state). Production false-positive 2026-05-17 10:11-10:33 CDT: 6
+    healthy streams killed in 22min because each fresh iter
+    immediately adopted the previous iter's exit-time stamp.
+
+    Filter rule: only stamps from at-or-after the current play_start_at
+    are in-session signals. Earlier stamps are zombies, return None.
+    Inclusive bound (>=) handles microsecond-jitter on a stamp written
+    within the same instant as play_start was captured.
+
+    Pure function: no xbmc, no time.time(), fully deterministic.
+    """
+    if new_stop_at is None or new_stop_at < play_start_at:
+        return None
+    return new_stop_at
+
+
+def _is_stop_wedged(
+    force_stop_at: float | None,
+    is_playing_now: bool,
+    now: float,
+    grace_sec: float,
+) -> tuple[bool, float | None]:
+    """v0.7.52 pure helper: detect when the player ignored a stop request.
+
+    Returns ``(wedged, new_force_stop_at)``. Threading model mirrors
+    :func:`_is_caching_wedged`:
+
+    - ``is_playing_now`` False -> stop worked (or never armed); (False, None)
+    - no stop has been requested yet -> (False, None)
+    - stop requested, still playing within grace -> (False, force_stop_at)
+    - stop requested, still playing past grace -> (True, force_stop_at)
+
+    The "latest request wins" semantics are upstream of this helper:
+    the caller reads the Window-property value (always the most recent
+    stamp from hls_proxy) and passes it in. A fresh request resets the
+    grace simply because (now - force_stop_at) becomes small again.
+
+    Pure function: no xbmc imports, no time.time(), fully deterministic.
+    """
+    if not is_playing_now:
+        return False, None
+    if force_stop_at is None:
+        return False, None
+    if (now - force_stop_at) > grace_sec:
+        return True, force_stop_at
+    return False, force_stop_at
 
 
 def _current_dialog_id() -> int:
@@ -1041,6 +1133,21 @@ def tv_play(
                 # caching; float = wall-clock when Caching first flipped
                 # True. Reset to None when Caching flips back to False.
                 caching_started_at: float | None = None
+                # v0.7.52 post-Stop wedge watchdog state. Tracks the
+                # most recent force_player_stop timestamp we've seen
+                # (or armed locally). Reset to None when isPlaying
+                # flips False, i.e. the stop finally worked.
+                force_stop_at: float | None = None
+                # v0.7.53 stale-stamp filter: capture the wall-clock
+                # at which THIS play started. The Window prop
+                # ``chaturbatetv_force_stop_at`` persists across
+                # iters; without this gate, fresh iters adopted
+                # stamps from the previous iter's exit-time
+                # force_player_stop and tripped POST-STOP-WEDGE on
+                # healthy streams (production false-positive
+                # 2026-05-17 10:11-10:33 CDT, 6 streams killed in
+                # 22min before TV mode bailed via consecutive_stalls=5/5).
+                play_start_at: float = time.time()
                 while player.isPlaying():
                     if not _should_continue():
                         final_reason = "aborted"
@@ -1170,6 +1277,60 @@ def tv_play(
                             xbmcgui.Dialog().notification(
                                 "Chaturbate TV",
                                 "Stream caching stuck - moving on",
+                                xbmcgui.NOTIFICATION_INFO, 3000,
+                            )
+                        except Exception:  # noqa: S110 - best-effort
+                            pass
+                        break
+                    # v0.7.52 post-Stop wedge watchdog. Closes the gap
+                    # the v0.7.41/v0.7.50 watchdogs can't see: when
+                    # Kodi's player itself wedges (e.g. libcurl hang
+                    # mid-fetch), PlayerControl(Stop) is fire-and-
+                    # forget but isPlaying() never flips False. Both
+                    # earlier watchdogs query the player for state, so
+                    # they don't trip either. We detect the wedge via
+                    # an external signal: hls_proxy stamps
+                    # Window(10000).chaturbatetv_force_stop_at every
+                    # time it fires force_player_stop. If we're still
+                    # playing >grace past the most recent stamp, the
+                    # player has wedged and we must break ourselves.
+                    # Production wedge 2026-05-17 01:16:56 CDT:
+                    # 3 force_player_stop calls within 50s,
+                    # then 7+ hours of silence on a busy spinner.
+                    new_stop_at = _select_stop_signal(
+                        _read_force_stop_at(), play_start_at,
+                    )
+                    if new_stop_at is not None:
+                        # Latest-stamp-wins: pick up newer requests.
+                        if force_stop_at is None or new_stop_at > force_stop_at:
+                            force_stop_at = new_stop_at
+                    prev_force_stop_at = force_stop_at
+                    stop_wedged, force_stop_at = _is_stop_wedged(
+                        force_stop_at,
+                        bool(player.isPlaying()),
+                        now_ts,
+                        _STOP_WEDGE_GRACE_SEC,
+                    )
+                    if (prev_force_stop_at is None
+                            and force_stop_at is not None):
+                        _safe_log(
+                            f"tv_loop.tv_play: iter={iter_count} "
+                            f"force_stop_at armed (t={force_stop_at:.0f}); "
+                            f"watchdog grace {_STOP_WEDGE_GRACE_SEC:.0f}s"
+                        )
+                    if stop_wedged:
+                        stuck_for = now_ts - (force_stop_at or now_ts)
+                        _safe_log(
+                            f"tv_loop.tv_play: iter={iter_count} "
+                            f"POST-STOP-WEDGE detected (isPlaying still "
+                            f"True {stuck_for:.0f}s after force_stop_at); "
+                            f"breaking inner loop"
+                        )
+                        player.stall_detected = True
+                        try:
+                            xbmcgui.Dialog().notification(
+                                "Chaturbate TV",
+                                "Player wedged - moving on",
                                 xbmcgui.NOTIFICATION_INFO, 3000,
                             )
                         except Exception:  # noqa: S110 - best-effort
