@@ -673,14 +673,32 @@ def view_model_info(
 
     from resources.lib import model_meta_store as mms
     import time as _time
+
+    # v0.7.54: per-phase timing instrumentation. After the 2026-05-29
+    # 70s lockup on model_d with NO indication of which line
+    # burned the time, we now emit one consolidated "done" log so the
+    # next occurrence pinpoints the slow phase. Phases that do not run
+    # are omitted from the summary (e.g. fetch_bio_ms only appears when
+    # the inline biocontext branch fired).
+    _t_total_start = _time.monotonic()
+    _phase_ms: dict[str, float] = {}
+
+    def _stamp(phase: str, start: float) -> None:
+        _phase_ms[phase] = (_time.monotonic() - start) * 1000.0
+
     row: dict[str, Any] = {}
     try:
+        _t = _time.monotonic()
         conn = mms.open_db(str(_model_meta_db_path()))
+        _stamp("db_open_ms", _t)
         try:
+            _t = _time.monotonic()
             row = mms.get_model(conn, slug) or {}
+            _stamp("get_model_ms", _t)
             # Fetch inline when the row has no bio coverage yet.
             if not row.get("bio_fetched_epoch"):
                 bio: dict[str, Any] = {}
+                _t = _time.monotonic()
                 try:
                     bio = fetch_biocontext_func(slug)
                 except Exception as exc:
@@ -689,18 +707,32 @@ def view_model_info(
                         f"slug={slug!r} err={exc!r}"
                     )
                     bio = {}
+                _stamp("fetch_bio_ms", _t)
                 if bio:
+                    _t = _time.monotonic()
                     mms.upsert_biocontext(
                         conn, slug, bio, now=int(_time.time()),
                     )
+                    _stamp("upsert_bio_ms", _t)
+                    _t = _time.monotonic()
                     row = mms.get_model(conn, slug) or {}
+                    _stamp("get_model2_ms", _t)
         finally:
             conn.close()
     except Exception as exc:
         logger._log(f"view_model_info: DB error slug={slug!r} err={exc!r}")
         row = {}
 
+    _t = _time.monotonic()
     _render_view_model_info(handle, slug=slug, row=row)
+    _stamp("render_ms", _t)
+
+    _total_ms = (_time.monotonic() - _t_total_start) * 1000.0
+    _phase_str = " ".join(f"{k}={v:.0f}" for k, v in _phase_ms.items())
+    logger._log(
+        f"view_model_info: done slug={slug!r} total_ms={_total_ms:.0f} "
+        f"{_phase_str}"
+    )
 
 
 def _render_view_model_info(
@@ -720,16 +752,27 @@ def _render_view_model_info(
     import xbmcplugin
     from urllib.parse import urlencode
     from resources.lib import model_meta_store as mms
+    from resources.lib import logger
     import json as _json
+    import time as _time
+
+    # v0.7.54: per-phase timing inside render, paired with the
+    # view_model_info wrapper timing so a slow render is distinguishable
+    # from a slow DB/fetch.
+    _t_render_start = _time.monotonic()
+    _t = _time.monotonic()
 
     title = (row.get("real_name") or row.get("display_name")
              or row.get("last_subject") or slug)
     image = mms.image_for_row(row) or None
+    _image_ms = (_time.monotonic() - _t) * 1000.0
 
     plugin_prefix = "plugin://plugin.video.chaturbatetv/"
     profile_url = (
         f"{plugin_prefix}?{urlencode({'mode': 'show_profile', 'slug': slug})}"
     )
+
+    _t = _time.monotonic()
 
     # Header: click opens the full-bio scrollable textviewer dialog.
     header_label = f"[COLOR FF00d4ff][ View full profile: {title} ][/COLOR]"
@@ -825,8 +868,22 @@ def _render_view_model_info(
             handle=handle, url=item_url, listitem=li, isFolder=True,
         )
 
+    _add_items_ms = (_time.monotonic() - _t) * 1000.0
+
+    _t = _time.monotonic()
     xbmcplugin.setContent(handle, "videos")
     xbmcplugin.endOfDirectory(handle, succeeded=True)
+    _end_of_dir_ms = (_time.monotonic() - _t) * 1000.0
+
+    _render_total_ms = (_time.monotonic() - _t_render_start) * 1000.0
+    logger._log(
+        f"_render_view_model_info: done slug={slug!r} "
+        f"render_total_ms={_render_total_ms:.0f} "
+        f"image_ms={_image_ms:.0f} "
+        f"add_items_ms={_add_items_ms:.0f} "
+        f"end_of_dir_ms={_end_of_dir_ms:.0f} "
+        f"photo_sets={len(photo_sets)}"
+    )
 
 
 def show_profile(

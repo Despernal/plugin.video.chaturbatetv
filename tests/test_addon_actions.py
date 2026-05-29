@@ -1542,6 +1542,148 @@ def test_view_model_info_skips_with_empty_slug(
     assert any(c.args and c.args[0] == 42 for c in end_calls)
 
 
+def test_view_model_info_emits_phase_timing_summary(
+    kodi_mocks: dict[str, MagicMock],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v0.7.54: view_model_info must emit a consolidated 'done' log line
+    with per-phase timings so a future lockup (like the 2026-05-29 70s
+    hang on model_d) can be pinpointed without re-running the
+    user's session.
+
+    Required keys in the done line: total_ms, db_open_ms, get_model_ms,
+    render_ms. Optional keys appear only when their phase ran:
+    fetch_bio_ms, upsert_bio_ms, get_model2_ms.
+    """
+    actions = _import()
+    db_path = str(tmp_path / "meta.db")
+    monkeypatch.setattr(actions, "_model_meta_db_path",
+                        lambda: Path(db_path))
+
+    import resources.lib.model_meta_store as mms_real
+    conn = mms_real.open_db(db_path)
+    try:
+        mms_real.upsert_biocontext(conn, "trace_me", {
+            "real_name": "TraceMe",
+            "about_me": "hello there",
+        }, now=1_000_000)
+    finally:
+        conn.close()
+
+    captured: list[str] = []
+    from resources.lib import logger as logger_module
+    monkeypatch.setattr(logger_module, "_log",
+                        lambda msg, log_path=None: captured.append(str(msg)))
+
+    actions.view_model_info(
+        handle=42,
+        slug="trace_me",
+        fetch_biocontext_func=lambda s: {},
+    )
+
+    done_lines = [m for m in captured if m.startswith("view_model_info: done")]
+    assert len(done_lines) == 1, (
+        f"expected exactly one 'view_model_info: done' summary line, "
+        f"got {len(done_lines)}: {done_lines!r}"
+    )
+    line = done_lines[0]
+    assert "slug='trace_me'" in line, f"slug missing in summary: {line!r}"
+    for key in ("total_ms=", "db_open_ms=", "get_model_ms=", "render_ms="):
+        assert key in line, f"missing required phase {key!r} in: {line!r}"
+
+
+def test_view_model_info_timing_summary_includes_fetch_phase_when_inline_refresh(
+    kodi_mocks: dict[str, MagicMock],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v0.7.54: when the inline biocontext fetch fires (no
+    bio_fetched_epoch yet), the timing summary must include
+    fetch_bio_ms so we can distinguish a slow fetch from a slow render.
+    """
+    actions = _import()
+    db_path = str(tmp_path / "meta.db")
+    monkeypatch.setattr(actions, "_model_meta_db_path",
+                        lambda: Path(db_path))
+
+    captured: list[str] = []
+    from resources.lib import logger as logger_module
+    monkeypatch.setattr(logger_module, "_log",
+                        lambda msg, log_path=None: captured.append(str(msg)))
+
+    actions.view_model_info(
+        handle=42,
+        slug="never_cached",
+        fetch_biocontext_func=lambda s: {
+            "real_name": "Cached",
+            "about_me": "first time",
+        },
+    )
+
+    done_lines = [m for m in captured if m.startswith("view_model_info: done")]
+    assert len(done_lines) == 1
+    line = done_lines[0]
+    assert "fetch_bio_ms=" in line, (
+        f"fetch_bio_ms missing despite inline fetch path: {line!r}"
+    )
+    assert "upsert_bio_ms=" in line, (
+        f"upsert_bio_ms missing despite successful fetch+upsert: {line!r}"
+    )
+
+
+def test_render_view_model_info_emits_phase_timing_summary(
+    kodi_mocks: dict[str, MagicMock],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v0.7.54: _render_view_model_info must emit its own consolidated
+    timing line so we can tell whether the slow path was render vs DB.
+    Required keys: render_total_ms, image_ms, add_items_ms,
+    end_of_dir_ms.
+    """
+    actions = _import()
+    db_path = str(tmp_path / "meta.db")
+    monkeypatch.setattr(actions, "_model_meta_db_path",
+                        lambda: Path(db_path))
+
+    import resources.lib.model_meta_store as mms_real
+    conn = mms_real.open_db(db_path)
+    try:
+        mms_real.upsert_biocontext(conn, "render_me", {
+            "real_name": "RenderMe",
+            "about_me": "with photos",
+            "photo_sets": [
+                {"name": "Set A", "cover_url": "http://thumb/a.jpg",
+                 "tip_amount": 50},
+            ],
+        }, now=1_000_000)
+    finally:
+        conn.close()
+
+    captured: list[str] = []
+    from resources.lib import logger as logger_module
+    monkeypatch.setattr(logger_module, "_log",
+                        lambda msg, log_path=None: captured.append(str(msg)))
+
+    actions.view_model_info(
+        handle=42,
+        slug="render_me",
+        fetch_biocontext_func=lambda s: {},
+    )
+
+    render_lines = [m for m in captured
+                    if "_render_view_model_info: done" in m]
+    assert len(render_lines) == 1, (
+        f"expected exactly one '_render_view_model_info: done' line, "
+        f"got {len(render_lines)}: {render_lines!r}"
+    )
+    line = render_lines[0]
+    for key in ("render_total_ms=", "image_ms=", "add_items_ms=",
+                "end_of_dir_ms="):
+        assert key in line, f"missing required render phase {key!r}: {line!r}"
+
+
 def test_refresh_one_model_marks_404_as_gone(
     kodi_mocks: dict[str, MagicMock],
     tmp_path: Path,
