@@ -748,6 +748,7 @@ def _render_view_model_info(
     photo_set to open its cover_url in Kodi's fullscreen picture
     viewer (the photos themselves are paywalled).
     """
+    import xbmc
     import xbmcgui
     import xbmcplugin
     from urllib.parse import urlencode
@@ -761,6 +762,19 @@ def _render_view_model_info(
     # from a slow DB/fetch.
     _t_render_start = _time.monotonic()
     _t = _time.monotonic()
+
+    # v0.7.56: when a player is active, skip photo_set thumb fetches
+    # entirely. Even at 1 slot per item (v0.7.55's thumb-only fix), the
+    # chaturbate image CDN is slow enough that N parallel cover fetches
+    # starve the video decoder ('OutputPicture timeout waiting for
+    # buffer' continued at ~5/sec instead of 18/sec, but freezes
+    # persisted). When the player is idle (browsing favs without
+    # watching) we still set thumb for the visual.
+    _player_active = False
+    try:
+        _player_active = bool(xbmc.Player().isPlaying())
+    except Exception:
+        _player_active = False
 
     title = (row.get("real_name") or row.get("display_name")
              or row.get("last_subject") or slug)
@@ -851,12 +865,11 @@ def _render_view_model_info(
 
         li = xbmcgui.ListItem(label=label)
         li.setProperty("IsPlayable", "false")
-        if cover:
-            # v0.7.55: thumb-only. Setting icon + fanart spawned 3x the
-            # texture cache fetches (51 for 17 photo_sets) which starved
-            # the video decoder while a stream was playing -- "OutputPicture
-            # timeout waiting for buffer" at 18 msg/sec. Real-world repro
-            # 2026-05-29 01:42 CDT.
+        if cover and not _player_active:
+            # v0.7.55: thumb-only (icon + fanart dropped, spawned 3x the
+            # texture cache fetches). v0.7.56: also gated on player
+            # inactivity -- even one thumb per item starved the decoder
+            # when a stream was playing.
             li.setArt({"thumb": cover})
         li.setInfo("video", {"plot": plot, "title": label})
 

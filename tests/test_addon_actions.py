@@ -1632,6 +1632,110 @@ def test_view_model_info_timing_summary_includes_fetch_phase_when_inline_refresh
     )
 
 
+def test_view_model_info_photo_set_skips_art_during_playback(
+    kodi_mocks: dict[str, MagicMock],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v0.7.56: when a player is active, photo_set ListItems MUST skip
+    setArt entirely. Even after the v0.7.55 thumb-only fix (51 -> 17
+    parallel fetches), the chaturbate image CDN was still slow enough
+    that 17 parallel cover fetches starved the video decoder
+    (OutputPicture timeouts continued at ~5/sec instead of 18/sec, but
+    the freezes still happened). Skipping setArt during active playback
+    eliminates the fetch storm completely; the cover is decorative and
+    the user can read the photo_set label/cost/count without it.
+    """
+    actions = _import()
+    db_path = str(tmp_path / "meta.db")
+    monkeypatch.setattr(actions, "_model_meta_db_path",
+                        lambda: Path(db_path))
+
+    import resources.lib.model_meta_store as mms_real
+    conn = mms_real.open_db(db_path)
+    try:
+        mms_real.upsert_biocontext(conn, "playing_now", {
+            "real_name": "PlayingNow",
+            "photo_sets": [
+                {"name": f"Set {i}", "cover_url": f"http://thumb/{i}.jpg",
+                 "tip_amount": 50}
+                for i in range(3)
+            ],
+        }, now=1_000_000)
+    finally:
+        conn.close()
+
+    kodi_mocks["xbmc"].Player.return_value.isPlaying.return_value = True
+
+    actions.view_model_info(
+        handle=42,
+        slug="playing_now",
+        fetch_biocontext_func=lambda s: {},
+    )
+
+    li_class = kodi_mocks["xbmcgui"].ListItem
+    art_calls = li_class.return_value.setArt.call_args_list
+    photo_set_art_calls = [
+        c for c in art_calls
+        if c.args and isinstance(c.args[0], dict)
+        and any(str(v).startswith("http://thumb/") for v in c.args[0].values())
+    ]
+    assert len(photo_set_art_calls) == 0, (
+        f"expected ZERO photo_set setArt calls when player is active "
+        f"(decoder-starvation fix), got {len(photo_set_art_calls)}: "
+        f"{photo_set_art_calls!r}"
+    )
+
+
+def test_view_model_info_photo_set_keeps_thumb_when_idle(
+    kodi_mocks: dict[str, MagicMock],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v0.7.56: when no player is active, photo_set ListItems still set
+    a thumb (the decorative cover) -- the skip is conditional on active
+    playback, not unconditional.
+    """
+    actions = _import()
+    db_path = str(tmp_path / "meta.db")
+    monkeypatch.setattr(actions, "_model_meta_db_path",
+                        lambda: Path(db_path))
+
+    import resources.lib.model_meta_store as mms_real
+    conn = mms_real.open_db(db_path)
+    try:
+        mms_real.upsert_biocontext(conn, "idle_now", {
+            "real_name": "IdleNow",
+            "photo_sets": [
+                {"name": "Set A", "cover_url": "http://thumb/a.jpg",
+                 "tip_amount": 50},
+            ],
+        }, now=1_000_000)
+    finally:
+        conn.close()
+
+    kodi_mocks["xbmc"].Player.return_value.isPlaying.return_value = False
+
+    actions.view_model_info(
+        handle=42,
+        slug="idle_now",
+        fetch_biocontext_func=lambda s: {},
+    )
+
+    li_class = kodi_mocks["xbmcgui"].ListItem
+    art_calls = li_class.return_value.setArt.call_args_list
+    photo_set_art_calls = [
+        c for c in art_calls
+        if c.args and isinstance(c.args[0], dict)
+        and any(str(v).startswith("http://thumb/") for v in c.args[0].values())
+    ]
+    assert len(photo_set_art_calls) == 1, (
+        f"expected 1 photo_set setArt call when player is idle, "
+        f"got {len(photo_set_art_calls)}: {photo_set_art_calls!r}"
+    )
+    assert set(photo_set_art_calls[0].args[0].keys()) == {"thumb"}
+
+
 def test_view_model_info_photo_set_art_uses_thumb_only(
     kodi_mocks: dict[str, MagicMock],
     tmp_path: Path,
@@ -1664,6 +1768,9 @@ def test_view_model_info_photo_set_art_uses_thumb_only(
         }, now=1_000_000)
     finally:
         conn.close()
+
+    # v0.7.56: player must be idle for thumbs to be set.
+    kodi_mocks["xbmc"].Player.return_value.isPlaying.return_value = False
 
     actions.view_model_info(
         handle=42,
