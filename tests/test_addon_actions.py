@@ -1632,6 +1632,64 @@ def test_view_model_info_timing_summary_includes_fetch_phase_when_inline_refresh
     )
 
 
+def test_view_model_info_photo_set_art_uses_thumb_only(
+    kodi_mocks: dict[str, MagicMock],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v0.7.55: photo_set ListItems must call setArt with ONLY a 'thumb'
+    key, never 'icon' or 'fanart'. Real-world repro 2026-05-29 01:42 CDT:
+    opening View Info for a model with 17 photo_sets WHILE a stream was
+    playing wedged Kodi's video decoder ('OutputPicture - timeout waiting
+    for buffer' at 18 msg/sec) and ActiveAE reported 52820s audio sync
+    error. Root cause: 17 photo_sets * 3 art slots = 51 simultaneous
+    thumbnail HTTP fetches saturated the texture cache thread and starved
+    the decoder. Trimming to 1 slot reduces the fetch storm 3x.
+    """
+    actions = _import()
+    db_path = str(tmp_path / "meta.db")
+    monkeypatch.setattr(actions, "_model_meta_db_path",
+                        lambda: Path(db_path))
+
+    import resources.lib.model_meta_store as mms_real
+    conn = mms_real.open_db(db_path)
+    try:
+        mms_real.upsert_biocontext(conn, "many_sets", {
+            "real_name": "ManySets",
+            "photo_sets": [
+                {"name": f"Set {i}", "cover_url": f"http://thumb/{i}.jpg",
+                 "tip_amount": 50}
+                for i in range(5)
+            ],
+        }, now=1_000_000)
+    finally:
+        conn.close()
+
+    actions.view_model_info(
+        handle=42,
+        slug="many_sets",
+        fetch_biocontext_func=lambda s: {},
+    )
+
+    li_class = kodi_mocks["xbmcgui"].ListItem
+    art_calls = li_class.return_value.setArt.call_args_list
+    photo_set_art_calls = [
+        c for c in art_calls
+        if c.args and isinstance(c.args[0], dict)
+        and any(str(v).startswith("http://thumb/") for v in c.args[0].values())
+    ]
+    assert len(photo_set_art_calls) == 5, (
+        f"expected 5 photo_set setArt calls, got {len(photo_set_art_calls)}: "
+        f"{photo_set_art_calls!r}"
+    )
+    for call in photo_set_art_calls:
+        art_dict = call.args[0]
+        assert set(art_dict.keys()) == {"thumb"}, (
+            f"photo_set setArt should set ONLY 'thumb' (decoder-starvation "
+            f"fix), got keys={set(art_dict.keys())!r} on call {call!r}"
+        )
+
+
 def test_render_view_model_info_emits_phase_timing_summary(
     kodi_mocks: dict[str, MagicMock],
     tmp_path: Path,

@@ -852,7 +852,12 @@ def _render_view_model_info(
         li = xbmcgui.ListItem(label=label)
         li.setProperty("IsPlayable", "false")
         if cover:
-            li.setArt({"thumb": cover, "icon": cover, "fanart": cover})
+            # v0.7.55: thumb-only. Setting icon + fanart spawned 3x the
+            # texture cache fetches (51 for 17 photo_sets) which starved
+            # the video decoder while a stream was playing -- "OutputPicture
+            # timeout waiting for buffer" at 18 msg/sec. Real-world repro
+            # 2026-05-29 01:42 CDT.
+            li.setArt({"thumb": cover})
         li.setInfo("video", {"plot": plot, "title": label})
 
         if cover:
