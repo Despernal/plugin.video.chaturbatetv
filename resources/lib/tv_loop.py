@@ -1228,6 +1228,33 @@ def tv_play(
                         except Exception:  # noqa: S110 - best-effort
                             pass
                         break
+                    # v0.7.57 error-dialog watchdog (2026-06-07 husk
+                    # incident): a play attempt that never decodes can
+                    # leave Kodi's "no audio/video stream" OK dialog
+                    # (12002) up while isPlaying() stays True. The stall
+                    # watchdog never arms (it requires first-advance),
+                    # so without this check the loop heartbeats under
+                    # the error dialog indefinitely.
+                    if tv_classify.is_error_dialog_stuck(
+                        dialog_id=_current_dialog_id(),
+                        has_first_advance=logged_first_advance,
+                        elapsed_in_inner_loop=float(elapsed),
+                    ):
+                        _safe_log(
+                            f"tv_loop.tv_play: iter={iter_count} "
+                            f"ERROR-DIALOG detected (dialog_id="
+                            f"{_current_dialog_id()}, no first-advance, "
+                            f"elapsed={elapsed}s); closing dialog + advancing"
+                        )
+                        try:
+                            xbmc.executebuiltin("Dialog.Close(all,true)")
+                        except Exception:  # noqa: S110 - best-effort
+                            pass
+                        try:
+                            xbmc.executebuiltin("PlayerControl(Stop)")
+                        except Exception:  # noqa: S110 - best-effort
+                            pass
+                        break
                     # v0.7.50 caching-wedge watchdog. Closes the gap from
                     # 0.7.42: a decoder freeze where audio creeps wildly
                     # out-of-sync keeps getTime() moving slowly so the

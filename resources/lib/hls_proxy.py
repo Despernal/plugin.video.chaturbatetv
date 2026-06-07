@@ -226,6 +226,12 @@ class ProxyHandle:
     _thread: threading.Thread
     _state: _State
     _stopped: bool = False
+    # v0.7.57: False when the master prefetch failed at start_proxy time.
+    # A husk proxy serves ISA the empty EXTM3U envelope -> Kodi pops
+    # "no audio/video stream can be played" (2026-06-07 incident). The
+    # resolver checks this and re-resolves for a fresh edge session
+    # instead of handing the husk to setResolvedUrl.
+    prefetch_ok: bool = True
 
     def stop(self) -> None:
         """Shut the proxy down. Safe to call more than once."""
@@ -1297,6 +1303,7 @@ def start_proxy(stream_url: str, room_url: str,
         _server=server,
         _thread=thread,
         _state=state,
+        prefetch_ok=bool(prefetch_absolutized),
     )
 
     # Step 5: populate the closure box BEFORE serving, so any incoming

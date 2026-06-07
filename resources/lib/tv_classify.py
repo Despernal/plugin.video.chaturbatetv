@@ -167,3 +167,33 @@ def is_progress_stalled(
         return (False, last_position, last_advance_at)
     stalled = (now - last_advance_at) >= stall_seconds
     return (stalled, last_position, last_advance_at)
+
+
+def is_error_dialog_stuck(
+    *,
+    dialog_id: int,
+    has_first_advance: bool,
+    elapsed_in_inner_loop: float,
+    grace_seconds: float = 15.0,
+    error_dialog_ids: tuple[int, ...] = (12002,),
+) -> bool:
+    """True when an error dialog sits over a stream that never decoded.
+
+    2026-06-07 husk incident: a prefetch-failed proxy served ISA a
+    25-byte master; Kodi popped "no audio/video stream can be played"
+    (WINDOW_DIALOG_OK = 12002) while ``isPlaying()`` stayed True. The
+    stall watchdog (``is_progress_stalled``) never armed because it
+    requires first-advance, so the inner loop heartbeated under the
+    error dialog for minutes.
+
+    The signature is precise: an error dialog id, NO first getTime()
+    advance ever (the stream never decoded), and enough elapsed time
+    that this is not a transient open/close flicker. ``has_first_advance``
+    keeps healthy streams with unrelated OK dialogs safe (the v0.7.53
+    false-positive lesson: never kill a stream that is provably playing).
+    """
+    if has_first_advance:
+        return False
+    if dialog_id not in error_dialog_ids:
+        return False
+    return elapsed_in_inner_loop >= grace_seconds

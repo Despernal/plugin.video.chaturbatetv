@@ -200,6 +200,50 @@ def resolve_to_listitem(
     except Exception:
         return PlayvidResult(success=False, listitem=None, proxy=None)
 
+    # v0.7.57 husk guard (2026-06-07): a prefetch-failed proxy serves ISA
+    # an empty EXTM3U envelope -> Kodi's "no audio/video stream" dialog.
+    # CB's ajax can hand back the SAME stale edge session right after a
+    # stream dies, so re-resolve ONCE for a fresh session; if that also
+    # fails to prefetch, fail cleanly (TV mode silent-stubs and advances).
+    if not getattr(proxy, "prefetch_ok", True):
+        from resources.lib import logger  # local import, file convention
+
+        logger._log(
+            f"playvid_resolver: prefetch FAIL for {slug!r}, "
+            f"re-resolving for a fresh edge session"
+        )
+        try:
+            proxy.stop()
+        except Exception:  # noqa: S110 - best-effort teardown
+            pass
+        try:
+            resolution = rf(slug)
+        except Exception:
+            return PlayvidResult(success=False, listitem=None, proxy=None)
+        if not resolution.is_live or not resolution.hls_source:
+            logger._log(
+                f"playvid_resolver: re-resolve says {slug!r} is offline, "
+                f"failing cleanly"
+            )
+            return PlayvidResult(success=False, listitem=None, proxy=None)
+        try:
+            proxy = sp(resolution.hls_source, room_url)
+        except Exception:
+            return PlayvidResult(success=False, listitem=None, proxy=None)
+        if not getattr(proxy, "prefetch_ok", True):
+            logger._log(
+                f"playvid_resolver: prefetch FAIL again for {slug!r} on a "
+                f"fresh session, failing cleanly (no husk to ISA)"
+            )
+            try:
+                proxy.stop()
+            except Exception:  # noqa: S110 - best-effort teardown
+                pass
+            return PlayvidResult(success=False, listitem=None, proxy=None)
+        logger._log(
+            f"playvid_resolver: fresh session prefetch OK for {slug!r}"
+        )
+
     listitem = _build_listitem(
         name=name or slug,
         master_url=proxy.master_url,

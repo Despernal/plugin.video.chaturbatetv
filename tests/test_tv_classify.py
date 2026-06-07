@@ -392,3 +392,51 @@ def test_progress_stalled_tiny_nonzero_position_can_fire() -> None:
         elapsed_in_inner_loop=130.0,
     )
     assert stalled is True
+
+
+# --------------------------------------------------------------------------- #
+# v0.7.57: error-dialog watchdog (2026-06-07 husk incident)
+#
+# A prefetch-failed proxy served ISA a 25-byte master; Kodi popped
+# "no audio/video stream can be played" (dialog 12002) while
+# isPlaying() stayed True. The stall watchdog never armed (it requires
+# first-advance), so the loop heartbeated under the error dialog for
+# minutes. Signature: error dialog + never advanced + past grace.
+# --------------------------------------------------------------------------- #
+
+
+def test_error_dialog_stuck_detects_husk_signature() -> None:
+    from resources.lib.tv_classify import is_error_dialog_stuck
+    assert is_error_dialog_stuck(
+        dialog_id=12002, has_first_advance=False, elapsed_in_inner_loop=20.0,
+    ) is True
+
+
+def test_error_dialog_not_stuck_before_grace() -> None:
+    from resources.lib.tv_classify import is_error_dialog_stuck
+    assert is_error_dialog_stuck(
+        dialog_id=12002, has_first_advance=False, elapsed_in_inner_loop=10.0,
+    ) is False
+
+
+def test_error_dialog_ignored_after_first_advance() -> None:
+    # A healthy decoding stream with some unrelated OK dialog up must
+    # NOT be killed (v0.7.53 false-positive lesson).
+    from resources.lib.tv_classify import is_error_dialog_stuck
+    assert is_error_dialog_stuck(
+        dialog_id=12002, has_first_advance=True, elapsed_in_inner_loop=300.0,
+    ) is False
+
+
+def test_no_dialog_is_not_stuck() -> None:
+    from resources.lib.tv_classify import is_error_dialog_stuck
+    assert is_error_dialog_stuck(
+        dialog_id=9999, has_first_advance=False, elapsed_in_inner_loop=60.0,
+    ) is False
+
+
+def test_non_error_dialog_ignored() -> None:
+    from resources.lib.tv_classify import is_error_dialog_stuck
+    assert is_error_dialog_stuck(
+        dialog_id=13003, has_first_advance=False, elapsed_in_inner_loop=60.0,
+    ) is False

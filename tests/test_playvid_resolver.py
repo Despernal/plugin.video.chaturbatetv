@@ -490,3 +490,107 @@ def test_default_resolve_plumbs_cb_client_ajax_into_cb_resolve(
     assert captured["slug"] == "alice"
     assert isinstance(captured["status"], dict)
     assert captured["status"]["room_status"] == "public"
+
+
+# --------------------------------------------------------------------------- #
+# v0.7.57: prefetch-husk regression (2026-06-07)
+#
+# start_proxy swallows prefetch failure and used to return a handle whose
+# master is a 25-byte EXTM3U envelope. ISA sees zero streams -> Kodi error
+# dialog. The resolver must detect prefetch_ok=False, tear the husk down,
+# re-resolve ONCE (fresh edge session - CB's ajax can return a stale one
+# right after a stream dies), and fail cleanly if it happens again.
+# --------------------------------------------------------------------------- #
+
+
+class _PrefetchAwareProxy(_FakeProxyHandle):
+    def __init__(self, prefetch_ok: bool) -> None:
+        super().__init__()
+        self.prefetch_ok = prefetch_ok
+
+
+def test_prefetch_fail_retries_resolve_once_and_succeeds(
+    mock_xbmcgui: MagicMock,
+) -> None:
+    mod = _import_resolver()
+    resolve_calls: list[str] = []
+
+    def rf(slug: str) -> Resolution:
+        resolve_calls.append(slug)
+        return _live_resolution(slug)
+
+    proxies = [_PrefetchAwareProxy(False), _PrefetchAwareProxy(True)]
+    started: list[str] = []
+
+    def sp(stream_url: str, room_url: str) -> Any:
+        started.append(stream_url)
+        return proxies[len(started) - 1]
+
+    result = mod.resolve_to_listitem(
+        "alice", "alice", resolve_func=rf, start_proxy_func=sp)
+    assert result.success is True
+    assert len(resolve_calls) == 2, "must re-resolve for a fresh edge session"
+    assert len(started) == 2
+    assert proxies[0].stopped is True, "husk proxy must be torn down"
+    assert result.proxy is proxies[1]
+
+
+def test_prefetch_fail_twice_returns_failure(mock_xbmcgui: MagicMock) -> None:
+    mod = _import_resolver()
+    proxies = [_PrefetchAwareProxy(False), _PrefetchAwareProxy(False)]
+    started: list[str] = []
+
+    def sp(stream_url: str, room_url: str) -> Any:
+        started.append(stream_url)
+        return proxies[len(started) - 1]
+
+    result = mod.resolve_to_listitem(
+        "alice", "alice",
+        resolve_func=lambda s: _live_resolution(s), start_proxy_func=sp)
+    assert result.success is False
+    assert len(started) == 2
+    assert proxies[0].stopped is True
+    assert proxies[1].stopped is True, "second husk must also be torn down"
+
+
+def test_prefetch_fail_then_offline_returns_failure(
+    mock_xbmcgui: MagicMock,
+) -> None:
+    mod = _import_resolver()
+    resolutions = [_live_resolution(), _offline_resolution()]
+    resolve_calls: list[str] = []
+
+    def rf(slug: str) -> Resolution:
+        resolve_calls.append(slug)
+        return resolutions[len(resolve_calls) - 1]
+
+    proxy = _PrefetchAwareProxy(False)
+    started: list[str] = []
+
+    def sp(stream_url: str, room_url: str) -> Any:
+        started.append(stream_url)
+        return proxy
+
+    result = mod.resolve_to_listitem(
+        "alice", "alice", resolve_func=rf, start_proxy_func=sp)
+    assert result.success is False
+    assert len(started) == 1, "offline re-resolve must not start another proxy"
+    assert proxy.stopped is True
+
+
+def test_proxy_without_prefetch_flag_treated_as_ok(
+    mock_xbmcgui: MagicMock,
+) -> None:
+    # Back-compat: handles without the flag (older mocks) behave as before.
+    mod = _import_resolver()
+    resolve_calls: list[str] = []
+
+    def rf(slug: str) -> Resolution:
+        resolve_calls.append(slug)
+        return _live_resolution(slug)
+
+    result = mod.resolve_to_listitem(
+        "alice", "alice",
+        resolve_func=rf, start_proxy_func=lambda u, r: _FakeProxyHandle())
+    assert result.success is True
+    assert len(resolve_calls) == 1

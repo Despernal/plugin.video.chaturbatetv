@@ -520,3 +520,50 @@ def test_unknown_path_returns_404(
         assert exc.value.code == 404
     finally:
         handle.stop()
+
+
+# --------------------------------------------------------------------------- #
+# v0.7.57: prefetch_ok flag (2026-06-07 husk incident)
+# --------------------------------------------------------------------------- #
+
+
+def test_start_proxy_sets_prefetch_ok_false_on_fetch_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import resources.lib.hls_proxy as hp
+
+    def _boom(url: str, headers: dict, timeout: float = 10.0):
+        raise OSError("simulated 403 on stale edge session")
+
+    monkeypatch.setattr(hp, "_fetch", _boom)
+    handle = hp.start_proxy(
+        "https://edge99.live.mmcdn.com/hls/stale/master.m3u8",
+        "https://chaturbate.com/husk/",
+    )
+    try:
+        assert handle.prefetch_ok is False
+    finally:
+        handle.stop()
+
+
+def test_start_proxy_sets_prefetch_ok_true_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import resources.lib.hls_proxy as hp
+
+    body = (b"#EXTM3U\n#EXT-X-VERSION:3\n"
+            b"#EXT-X-STREAM-INF:BANDWIDTH=1000000\n"
+            b"chunklist_1_video_42_llhls.m3u8\n")
+
+    def _ok(url: str, headers: dict, timeout: float = 10.0):
+        return body, "application/vnd.apple.mpegurl"
+
+    monkeypatch.setattr(hp, "_fetch", _ok)
+    handle = hp.start_proxy(
+        "https://edge99.live.mmcdn.com/hls/fresh/master.m3u8",
+        "https://chaturbate.com/healthy/",
+    )
+    try:
+        assert handle.prefetch_ok is True
+    finally:
+        handle.stop()
