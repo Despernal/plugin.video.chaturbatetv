@@ -1934,3 +1934,64 @@ def test_select_stop_signal_exact_equal_passes_through(
     play_start = 1000.0
     stamp = 1000.0
     assert tl._select_stop_signal(stamp, play_start) == 1000.0
+
+
+# --------------------------------------------------------------------------- #
+# v0.7.58: out-of-loop progress watchdog thread wiring (fires/silent/exits).
+# The pure decision is covered in test_tv_classify; these cover the thread
+# wrapper calling recover_fn correctly via injected fakes.
+# --------------------------------------------------------------------------- #
+
+
+class _FakeMonitor:
+    def __init__(self, exit_after: int = 2) -> None:
+        self.n = 0
+        self.exit_after = exit_after
+
+    def waitForAbort(self, _s: float) -> bool:
+        self.n += 1
+        return self.n >= self.exit_after
+
+
+def test_progress_watchdog_fires_recover_when_wedged(monkeypatch) -> None:
+    import time as _t
+
+    import resources.lib.tv_loop as tv
+    monkeypatch.setattr(tv, "_read_progress_at", lambda: 1000.0)
+    monkeypatch.setattr(_t, "time", lambda: 2000.0)  # age 1000s >> 150s
+    fired = []
+    tv._run_progress_watchdog(
+        monitor=_FakeMonitor(), is_active=lambda: True,
+        recover_fn=lambda: fired.append(1),
+    )
+    assert fired == [1]
+
+
+def test_progress_watchdog_silent_when_healthy(monkeypatch) -> None:
+    import time as _t
+
+    import resources.lib.tv_loop as tv
+    monkeypatch.setattr(tv, "_read_progress_at", lambda: 1990.0)  # 10s old
+    monkeypatch.setattr(_t, "time", lambda: 2000.0)
+    fired = []
+    tv._run_progress_watchdog(
+        monitor=_FakeMonitor(), is_active=lambda: True,
+        recover_fn=lambda: fired.append(1),
+    )
+    assert fired == []
+
+
+def test_progress_watchdog_exits_when_inactive() -> None:
+    import resources.lib.tv_loop as tv
+    fired = []
+
+    class _Mon:
+        def waitForAbort(self, _s: float) -> bool:
+            return False
+
+    # is_active False from the start -> never enters body, never fires.
+    tv._run_progress_watchdog(
+        monitor=_Mon(), is_active=lambda: False,
+        recover_fn=lambda: fired.append(1),
+    )
+    assert fired == []

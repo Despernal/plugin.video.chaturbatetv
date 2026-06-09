@@ -440,3 +440,72 @@ def test_non_error_dialog_ignored() -> None:
     assert is_error_dialog_stuck(
         dialog_id=13003, has_first_advance=False, elapsed_in_inner_loop=60.0,
     ) is False
+
+
+# --------------------------------------------------------------------------- #
+# v0.7.58: out-of-loop progress watchdog (the silent-stub/post-stop wedge,
+# 3rd recurrence 2026-06-09). The in-loop watchdogs are blind when the loop
+# itself hangs; a separate thread watches a progress-age window prop. These
+# pin the no-false-positive contract.
+# --------------------------------------------------------------------------- #
+
+
+def test_progress_wedged_past_threshold() -> None:
+    from resources.lib.tv_classify import is_progress_wedged
+    # 151s of no progress while active -> wedged.
+    assert is_progress_wedged(progress_at=1000.0, now=1151.0, active=True,
+                              threshold_s=150.0) is True
+
+
+def test_progress_not_wedged_within_threshold() -> None:
+    from resources.lib.tv_classify import is_progress_wedged
+    # A healthy stream stamps every <=60s; age never exceeds ~65s.
+    assert is_progress_wedged(progress_at=1000.0, now=1065.0, active=True,
+                              threshold_s=150.0) is False
+    # Exactly at threshold is NOT wedged (strictly greater).
+    assert is_progress_wedged(progress_at=1000.0, now=1150.0, active=True,
+                              threshold_s=150.0) is False
+
+
+def test_progress_not_wedged_when_inactive() -> None:
+    from resources.lib.tv_classify import is_progress_wedged
+    # TV mode not active -> never wedged, however stale.
+    assert is_progress_wedged(progress_at=1000.0, now=9999.0, active=False,
+                              threshold_s=150.0) is False
+
+
+def test_progress_not_wedged_before_first_stamp() -> None:
+    from resources.lib.tv_classify import is_progress_wedged
+    # No progress stamp yet (None) -> don't fire (loop just started).
+    assert is_progress_wedged(progress_at=None, now=1000.0, active=True,
+                              threshold_s=150.0) is False
+
+
+def test_watchdog_fires_first_time_when_wedged() -> None:
+    from resources.lib.tv_classify import watchdog_should_recover
+    assert watchdog_should_recover(progress_at=1000.0, now=1200.0, active=True,
+                                   last_recover_at=None, threshold_s=150.0,
+                                   backoff_s=90.0) is True
+
+
+def test_watchdog_backs_off_after_firing() -> None:
+    from resources.lib.tv_classify import watchdog_should_recover
+    # Just fired 30s ago (< backoff 90s) -> don't spam.
+    assert watchdog_should_recover(progress_at=1000.0, now=1200.0, active=True,
+                                   last_recover_at=1170.0, threshold_s=150.0,
+                                   backoff_s=90.0) is False
+
+
+def test_watchdog_refires_after_backoff_if_still_wedged() -> None:
+    from resources.lib.tv_classify import watchdog_should_recover
+    # Fired 100s ago (>= backoff) and still stale -> try again.
+    assert watchdog_should_recover(progress_at=1000.0, now=1300.0, active=True,
+                                   last_recover_at=1200.0, threshold_s=150.0,
+                                   backoff_s=90.0) is True
+
+
+def test_watchdog_silent_when_not_wedged() -> None:
+    from resources.lib.tv_classify import watchdog_should_recover
+    assert watchdog_should_recover(progress_at=1000.0, now=1060.0, active=True,
+                                   last_recover_at=None, threshold_s=150.0,
+                                   backoff_s=90.0) is False

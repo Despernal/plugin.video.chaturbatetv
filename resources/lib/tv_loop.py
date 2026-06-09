@@ -84,6 +84,24 @@ _CACHING_WEDGE_GRACE_SEC = 120.0
 _FORCE_STOP_AT_KEY = "chaturbatetv_force_stop_at"
 _STOP_WEDGE_GRACE_SEC = 30.0
 
+# v0.7.58 OUT-OF-LOOP progress watchdog. Every existing watchdog runs INSIDE
+# the inner monitor loop, so when the loop itself hangs (a modal dialog
+# blocking the main thread -- the v0.7.15 'playback failed' freeze -- or the
+# silent-stub/post-stop wedge that blocks before the next heartbeat) they are
+# blind, and the only recovery was a Kodi restart (3 wedges: 05-29, 06-03,
+# 06-09). The tv_play loop now stamps this Window(10000) prop with
+# str(time.time()) on every sign of life (iter start, onAVStarted, each
+# inner-loop heartbeat). A separate daemon thread -- which reads ONLY window
+# props, never the (possibly hung) player API -- trips if the age exceeds
+# _WEDGE_THRESHOLD_SEC while TV mode is active. POSITIVE-progress signal: a
+# healthy stream refreshes <=60s so it can NEVER look wedged, unlike the
+# v0.7.52 force-stop-stamp approach that adopted stale cross-iter stamps and
+# false-positived (killed 6 healthy streams -> v0.7.53). 150s = 2.5x margin.
+_PROGRESS_AT_KEY = "chaturbatetv_tv_progress_at"
+_WEDGE_THRESHOLD_SEC = 150.0
+_WEDGE_BACKOFF_SEC = 90.0
+_WEDGE_POLL_SEC = 20.0
+
 _SILENT_STUB_SLUG_KEY = "chaturbatetv_silent_stub_slug"
 _SILENT_STUB_EPOCH_KEY = "chaturbatetv_silent_stub_epoch"
 # v0.7.49: bumped from 5.0s. Production wedge 2026-05-08 10:47 CDT:
@@ -210,6 +228,96 @@ def _read_force_stop_at() -> float | None:
         return float(raw)
     except Exception:
         return None
+
+
+def _stamp_progress() -> None:
+    """Stamp Window(10000) with 'the TV loop made progress just now' (v0.7.58).
+
+    Best-effort: in pure-test contexts xbmcgui isn't importable, so this is a
+    no-op there. Cheap setProperty; called at iter start, onAVStarted, and
+    each inner-loop heartbeat.
+    """
+    try:
+        import time
+
+        import xbmcgui
+        xbmcgui.Window(10000).setProperty(_PROGRESS_AT_KEY, str(time.time()))
+    except Exception:
+        # best-effort; xbmcgui not importable in pure-test contexts
+        return
+
+
+def _read_progress_at() -> float | None:
+    """Read the last progress stamp; None if missing/unparseable (so the
+    watchdog never trips spuriously, e.g. before the first stamp)."""
+    try:
+        import xbmcgui
+        raw = xbmcgui.Window(10000).getProperty(_PROGRESS_AT_KEY)
+        if not raw:
+            return None
+        return float(raw)
+    except Exception:
+        return None
+
+
+def _wedge_recover() -> None:
+    """In-process wedge recovery (v0.7.58). Dismiss any modal dialog blocking
+    the main thread (the v0.7.15 'playback failed' / busy-spinner freeze) and
+    stop the player so the hung loop can advance. Re-stamps progress so the
+    recovered loop resets the clock and the watchdog backs off. If a harder
+    Kodi-level hang survives this, the autonomous cron's Kodi restart is still
+    the backstop -- but this catches the common modal-dialog case in-process.
+    """
+    _safe_log("tv_loop: WEDGE-WATCHDOG recover -> Dialog.Close(all) + Stop")
+    try:
+        import xbmc
+        xbmc.executebuiltin("Dialog.Close(all,true)")
+        xbmc.executebuiltin("PlayerControl(Stop)")
+    except Exception:  # noqa: S110 - best-effort
+        pass
+    _stamp_progress()
+
+
+def _run_progress_watchdog(
+    *,
+    monitor: Any,
+    is_active: Callable[[], bool],
+    recover_fn: Callable[[], None] | None = None,
+    threshold_s: float = _WEDGE_THRESHOLD_SEC,
+    backoff_s: float = _WEDGE_BACKOFF_SEC,
+    poll_s: float = _WEDGE_POLL_SEC,
+) -> None:
+    """Daemon-thread target: the out-of-loop wedge watchdog (v0.7.58).
+
+    Reads ONLY window props (never the player API), so it stays responsive
+    even when the main invoker thread is hung. Fires ``recover_fn`` when
+    ``tv_classify.watchdog_should_recover`` says the loop has made no progress
+    for ``threshold_s``, backing off ``backoff_s`` between fires. Exits when
+    TV mode goes inactive or Kodi aborts.
+    """
+    import time
+    recover = recover_fn if recover_fn is not None else _wedge_recover
+    last_recover_at: float | None = None
+    while is_active():
+        if monitor.waitForAbort(poll_s):
+            return
+        if not is_active():
+            return
+        now = time.time()
+        if tv_classify.watchdog_should_recover(
+            progress_at=_read_progress_at(),
+            now=now,
+            active=True,
+            last_recover_at=last_recover_at,
+            threshold_s=threshold_s,
+            backoff_s=backoff_s,
+        ):
+            _safe_log(
+                f"tv_loop: WEDGE-WATCHDOG tripped (no progress >{threshold_s:.0f}s "
+                f"while active); firing recovery"
+            )
+            recover()
+            last_recover_at = now
 
 
 def _select_stop_signal(
@@ -350,6 +458,7 @@ def _build_player_class() -> type:
             self.queued_paths = set()
 
         def onAVStarted(self) -> None:
+            _stamp_progress()  # v0.7.58: playback started = a sign of life
             try:
                 cur = self.getPlayingFile()
             except Exception:
@@ -982,6 +1091,18 @@ def tv_play(
     def _is_active() -> bool:
         return win.getProperty(_ACTIVE_KEY) == "1"
 
+    # v0.7.58: start the out-of-loop wedge watchdog (daemon). It reads only
+    # window props, so it stays responsive if the main thread hangs; it exits
+    # when _is_active() flips false (the finally clears _ACTIVE_KEY).
+    _stamp_progress()
+    import threading
+    threading.Thread(
+        target=_run_progress_watchdog,
+        kwargs={"monitor": monitor, "is_active": _is_active},
+        name="cbtv-wedge-watchdog",
+        daemon=True,
+    ).start()
+
     try:
         if not entries:
             _safe_log("tv_loop.tv_play: empty list")
@@ -1002,6 +1123,7 @@ def tv_play(
             try:
                 iter_count += 1
                 _safe_log(f"tv_loop.tv_play: iter={iter_count}")
+                _stamp_progress()  # v0.7.58: new iter = a sign of life
                 # v0.7.34: re-read tv.json each outer iteration so
                 # mid-session tv_add / tv_remove / tv_edit (which run
                 # in a separate Kodi-spawned process) take effect on
@@ -1368,6 +1490,7 @@ def tv_play(
                     # enough breadcrumbs to spot a gap.
                     if ticks_since_log >= 12:  # 12 * 5s = 60s
                         ticks_since_log = 0
+                        _stamp_progress()  # v0.7.58: heartbeat = a sign of life
                         _safe_log(
                             f"tv_loop.tv_play: iter={iter_count} "
                             f"inner-loop heartbeat elapsed={elapsed}s "

@@ -197,3 +197,55 @@ def is_error_dialog_stuck(
     if dialog_id not in error_dialog_ids:
         return False
     return elapsed_in_inner_loop >= grace_seconds
+
+
+def is_progress_wedged(
+    *,
+    progress_at: float | None,
+    now: float,
+    active: bool,
+    threshold_s: float = 150.0,
+) -> bool:
+    """True when TV mode is active but has made NO progress for too long.
+
+    The out-of-loop watchdog (v0.7.58) keys recovery off this. The tv_play
+    loop stamps a "progress" timestamp on every sign of life (iter start,
+    onAVStarted, every inner-loop heartbeat ~60s). A healthy stream therefore
+    keeps the age under ~65s; only a genuine multi-minute hang (the
+    silent-stub/post-stop wedge, where the loop blocks before its next
+    heartbeat) lets the age cross ``threshold_s``.
+
+    This is deliberately a POSITIVE-progress signal, NOT the v0.7.52
+    force-stop-timestamp approach: that one adopted stale cross-iter stamps
+    and false-positived on healthy streams (killed 6 in 22 min -> v0.7.53).
+    A healthy loop here can never look wedged because it refreshes the stamp
+    itself. Returns False before the first stamp (None) so a just-started
+    loop is never killed.
+    """
+    if not active or progress_at is None:
+        return False
+    return (now - progress_at) > threshold_s
+
+
+def watchdog_should_recover(
+    *,
+    progress_at: float | None,
+    now: float,
+    active: bool,
+    last_recover_at: float | None,
+    threshold_s: float = 150.0,
+    backoff_s: float = 90.0,
+) -> bool:
+    """Decide whether the watchdog thread should fire recovery this tick.
+
+    Fires when :func:`is_progress_wedged` AND we have not already fired within
+    ``backoff_s`` (so a still-hung loop gets retried, but we don't spam
+    ``Dialog.Close`` / ``PlayerControl(Stop)`` every poll interval).
+    """
+    if not is_progress_wedged(
+        progress_at=progress_at, now=now, active=active, threshold_s=threshold_s,
+    ):
+        return False
+    if last_recover_at is None:
+        return True
+    return (now - last_recover_at) >= backoff_s
