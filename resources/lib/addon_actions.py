@@ -248,6 +248,11 @@ def playvid(handle: int, slug: str = "", name: str = "",
     from resources.lib import playvid_resolver
     result = playvid_resolver.resolve_to_listitem(slug=slug, name=name or slug)
     logger._log(f"playvid: resolve_to_listitem success={result.success} slug={slug!r}")
+    # v0.7.59: remember whether this resolve's live-status fetch actually
+    # succeeded. _tv_bulk_mark_offline (here, and via the tv_loop silent-stub /
+    # stall paths) reads it to avoid poisoning the offline blocklist during a
+    # network-wide outage. A successful resolve clears any prior fail flag.
+    _note_status_fetch(slug, result.status_known)
 
     try:
         import xbmcplugin
@@ -1449,6 +1454,23 @@ _OFFLINE_SESSION_SLUGS: dict[str, float] = {}
 # transient state gets re-considered within a single TV-mode session.
 _OFFLINE_BLOCK_TTL_SEC: float = 900.0
 
+# v0.7.59: per-slug "the most recent live-status fetch FAILED" record
+# (slug -> epoch). DISTINCT from _OFFLINE_SESSION_SLUGS (the confirmed-offline
+# blocklist): this one flags slugs whose 'offline' verdict is UNTRUSTWORTHY
+# because the fetch itself failed -- a network-wide 403 storm / Cloudflare HTML
+# / timeout, not a clean 200 saying the room signed off. _tv_bulk_mark_offline
+# consults it and refuses to poison the blocklist+cache for such slugs, so a
+# whole-API outage can no longer wedge TV mode (the 2026-06-17 incident: every
+# model 403'd -> all marked offline -> re-stamped each cycle -> the v0.7.45 TTL
+# never fired -> no self-recovery without a Kodi restart). Cleared per-slug on
+# the next SUCCESSFUL fetch (_note_status_fetch) and wholesale on tv_stop;
+# TTL-pruned. Guarded by _TV_CACHE_LOCK (same discipline as the blocklist).
+_FETCH_FAILED_SLUGS: dict[str, float] = {}
+# Suppression window: long enough to bridge resolve -> silent-stub -> tv_loop
+# mark-offline (a few seconds across all three call sites), short enough that a
+# stale flag on a slug we never re-fetch self-clears on the next prune.
+_FETCH_FAIL_TTL_SEC: float = 120.0
+
 # Non-blocking lock that serializes _tv_bulk_refresh() callers.
 # Multiple call sites converge on this function: the TV loop's
 # ``_make_bulk_is_live_func`` (auto-poll on TTL), favs_views' bulk
@@ -1639,6 +1661,35 @@ def _tv_bulk_refresh() -> bool:
         _BULK_REFRESH_LOCK.release()
 
 
+def _note_status_fetch(slug: str, status_known: bool,
+                       now: float | None = None) -> None:
+    """Record the outcome of a live-status fetch for ``slug`` (v0.7.59).
+
+    ``status_known=False`` (a network/blocked/malformed fetch that fell back to
+    the safe default) flags the slug so ``_tv_bulk_mark_offline`` refuses to
+    poison the offline blocklist with an untrustworthy 'offline'. A successful
+    fetch (``status_known=True``) clears any prior flag, so once connectivity
+    returns a later GENUINE offline can still mark. Prunes expired flags
+    opportunistically. Lock-guarded so it can't race the bulk refresh /
+    mark-offline that read the same dict.
+    """
+    import time as _time
+    if not slug:
+        return
+    nowt = now if now is not None else _time.time()
+    with _TV_CACHE_LOCK:
+        expired = [
+            s for s, ts in _FETCH_FAILED_SLUGS.items()
+            if nowt - ts > _FETCH_FAIL_TTL_SEC
+        ]
+        for s in expired:
+            del _FETCH_FAILED_SLUGS[s]
+        if status_known:
+            _FETCH_FAILED_SLUGS.pop(slug, None)
+        else:
+            _FETCH_FAILED_SLUGS[slug] = nowt
+
+
 def _tv_bulk_mark_offline(slug: str) -> None:
     """Remove ``slug`` from the cached live set AND record it in the
     session-long offline blocklist.
@@ -1664,17 +1715,35 @@ def _tv_bulk_mark_offline(slug: str) -> None:
     """
     import time as _time
     from resources.lib import logger
+    nowt = _time.time()
+    skipped_network = False
+    evicted: tuple[int, int] | None = None
     with _TV_CACHE_LOCK:
-        _OFFLINE_SESSION_SLUGS[slug] = _time.time()
-        current = _TV_BULK_CACHE["slugs"]
-        if slug not in current:
-            return
-        new_slugs = frozenset(s for s in current if s != slug)
-        _TV_BULK_CACHE["slugs"] = new_slugs
-    logger._log(
-        f"addon_actions._tv_bulk_mark_offline: {slug!r} removed from cache "
-        f"({len(current)} -> {len(new_slugs)})"
-    )
+        # v0.7.59: if the most recent live-status fetch for this slug FAILED
+        # (network-wide outage), its 'offline' is untrustworthy -- do NOT
+        # poison the blocklist/cache. One gate covers all three call sites
+        # (playvid, silent-stub, stall) because they all funnel through here.
+        failed_at = _FETCH_FAILED_SLUGS.get(slug)
+        if failed_at is not None and (nowt - failed_at) <= _FETCH_FAIL_TTL_SEC:
+            skipped_network = True
+        else:
+            _OFFLINE_SESSION_SLUGS[slug] = nowt
+            current = _TV_BULK_CACHE["slugs"]
+            if slug in current:
+                new_slugs = frozenset(s for s in current if s != slug)
+                _TV_BULK_CACHE["slugs"] = new_slugs
+                evicted = (len(current), len(new_slugs))
+    if skipped_network:
+        logger._log(
+            f"addon_actions._tv_bulk_mark_offline: SKIP {slug!r} -- last status "
+            f"fetch failed (network); not poisoning blocklist (v0.7.59)"
+        )
+        return
+    if evicted is not None:
+        logger._log(
+            f"addon_actions._tv_bulk_mark_offline: {slug!r} removed from cache "
+            f"({evicted[0]} -> {evicted[1]})"
+        )
 
 
 def _make_bulk_is_live_func(poll_minutes: int) -> Any:
@@ -1747,6 +1816,8 @@ def tv_stop(handle: int, **_params: Any) -> None:
     from resources.lib import logger, tv_state
     with _TV_CACHE_LOCK:
         _OFFLINE_SESSION_SLUGS.clear()
+        # v0.7.59: a new TV session starts with a clean network-fail slate too.
+        _FETCH_FAILED_SLUGS.clear()
     try:
         import xbmcgui
         win = xbmcgui.Window(10000)

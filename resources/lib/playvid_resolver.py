@@ -57,6 +57,12 @@ class PlayvidResult:
     success: bool
     listitem: Any | None
     proxy: Any | None
+    # v0.7.59: True unless the underlying live-status FETCH failed (network/
+    # blocked safe-default, or a resolve exception). False means "we could not
+    # confirm this room's status" -- the addon_actions playvid handler reads it
+    # to avoid poisoning the TV offline blocklist during a network-wide outage.
+    # A confirmed offline (clean 200) and proxy/prefetch failures stay True.
+    status_known: bool = True
 
 
 # Callback types - keep the resolver decoupled from the network and from
@@ -188,11 +194,21 @@ def resolve_to_listitem(
         resolution = rf(slug)
     except Exception:
         # Network blip, parser miss, or upstream changed. Don't crash
-        # the addon UI; let the caller report failure to Kodi.
-        return PlayvidResult(success=False, listitem=None, proxy=None)
+        # the addon UI; let the caller report failure to Kodi. We never
+        # learned the room's status -> status_known=False so the TV loop
+        # does NOT mark it offline (v0.7.59).
+        return PlayvidResult(
+            success=False, listitem=None, proxy=None, status_known=False,
+        )
 
     if not resolution.is_live or not resolution.hls_source:
-        return PlayvidResult(success=False, listitem=None, proxy=None)
+        # v0.7.59: propagate whether this 'not live' was a CONFIRMED offline
+        # (status_known True -> loop may mark offline) or a failed status fetch
+        # (status_known False -> loop must not poison the offline blocklist).
+        return PlayvidResult(
+            success=False, listitem=None, proxy=None,
+            status_known=resolution.status_known,
+        )
 
     room_url = build_room_url(slug)
     try:
@@ -219,13 +235,19 @@ def resolve_to_listitem(
         try:
             resolution = rf(slug)
         except Exception:
-            return PlayvidResult(success=False, listitem=None, proxy=None)
+            # Re-resolve threw -> status unknown, do not poison (v0.7.59).
+            return PlayvidResult(
+                success=False, listitem=None, proxy=None, status_known=False,
+            )
         if not resolution.is_live or not resolution.hls_source:
             logger._log(
                 f"playvid_resolver: re-resolve says {slug!r} is offline, "
                 f"failing cleanly"
             )
-            return PlayvidResult(success=False, listitem=None, proxy=None)
+            return PlayvidResult(
+                success=False, listitem=None, proxy=None,
+                status_known=resolution.status_known,
+            )
         try:
             proxy = sp(resolution.hls_source, room_url)
         except Exception:

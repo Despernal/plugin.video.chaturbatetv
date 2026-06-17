@@ -180,6 +180,51 @@ def test_fetch_room_status_json_rejects_empty_slug() -> None:
         cb_client.fetch_room_status_json("", fetch_func=_record_fetch("", []))
 
 
+# --- v0.7.59: fetch_ok distinguishes a real 200 from a safe-default fallback - #
+# A network OSError (403 storm), a Cloudflare HTML body, or a non-dict JSON
+# payload all return the same safe default with room_status='offline'. But those
+# are NOT confirmed-offline answers -- the fetch FAILED and the room's true
+# status is unknown. fetch_ok=True only when we actually parsed a 200 JSON dict
+# (live OR a clean offline). The resolve chain reads fetch_ok so a network-wide
+# outage can't poison the TV offline blocklist (the bug that wedged TV mode on
+# 2026-06-17: every model 403'd -> all marked offline -> no self-recovery).
+def test_fetch_room_status_json_marks_fetch_ok_true_on_success() -> None:
+    fetch = _record_fetch(json.dumps({"success": True,
+                                      "url": "https://x.example/p.m3u8",
+                                      "room_status": "public"}), [])
+    out = cb_client.fetch_room_status_json("bob", fetch_func=fetch)
+    assert out["fetch_ok"] is True
+
+
+def test_fetch_room_status_json_marks_fetch_ok_true_on_confirmed_offline() -> None:
+    """A clean 200 saying the room is offline is a KNOWN status -> fetch_ok True."""
+    fetch = _record_fetch(json.dumps({"success": True, "url": "",
+                                      "room_status": "offline"}), [])
+    out = cb_client.fetch_room_status_json("bob", fetch_func=fetch)
+    assert out["fetch_ok"] is True
+    assert out["room_status"] == "offline"
+
+
+def test_fetch_room_status_json_marks_fetch_ok_false_on_oserror() -> None:
+    def fetch(url: str, body: bytes | None = None,
+              headers: dict[str, str] | None = None, method: str = "GET") -> str:
+        raise OSError("403 Forbidden")
+    out = cb_client.fetch_room_status_json("bob", fetch_func=fetch)
+    assert out["fetch_ok"] is False
+
+
+def test_fetch_room_status_json_marks_fetch_ok_false_on_blocked_html() -> None:
+    fetch = _record_fetch("<html>cloudflare</html>", [])
+    out = cb_client.fetch_room_status_json("bob", fetch_func=fetch)
+    assert out["fetch_ok"] is False
+
+
+def test_fetch_room_status_json_marks_fetch_ok_false_on_non_dict_json() -> None:
+    fetch = _record_fetch("[1, 2, 3]", [])
+    out = cb_client.fetch_room_status_json("bob", fetch_func=fetch)
+    assert out["fetch_ok"] is False
+
+
 # --------------------------------------------------------------------------- #
 # fetch_browse_page
 # --------------------------------------------------------------------------- #

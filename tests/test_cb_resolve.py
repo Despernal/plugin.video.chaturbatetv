@@ -186,3 +186,45 @@ def test_resolve_ajax_safe_when_status_missing_keys() -> None:
     r = resolve_ajax("alice", lambda slug: {})
     assert r.is_live is False
     assert r.hls_source is None
+
+
+# --- v0.7.59: status_known threads "was the fetch real?" up from fetch_ok ---- #
+# is_live=False is ambiguous: a model who genuinely signed off (clean 200) and a
+# model we simply couldn't reach (403 storm -> safe default) both land here.
+# status_known carries the difference so the TV loop only poisons its offline
+# blocklist on a CONFIRMED offline, never on a network-wide outage.
+def test_resolution_status_known_defaults_true() -> None:
+    """Existing constructions (and the HTML resolve path) are 'known' by default."""
+    r = Resolution(is_live=False, hls_source=None, headers={}, gender=Gender.UNKNOWN)
+    assert r.status_known is True
+
+
+def test_resolve_ajax_status_known_true_when_fetch_ok() -> None:
+    """A real 200 (fetch_ok True) -> status is known, even when offline."""
+    from resources.lib.cb_resolve import resolve_ajax
+    r = resolve_ajax("alice", lambda slug: {
+        "success": True, "url": "", "room_status": "offline", "fetch_ok": True,
+    })
+    assert r.is_live is False
+    assert r.status_known is True
+
+
+def test_resolve_ajax_status_unknown_when_fetch_failed() -> None:
+    """A safe default from a network/blocked fetch (fetch_ok False) -> status
+    UNKNOWN; the caller must not treat 'offline' as a confirmed answer."""
+    from resources.lib.cb_resolve import resolve_ajax
+    r = resolve_ajax("alice", lambda slug: {
+        "success": False, "url": "", "room_status": "offline", "fetch_ok": False,
+    })
+    assert r.is_live is False
+    assert r.status_known is False
+
+
+def test_resolve_ajax_status_known_true_when_fetch_ok_absent() -> None:
+    """Conservative default: a status dict with no fetch_ok key is treated as
+    known, preserving pre-0.7.59 behavior for any caller/stub not setting it."""
+    from resources.lib.cb_resolve import resolve_ajax
+    r = resolve_ajax("alice", lambda slug: {
+        "success": True, "url": "x", "room_status": "public",
+    })
+    assert r.status_known is True

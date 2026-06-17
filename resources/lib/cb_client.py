@@ -113,6 +113,11 @@ def _safe_status_default() -> dict[str, Any]:
         "room_status": "offline",
         "hidden_message": "",
         "cmaf_edge": False,
+        # v0.7.59: False on every failure fallback (network OSError, Cloudflare
+        # HTML, non-dict JSON). room_status='offline' here is a SAFE DEFAULT,
+        # not a confirmed answer -- the resolve chain reads fetch_ok so a
+        # network-wide outage can't poison the TV offline blocklist.
+        "fetch_ok": False,
     }
 
 
@@ -279,6 +284,9 @@ def fetch_room_status_json(slug: str, fetch_func: _FetchFn | None = None) -> dic
     # response through; only fall back to defaults for missing keys.
     out = _safe_status_default()
     out.update(data)
+    # We parsed a real 200 JSON dict (live OR a clean offline): the status is
+    # KNOWN. Set after update() so a stray fetch_ok in the response can't lie.
+    out["fetch_ok"] = True
     logger._log(
         f"cb_client.fetch_room_status_json: slug={slug!r} success={out.get('success')} "
         f"status={out.get('room_status')!r} hls_present={bool(out.get('url'))}"

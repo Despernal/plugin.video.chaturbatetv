@@ -847,6 +847,110 @@ def test_tv_bulk_mark_offline_records_in_session_set(
     assert "ghost" in actions._OFFLINE_SESSION_SLUGS
 
 
+# --- v0.7.59: a network-wide fetch failure must NOT poison the blocklist ----- #
+# Root cause of the 2026-06-17 wedge: egress IP got 403-blocked, so EVERY resolve
+# fell to the safe-default 'offline' and every model got _tv_bulk_mark_offline'd.
+# The v0.7.45 TTL prune never fired because each cycle RE-STAMPED the slug, so
+# recovery was impossible without a Kodi restart. Fix: record per-slug whether
+# the status fetch actually succeeded (_note_status_fetch), and have
+# _tv_bulk_mark_offline skip the poison while that slug's last fetch is a failure.
+def test_mark_offline_skips_poison_when_status_fetch_failed(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    actions = _import()
+    actions._OFFLINE_SESSION_SLUGS.clear()
+    actions._FETCH_FAILED_SLUGS.clear()
+    actions._TV_BULK_CACHE["slugs"] = frozenset({"alice", "bob"})
+
+    # The 403-storm case: alice's status fetch FAILED (status unknown).
+    actions._note_status_fetch("alice", status_known=False)
+    actions._tv_bulk_mark_offline("alice")
+
+    # No poison: not blocklisted, not evicted from the live cache.
+    assert "alice" not in actions._OFFLINE_SESSION_SLUGS
+    assert actions._TV_BULK_CACHE["slugs"] == frozenset({"alice", "bob"})
+
+
+def test_mark_offline_proceeds_on_confirmed_offline(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    actions = _import()
+    actions._OFFLINE_SESSION_SLUGS.clear()
+    actions._FETCH_FAILED_SLUGS.clear()
+    actions._TV_BULK_CACHE["slugs"] = frozenset({"alice", "bob"})
+
+    # A clean 200 saying alice signed off: status KNOWN -> mark as before.
+    actions._note_status_fetch("alice", status_known=True)
+    actions._tv_bulk_mark_offline("alice")
+
+    assert "alice" in actions._OFFLINE_SESSION_SLUGS
+    assert actions._TV_BULK_CACHE["slugs"] == frozenset({"bob"})
+
+
+def test_mark_offline_proceeds_with_no_fetch_record(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """Backward compat: a caller that never recorded a fetch result (e.g. the
+    stall watchdog, where the model WAS live) marks offline exactly as before."""
+    actions = _import()
+    actions._OFFLINE_SESSION_SLUGS.clear()
+    actions._FETCH_FAILED_SLUGS.clear()
+    actions._TV_BULK_CACHE["slugs"] = frozenset({"alice", "bob"})
+
+    actions._tv_bulk_mark_offline("alice")
+
+    assert "alice" in actions._OFFLINE_SESSION_SLUGS
+    assert actions._TV_BULK_CACHE["slugs"] == frozenset({"bob"})
+
+
+def test_note_status_fetch_success_clears_prior_failure(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """When connectivity returns and a slug resolves cleanly again, the
+    network-fail flag clears so a later GENUINE offline can still mark."""
+    actions = _import()
+    actions._OFFLINE_SESSION_SLUGS.clear()
+    actions._FETCH_FAILED_SLUGS.clear()
+    actions._TV_BULK_CACHE["slugs"] = frozenset({"alice", "bob"})
+
+    actions._note_status_fetch("alice", status_known=False)   # outage
+    actions._note_status_fetch("alice", status_known=True)    # recovered
+    actions._tv_bulk_mark_offline("alice")                    # now genuinely off
+
+    assert "alice" in actions._OFFLINE_SESSION_SLUGS
+    assert "alice" not in actions._FETCH_FAILED_SLUGS
+
+
+def test_mark_offline_poisons_again_after_fetch_fail_ttl_expires(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """A stale network-fail flag (older than the TTL) must not suppress a real
+    mark-offline forever -- otherwise a never-re-fetched slug stays unmarkable."""
+    import time as _t
+    actions = _import()
+    actions._OFFLINE_SESSION_SLUGS.clear()
+    actions._FETCH_FAILED_SLUGS.clear()
+    actions._TV_BULK_CACHE["slugs"] = frozenset({"alice", "bob"})
+
+    actions._FETCH_FAILED_SLUGS["alice"] = _t.time() - (actions._FETCH_FAIL_TTL_SEC + 10)
+    actions._tv_bulk_mark_offline("alice")
+
+    assert "alice" in actions._OFFLINE_SESSION_SLUGS
+    assert actions._TV_BULK_CACHE["slugs"] == frozenset({"bob"})
+
+
+def test_tv_stop_clears_fetch_failed_slugs(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """tv_stop resets the per-session network-fail record alongside the
+    offline blocklist, so a new session starts with a clean slate."""
+    import time as _t
+    actions = _import()
+    actions._FETCH_FAILED_SLUGS["alice"] = _t.time()
+    actions.tv_stop(handle=42)
+    assert actions._FETCH_FAILED_SLUGS == {}
+
+
 def test_tv_bulk_refresh_subtracts_session_offline_slugs(
     kodi_mocks: dict[str, MagicMock],
     monkeypatch: pytest.MonkeyPatch,

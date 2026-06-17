@@ -53,6 +53,13 @@ class Resolution:
     hls_source: str | None
     headers: dict[str, str] = field(default_factory=dict)
     gender: Gender = Gender.UNKNOWN
+    # v0.7.59: True when the live-status fetch actually succeeded (a real 200,
+    # live OR a clean offline). False only when we fell back to a safe default
+    # after a network/blocked/malformed fetch -- the room's status is then
+    # UNKNOWN, not confirmed offline. Defaults True so existing constructions
+    # and the HTML resolve() path stay 'known'. Read by the TV loop so a
+    # network-wide outage never poisons the offline blocklist.
+    status_known: bool = True
 
 
 def resolve(slug: str, fetch_html_func: _FetchFn) -> Resolution:
@@ -119,13 +126,19 @@ def resolve_ajax(slug: str, fetch_status_func: _StatusFn) -> Resolution:
     hls = str(status.get("url") or "") if isinstance(status, dict) else ""
     room_status = str(status.get("room_status") or "") if isinstance(status, dict) else ""
     is_live = room_status == "public" and bool(hls)
+    # v0.7.59: a status dict carries fetch_ok from cb_client.fetch_room_status_json.
+    # Missing key -> assume known (conservative; preserves pre-0.7.59 behavior for
+    # any stub/caller not setting it). A non-dict status means the fetch path
+    # broke entirely -> unknown.
+    status_known = bool(status.get("fetch_ok", True)) if isinstance(status, dict) else False
     logger._log(
         f"cb_resolve.resolve_ajax: slug={slug!r} is_live={is_live} "
-        f"room_status={room_status!r} hls_present={bool(hls)}"
+        f"room_status={room_status!r} hls_present={bool(hls)} status_known={status_known}"
     )
     return Resolution(
         is_live=is_live,
         hls_source=hls or None,
         headers=headers,
         gender=Gender.UNKNOWN,
+        status_known=status_known,
     )

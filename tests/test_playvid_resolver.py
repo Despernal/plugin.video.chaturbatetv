@@ -493,6 +493,100 @@ def test_default_resolve_plumbs_cb_client_ajax_into_cb_resolve(
 
 
 # --------------------------------------------------------------------------- #
+# v0.7.59: status_known propagates from Resolution to PlayvidResult
+#
+# So the addon_actions playvid handler can refuse to mark a slug offline when the
+# "offline" verdict actually came from a FAILED status fetch (the 403 storm that
+# wedged TV mode 2026-06-17), not a confirmed sign-off. status_known=False ONLY
+# on a fetch failure (network safe-default, or a resolve exception); live,
+# confirmed offline, and proxy/prefetch failures all keep status_known True.
+# --------------------------------------------------------------------------- #
+
+
+def _unreachable_resolution() -> Resolution:
+    """is_live=False because the status FETCH failed (network/blocked), NOT a
+    confirmed offline. cb_resolve.resolve_ajax sets status_known=False here."""
+    return Resolution(
+        is_live=False,
+        hls_source=None,
+        headers={"User-Agent": "ipad", "Referer": "https://chaturbate.com/x/"},
+        gender=Gender.UNKNOWN,
+        status_known=False,
+    )
+
+
+def test_playvid_result_status_known_defaults_true() -> None:
+    resolver = _import_resolver()
+    r = resolver.PlayvidResult(success=False, listitem=None, proxy=None)
+    assert r.status_known is True
+
+
+def test_resolve_to_listitem_status_known_true_on_confirmed_offline(
+    mock_xbmcgui: MagicMock,
+) -> None:
+    """A clean offline (fetch succeeded, room signed off) keeps status_known
+    True -> the loop is allowed to mark it offline as before."""
+    resolver = _import_resolver()
+    result = resolver.resolve_to_listitem(
+        slug="ghost",
+        name="ghost",
+        resolve_func=lambda _s: _offline_resolution(),
+        start_proxy_func=lambda *_a, **_kw: _FakeProxyHandle(),
+    )
+    assert result.success is False
+    assert result.status_known is True
+
+
+def test_resolve_to_listitem_status_unknown_on_fetch_failure(
+    mock_xbmcgui: MagicMock,
+) -> None:
+    """The 403-storm case: is_live=False but status_known=False -> the loop must
+    NOT poison the offline blocklist."""
+    resolver = _import_resolver()
+    result = resolver.resolve_to_listitem(
+        slug="x",
+        name="x",
+        resolve_func=lambda _s: _unreachable_resolution(),
+        start_proxy_func=lambda *_a, **_kw: _FakeProxyHandle(),
+    )
+    assert result.success is False
+    assert result.status_known is False
+
+
+def test_resolve_to_listitem_status_unknown_when_resolve_raises(
+    mock_xbmcgui: MagicMock,
+) -> None:
+    """A resolve exception means we never learned the status -> unknown."""
+    resolver = _import_resolver()
+
+    def bad_resolve(_slug: str) -> Resolution:
+        raise OSError("network unreachable")
+
+    result = resolver.resolve_to_listitem(
+        slug="alice",
+        name="alice",
+        resolve_func=bad_resolve,
+        start_proxy_func=lambda *_a, **_kw: _FakeProxyHandle(),
+    )
+    assert result.success is False
+    assert result.status_known is False
+
+
+def test_resolve_to_listitem_status_known_true_on_success(
+    mock_xbmcgui: MagicMock,
+) -> None:
+    resolver = _import_resolver()
+    result = resolver.resolve_to_listitem(
+        slug="alice",
+        name="alice",
+        resolve_func=lambda s: _live_resolution(s),
+        start_proxy_func=lambda *_a, **_kw: _FakeProxyHandle(),
+    )
+    assert result.success is True
+    assert result.status_known is True
+
+
+# --------------------------------------------------------------------------- #
 # v0.7.57: prefetch-husk regression (2026-06-07)
 #
 # start_proxy swallows prefetch failure and used to return a handle whose
