@@ -6,7 +6,7 @@
 
 **A Kodi addon for Chaturbate, with TV mode.**
 
-[![Tests](https://img.shields.io/badge/tests-759%20passing-00d4ff?style=flat-square)]()
+[![Tests](https://img.shields.io/badge/tests-819%20passing-00d4ff?style=flat-square)]()
 [![Type Safety](https://img.shields.io/badge/mypy-strict-00d4ff?style=flat-square)]()
 [![Lint](https://img.shields.io/badge/ruff-clean-00d4ff?style=flat-square)]()
 [![Kodi](https://img.shields.io/badge/Kodi-Matrix%2B-00d4ff?style=flat-square)]()
@@ -250,7 +250,7 @@ plays it, and promotes to a higher tier when one comes online.
 
 ## Quality bar
 
-- 759 tests all passing (`pytest`, no Kodi required).
+- 819 tests all passing (`pytest`, no Kodi required).
 - mypy --strict clean across resources/lib/.
 - ruff clean.
 - Pre-commit hook runs all three on every commit.
