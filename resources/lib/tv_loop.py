@@ -1163,6 +1163,7 @@ def tv_play(
                         re_walk_func=_re_walk,
                         is_active_func=_is_active,
                         wait_for_abort=monitor.waitForAbort,
+                        heartbeat=_stamp_progress,
                         color=color,
                     )
                     if resumed is None:

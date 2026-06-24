@@ -380,3 +380,61 @@ def test_run_calls_re_walk_at_interval(
     # With tick=1s and interval=3s, expect ~3 walks before exit at
     # counter==11.
     assert 2 <= len(re_walks) <= 4
+
+
+def test_run_calls_heartbeat_on_each_rewalk_beat(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """v0.7.60: while the saver idles, the tv_loop is parked inside run()
+    with no playback, so it never reaches its onAVStarted / inner-loop
+    heartbeat stamp points. The out-of-loop wedge watchdog (150s progress
+    threshold) would then starve and false-positive on a perfectly healthy
+    idle screensaver (observed 2026-06-24: WEDGE-WATCHDOG tripping every
+    ~150s during an all-favs-offline lull). run() must fire an injected
+    heartbeat on each re-walk beat (<= re_walk_interval, well under 150s) so
+    a healthy idle saver keeps stamping progress -- while a genuinely stuck
+    saver loop (heartbeat stops firing) still trips the watchdog.
+    """
+    ss = _import()
+    heartbeats: list[int] = []
+    re_walks: list[int] = []
+    counter = {"n": 0}
+
+    def heartbeat() -> None:
+        heartbeats.append(counter["n"])
+
+    def re_walk() -> Any:
+        re_walks.append(counter["n"])
+        return None
+
+    def wait(_t: float) -> bool:
+        counter["n"] += 1
+        return counter["n"] > 10
+
+    ss.run(
+        re_walk_func=re_walk,
+        is_active_func=lambda: True,
+        wait_for_abort=wait,
+        heartbeat=heartbeat,
+        re_walk_interval_seconds=3.0,
+        tick_interval_seconds=1.0,
+    )
+    assert heartbeats, "heartbeat must fire while the screensaver idles"
+    assert len(heartbeats) == len(re_walks), (
+        "exactly one progress stamp per re-walk beat"
+    )
+
+
+def test_run_without_heartbeat_still_works(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """heartbeat is optional (back-compat): run() must not require it."""
+    ss = _import()
+    out = ss.run(
+        re_walk_func=lambda: None,
+        is_active_func=lambda: True,
+        wait_for_abort=lambda _t: True,  # abort immediately
+        re_walk_interval_seconds=10.0,
+        tick_interval_seconds=1.0,
+    )
+    assert out is None

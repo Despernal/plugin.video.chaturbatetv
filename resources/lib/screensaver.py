@@ -160,6 +160,7 @@ def run(
     re_walk_func: Callable[[], Any],
     is_active_func: _GuardFn,
     wait_for_abort: _TickFn,
+    heartbeat: Callable[[], None] | None = None,
     re_walk_interval_seconds: float = 60.0,
     tick_interval_seconds: float = 0.05,
     color: str = _DEFAULT_COLOR,
@@ -173,6 +174,11 @@ def run(
 
     All "external world" calls (re-walk, active-flag check, abort
     wait) are injected so this function is unit-testable without Kodi.
+
+    ``heartbeat`` (optional) is called once per re-walk beat. The tv_loop
+    passes its ``_stamp_progress`` so the out-of-loop wedge watchdog keeps
+    seeing progress while the saver idles (v0.7.60); without it a healthy
+    all-favs-offline lull would false-trip the 150s watchdog.
     """
     if window_factory is not None:
         win = window_factory()
@@ -206,6 +212,15 @@ def run(
             elapsed += tick_interval_seconds
             if elapsed >= re_walk_interval_seconds:
                 elapsed = 0.0
+                if heartbeat is not None:
+                    # v0.7.60: tv_loop is parked inside run() while the saver
+                    # idles, so it never reaches its onAVStarted / inner-loop
+                    # heartbeat stamp points -- the out-of-loop wedge watchdog
+                    # (150s progress threshold) would starve and false-positive
+                    # on a healthy idle saver. Stamp on each re-walk beat
+                    # (<= re_walk_interval << 150s); a genuinely stuck saver
+                    # loop stops beating and still trips the watchdog.
+                    heartbeat()
                 target = re_walk_func()
                 if target is not None:
                     _safe_log("screensaver.run: re_walk found live target")
