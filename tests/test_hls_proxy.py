@@ -567,3 +567,76 @@ def test_start_proxy_sets_prefetch_ok_true_on_success(
         assert handle.prefetch_ok is True
     finally:
         handle.stop()
+
+
+# --------------------------------------------------------------------------- #
+# v0.7.61: keep-alive connection pool (the llhls handshake-per-segment lag fix)
+# --------------------------------------------------------------------------- #
+
+
+def test_fetch_pools_keepalive_connection_for_same_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_fetch REUSES one keep-alive connection across back-to-back fetches to
+    the same host instead of a fresh TCP+TLS handshake every time.
+
+    Root cause of the llhls stutter (measured 2026-07-04): plain urlopen opens
+    a new connection per segment (~180ms handshake vs ~39ms reused over the
+    VPN), so the low-latency-HLS buffer drains -> renderer starves ->
+    OutputPicture timeout. Pooling keeps one warm connection per edge host.
+    """
+    import http.server
+
+    from resources.lib import cb_endpoints
+    from resources.lib import hls_proxy as hp
+
+    getattr(hp, "_pool_clear", lambda: None)()  # isolate from other tests
+
+    accepted: list[Any] = []  # one entry per NEW tcp connection accepted
+
+    class _CountingServer(http.server.ThreadingHTTPServer):
+        # Threading (like the real proxy) so shutdown() doesn't block on the
+        # handler thread that's parked reading the pooled keep-alive socket.
+        daemon_threads = True
+
+        def get_request(self) -> Any:
+            pair = super().get_request()
+            accepted.append(pair[1])
+            return pair
+
+    class _H(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"  # keep-alive capable
+
+        def log_message(self, *_a: Any) -> None:
+            return
+
+        def do_GET(self) -> None:
+            body = b"seg-bytes"
+            self.send_response(200)
+            self.send_header("Content-Type", "video/mp4")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    monkeypatch.setattr(cb_endpoints, "is_trusted_url", lambda _u: True)
+    server = _CountingServer(("127.0.0.1", 0), _H)
+    host, port = server.server_address[0], server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = f"http://{host}:{port}/seg_1.m4s"
+        b1, _c1 = hp._fetch(url, {})
+        b2, _c2 = hp._fetch(url, {})
+        b3, _c3 = hp._fetch(url, {})
+        assert b1 == b2 == b3 == b"seg-bytes"
+        assert len(accepted) == 1, (
+            f"expected 1 pooled connection reused across 3 fetches, "
+            f"got {len(accepted)} (no keep-alive)"
+        )
+    finally:
+        # Close pooled conns FIRST so the parked keep-alive handler thread
+        # unblocks, then the server shuts down cleanly.
+        hp._pool_clear()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)

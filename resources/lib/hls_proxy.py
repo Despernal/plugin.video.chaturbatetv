@@ -52,7 +52,9 @@ from __future__ import annotations
 
 import contextlib
 import gzip
+import http.client
 import re
+import ssl
 import threading
 import time
 import zlib
@@ -60,7 +62,6 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, quote, urljoin, urlparse
-from urllib.request import Request, urlopen
 
 
 # iPad UA matches what  uses; Chaturbate blocks default UAs
@@ -480,51 +481,162 @@ def _harvest_segment_maps(absolutized_chunklist: str, type_key: str | None,
 # --------------------------------------------------------------------------- #
 
 
+# --------------------------------------------------------------------------- #
+# Keep-alive connection pool (v0.7.61)
+# --------------------------------------------------------------------------- #
+# Root cause of the low-latency-HLS stutter (measured 2026-07-04): plain
+# ``urlopen`` opened a fresh TCP+TLS connection for EVERY chunklist refresh and
+# EVERY segment (~180ms handshake vs ~39ms on a reused connection over the
+# VPN). llhls runs a tiny buffer at the live edge, so that per-fetch tax drains
+# the buffer -> the renderer starves -> "OutputPicture - timeout waiting for
+# buffer". We keep ONE warm keep-alive connection per edge host and reuse it,
+# which is VPN-country-independent (every exit still pays the handshake).
+
+_POOL_LOCK = threading.Lock()
+# (scheme, host, port) -> list of idle keep-alive connections.
+_POOL: dict[tuple[str, str, int], list[http.client.HTTPConnection]] = {}
+_POOL_MAX_IDLE = 4  # cap idle conns/host so rotated edges don't pile up
+_SSL_CTX = ssl.create_default_context()
+
+
+def _close_quiet(conn: http.client.HTTPConnection) -> None:
+    with contextlib.suppress(OSError):
+        conn.close()
+
+
+def _pool_clear() -> None:
+    """Close + drop every pooled connection (teardown / test isolation)."""
+    with _POOL_LOCK:
+        for bucket in _POOL.values():
+            for conn in bucket:
+                _close_quiet(conn)
+        _POOL.clear()
+
+
+def _pool_get(scheme: str, host: str, port: int,
+              timeout: float) -> http.client.HTTPConnection:
+    """Check out an idle connection for the host, or make a fresh one."""
+    with _POOL_LOCK:
+        bucket = _POOL.get((scheme, host, port))
+        if bucket:
+            return bucket.pop()
+    if scheme == "https":
+        return http.client.HTTPSConnection(
+            host, port, timeout=timeout, context=_SSL_CTX)
+    return http.client.HTTPConnection(host, port, timeout=timeout)
+
+
+def _pool_put(scheme: str, host: str, port: int,
+              conn: http.client.HTTPConnection) -> None:
+    """Return a reusable connection to the pool (or close it if this host's
+    pool is already at the idle cap)."""
+    with _POOL_LOCK:
+        bucket = _POOL.setdefault((scheme, host, port), [])
+        if len(bucket) < _POOL_MAX_IDLE:
+            bucket.append(conn)
+            return
+    _close_quiet(conn)
+
+
+def _fetch_pooled(
+    url: str, headers: dict[str, str], timeout: float,
+) -> tuple[bytes, str, str, int, str, str | None]:
+    """One pooled keep-alive GET.
+
+    Returns ``(body, content_type, content_encoding, status, reason,
+    location)`` WITHOUT raising on 4xx/5xx (the caller decides). Retries
+    ONCE on a stale/half-closed pooled socket before surfacing the error --
+    a keep-alive peer may have dropped the idle connection between fetches.
+    """
+    parts = urlparse(url)
+    scheme = parts.scheme
+    host = parts.hostname or ""
+    port = parts.port or (443 if scheme == "https" else 80)
+    path = parts.path or "/"
+    if parts.query:
+        path = f"{path}?{parts.query}"
+    last_exc: Exception | None = None
+    for _attempt in (0, 1):
+        conn = _pool_get(scheme, host, port, timeout)
+        try:
+            conn.request("GET", path, headers=headers)
+            resp = conn.getresponse()
+            body = resp.read()  # drain fully so the socket can be reused
+            reusable = (
+                resp.version >= 11
+                and (resp.getheader("Connection") or "").lower() != "close"
+            )
+            if reusable:
+                _pool_put(scheme, host, port, conn)
+            else:
+                _close_quiet(conn)
+            return (
+                body,
+                resp.getheader("Content-Type") or "",
+                (resp.getheader("Content-Encoding") or "").lower(),
+                resp.status,
+                resp.reason or f"HTTP {resp.status}",
+                resp.getheader("Location"),
+            )
+        except (http.client.HTTPException, OSError) as exc:
+            _close_quiet(conn)
+            last_exc = exc
+    raise last_exc if last_exc is not None else OSError("fetch failed")
+
+
 def _fetch(url: str, headers: dict[str, str],
            timeout: float = _FETCH_TIMEOUT) -> tuple[bytes, str]:
-    """Fetch ``url``, decompressing gzip/deflate bodies.
+    """Fetch ``url`` over a POOLED keep-alive connection, decompressing
+    gzip/deflate bodies. Returns ``(body_bytes, content_type)``.
 
-    Returns ``(body_bytes, content_type)``. Some mmcdn edges send gzip
-    without ``Content-Encoding`` set, so we also detect by magic bytes
-    (eb7785c).
+    Some mmcdn edges send gzip without ``Content-Encoding`` set, so we also
+    detect by magic bytes (eb7785c). A >=400 status raises ``HTTPError`` with
+    the real ``.code`` so the callers' 403-refresh / reconnect logic is
+    unchanged; up to 3 redirects are followed (re-checking SSRF each hop).
 
-    v0.7.39 (audit pass #5 HIGH, agent 2): URL is host-allowlisted
-    against ``cb_endpoints.is_trusted_url`` BEFORE urlopen. This is
-    the SSRF defense that blocks /segment?url=file:///etc/shadow,
-    blocks LAN pivots via /segment?url=http://192.168.1.1/admin, and
-    blocks file:// schemes that would otherwise be honoured by
-    urllib's default opener. Untrusted URLs raise ValueError so the
-    caller (handler / refresh / harvest) treats it like any other
-    fetch failure.
+    v0.7.39 (audit pass #5 HIGH, agent 2): URL is host-allowlisted against
+    ``cb_endpoints.is_trusted_url`` BEFORE the request -- the SSRF defense
+    that blocks /segment?url=file:///etc/shadow, blocks LAN pivots via
+    /segment?url=http://192.168.1.1/admin, and blocks file:// schemes.
+    Untrusted URLs raise ValueError so the caller (handler / refresh /
+    harvest) treats it like any other fetch failure.
+
+    v0.7.61: switched from a fresh ``urlopen`` per fetch to the pooled
+    keep-alive above -- fixes the llhls handshake-per-segment stutter.
     """
+    from email.message import Message
+    from urllib.error import HTTPError
+
     from resources.lib.cb_endpoints import is_trusted_url
-    if not is_trusted_url(url):
-        # Use _redact_url so a crafted query-string secret doesn't
-        # leak into the rejection log line.
-        _log(
-            f"_fetch: REJECTED untrusted URL "
-            f"safe={_redact_url(url)!r}"
-        )
-        raise ValueError(f"untrusted URL host: {urlparse(url).hostname!r}")
-    req = Request(url, headers=headers)  # noqa: S310 - chaturbate edge URL
-    with urlopen(req, timeout=timeout) as resp:  # noqa: S310 - chaturbate edge URL
-        raw: bytes = resp.read()
-        ce = (resp.headers.get("Content-Encoding") or "").lower()
-        ct: str = resp.headers.get("Content-Type") or ""
-    if ce == "gzip" or raw[:2] == b"\x1f\x8b":
-        try:
-            raw = gzip.decompress(raw)
-        except (OSError, gzip.BadGzipFile):
-            pass
-    elif ce == "deflate":
-        try:
-            raw = zlib.decompress(raw)
-        except zlib.error:
+    cur = url
+    for _hop in range(4):
+        if not is_trusted_url(cur):
+            # _redact_url so a crafted query-string secret can't leak.
+            _log(f"_fetch: REJECTED untrusted URL safe={_redact_url(cur)!r}")
+            raise ValueError(
+                f"untrusted URL host: {urlparse(cur).hostname!r}")
+        raw, ct, ce, status, reason, location = _fetch_pooled(
+            cur, headers, timeout)
+        if status in (301, 302, 303, 307, 308) and location:
+            cur = urljoin(cur, location)
+            continue
+        if status >= 400:
+            raise HTTPError(cur, status, reason, Message(), None)
+        if ce == "gzip" or raw[:2] == b"\x1f\x8b":
             try:
-                raw = zlib.decompress(raw, -zlib.MAX_WBITS)
-            except zlib.error:
+                raw = gzip.decompress(raw)
+            except (OSError, gzip.BadGzipFile):
                 pass
-    return raw, ct
+        elif ce == "deflate":
+            try:
+                raw = zlib.decompress(raw)
+            except zlib.error:
+                try:
+                    raw = zlib.decompress(raw, -zlib.MAX_WBITS)
+                except zlib.error:
+                    pass
+        return raw, ct
+    raise HTTPError(url, 508, "too many redirects", Message(), None)
 
 
 # --------------------------------------------------------------------------- #
