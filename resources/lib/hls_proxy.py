@@ -63,14 +63,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, quote, urljoin, urlparse
 
+from resources.lib import browser_ua
 
-# iPad UA matches what  uses; Chaturbate blocks default UAs
-# and bot-flavoured UAs alike. Don't touch this casually.
-_IPAD_UA = (
-    "Mozilla/5.0 (iPad; CPU OS 8_1 like Mac OS X) "
-    "AppleWebKit/600.1.4 (KHTML, like Gecko) Version/8.0 "
-    "Mobile/12B410 Safari/600.1.4"
-)
+
+# UA from browser_ua: fresh iPad Safari, randomized per run. This used to be a
+# 2014 iOS 8.1 string -- a stale fingerprint. session_ua() is the SAME UA the
+# resolve path uses this run; Chaturbate blocks default/bot UAs so keep it iPad.
+_IPAD_UA = browser_ua.session_ua()
 
 
 _FETCH_TIMEOUT = 10.0

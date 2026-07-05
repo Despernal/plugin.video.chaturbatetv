@@ -22,17 +22,16 @@ from collections.abc import Callable
 from typing import Any
 from urllib.parse import urlencode
 
+from resources.lib import browser_ua
 from resources.lib.cb_endpoints import room_url
 
 _AJAX_URL = "https://chaturbate.com/get_edge_hls_url_ajax/"
 
 
 HTTP_HEADERS_IPAD: dict[str, str] = {
-    "User-Agent": (
-        "Mozilla/5.0 (iPad; CPU OS 16_5 like Mac OS X) "
-        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 "
-        "Mobile/15E148 Safari/604.1"
-    ),
+    # UA from browser_ua: fresh iPad Safari, randomized per run, single source of
+    # truth. session_ua() keeps this the SAME UA the resolve + stream use per run.
+    "User-Agent": browser_ua.session_ua(),
     "Accept": (
         "text/html,application/xhtml+xml,application/xml;q=0.9,"
         "image/webp,*/*;q=0.8"

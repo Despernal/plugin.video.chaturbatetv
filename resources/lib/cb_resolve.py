@@ -22,18 +22,17 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from resources.lib import browser_ua
 from resources.lib.cb_dossier import parse_room_dossier
 from resources.lib.cb_endpoints import room_url
 from resources.lib.cb_models import Gender
 
 
-# iPad-style UA matches what  uses; Chaturbate blocks default
-# urllib UAs and strict bot UAs alike. Don't touch this casually.
-_USER_AGENT = (
-    "Mozilla/5.0 (iPad; CPU OS 16_5 like Mac OS X) "
-    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 "
-    "Mobile/15E148 Safari/604.1"
-)
+# UA comes from browser_ua now: a fresh iPad Safari string, randomized per run,
+# single source of truth (see browser_ua.py). Chaturbate blocks default/bot UAs
+# so the pool stays iPad Safari; session_ua() keeps resolve + stream on the same
+# UA within a run. Don't hardcode a UA here again.
+_USER_AGENT = browser_ua.session_ua()
 
 
 _FetchFn = Callable[[str], str]
