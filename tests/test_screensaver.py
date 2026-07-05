@@ -438,3 +438,63 @@ def test_run_without_heartbeat_still_works(
         tick_interval_seconds=1.0,
     )
     assert out is None
+
+
+# --------------------------------------------------------------------------- #
+# min_wait_seconds - the v0.7.63 forbidden-backoff hold
+# --------------------------------------------------------------------------- #
+
+
+def test_run_holds_resume_until_min_wait_elapses(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """v0.7.63 forbidden-backoff: with min_wait_seconds set, run() must NOT
+    resume on a re-walk-found target until at least that many seconds of the
+    saver have elapsed. On an upstream/IP block the cams still resolve
+    'live', so re_walk finds a target on every beat -- run has to sit on it
+    for the full backoff (rest, don't thrash) before handing it back to
+    retry. Elapsed is accumulated deterministically from tick_interval, so
+    with tick=1s a 5s backoff = 5 held beats.
+    """
+    ss = _import()
+    found = object()
+    walks = {"n": 0}
+
+    def re_walk() -> object | None:
+        walks["n"] += 1
+        return found  # a live target is available on EVERY beat
+
+    out = ss.run(
+        re_walk_func=re_walk,
+        is_active_func=lambda: True,
+        wait_for_abort=lambda _t: False,
+        re_walk_interval_seconds=1.0,
+        tick_interval_seconds=1.0,
+        min_wait_seconds=5.0,
+    )
+    assert out is found
+    assert walks["n"] >= 5, "must hold through the full backoff before resuming"
+
+
+def test_run_min_wait_defaults_to_immediate_resume(
+    kodi_mocks: dict[str, MagicMock],
+) -> None:
+    """Back-compat: with no min_wait_seconds a re-walk-found target resumes
+    on the first beat, exactly as before the backoff feature."""
+    ss = _import()
+    found = object()
+    walks = {"n": 0}
+
+    def re_walk() -> object | None:
+        walks["n"] += 1
+        return found
+
+    out = ss.run(
+        re_walk_func=re_walk,
+        is_active_func=lambda: True,
+        wait_for_abort=lambda _t: False,
+        re_walk_interval_seconds=1.0,
+        tick_interval_seconds=1.0,
+    )
+    assert out is found
+    assert walks["n"] == 1, "no backoff -> resume on the first re-walk hit"

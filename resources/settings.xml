@@ -19,6 +19,17 @@
                         <popup>true</popup>
                     </control>
                 </setting>
+                <setting id="forbidden_backoff_minutes" type="integer" label="32080" help="32081">
+                    <level>0</level>
+                    <default>20</default>
+                    <constraints>
+                        <minimum>1</minimum>
+                        <maximum>120</maximum>
+                    </constraints>
+                    <control type="slider" format="integer">
+                        <popup>true</popup>
+                    </control>
+                </setting>
                 <setting id="isa_proxy_port" type="integer" label="32030" help="32031">
                     <level>0</level>
                     <default>0</default>

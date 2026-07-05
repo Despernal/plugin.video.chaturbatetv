@@ -1091,6 +1091,42 @@ def tv_play(
     def _is_active() -> bool:
         return win.getProperty(_ACTIVE_KEY) == "1"
 
+    def _forbidden_backoff() -> Any:
+        """v0.7.63: every reachable stream is being rejected -- an upstream/IP
+        block (typically a 403 on the CDN edge). Rest in the screensaver for
+        the configured backoff, then hand back a target to retry. TV mode
+        neither thrashes (the old wedge loop) nor exits (the old
+        stalls/errors_exhausted); it waits and retries, forever, auto-
+        recovering the moment the block lifts. The saver heartbeats the wedge
+        watchdog throughout so it never false-trips. Returns the resumed
+        target, or None if the user dismissed the saver / turned TV mode off.
+        """
+        from resources.lib import addon_settings, screensaver
+        backoff_s = float(max(60, addon_settings.forbidden_backoff_minutes() * 60))
+        _safe_log(
+            f"tv_loop.tv_play: FORBIDDEN-BACKOFF every reachable stream "
+            f"blocked; resting in screensaver ~{int(backoff_s // 60)}min "
+            f"then retrying (never exits)"
+        )
+        _sorted = tv_select.priority_sort(entries)
+
+        def _re_walk(
+            _e: list[TVEntry] = _sorted,
+            _il: Callable[[str], bool] = is_live_func,
+        ) -> Any:
+            return tv_select.pick_target(
+                _e, _il, should_continue=_should_continue,
+            )
+
+        return screensaver.run(
+            re_walk_func=_re_walk,
+            is_active_func=_is_active,
+            wait_for_abort=monitor.waitForAbort,
+            heartbeat=_stamp_progress,
+            min_wait_seconds=backoff_s,
+            color=addon_settings.screensaver_color(),
+        )
+
     # v0.7.58: start the out-of-loop wedge watchdog (daemon). It reads only
     # window props, so it stays responsive if the main thread hangs; it exits
     # when _is_active() flips false (the finally clears _ACTIVE_KEY).
@@ -1651,25 +1687,22 @@ def tv_play(
                             f"(consecutive_stalls={consecutive_stalls}/5)"
                         )
                     if consecutive_stalls >= 5:
-                        # Circuit breaker: if 5 stalls fire back-to-back
-                        # across iters, every model in our reach is
-                        # stalling. Network is broken or Chaturbate is
-                        # rejecting our edge connections. Stop spinning
-                        # and let the user investigate.
-                        _safe_log(
-                            f"tv_loop.tv_play: {consecutive_stalls} "
-                            f"consecutive stalls, exiting TV mode"
-                        )
-                        try:
-                            xbmcgui.Dialog().notification(
-                                "Chaturbate TV",
-                                "Many streams stalling - exiting TV mode",
-                                xbmcgui.NOTIFICATION_WARNING, 5000,
-                            )
-                        except Exception:  # noqa: S110 - best-effort
-                            pass
-                        final_reason = "stalls_exhausted"
-                        return final_reason
+                        # v0.7.63: 5 back-to-back stalls = every model in our
+                        # reach is stalling -- an upstream/IP block (Chaturbate
+                        # rejecting our edge connections, typically a 403 on the
+                        # CDN edge). We used to EXIT TV mode here ("stalls_
+                        # exhausted"), which is exactly the "it stopped keeping
+                        # going" failure. Now: rest in the screensaver for a
+                        # configurable backoff and RETRY, forever. Never thrash,
+                        # never end -- auto-recover the moment the block lifts.
+                        resumed = _forbidden_backoff()
+                        consecutive_stalls = 0
+                        consecutive_errors = 0
+                        if resumed is None:
+                            # user dismissed the saver / turned TV mode off
+                            final_reason = "screensaver_dismissed"
+                            return final_reason
+                        # fall through -> next outer iter re-picks + retries
                 elif player.user_stopped:
                     consecutive_stalls = 0  # healthy stop resets the counter
                     decision = _classify_after_stop(player, is_live_func)
@@ -1693,9 +1726,22 @@ def tv_play(
                     f"({consecutive_errors}/5): {exc!r}"
                 )
                 if consecutive_errors >= 5:
-                    _safe_log("tv_loop.tv_play: too many errors, exit")
-                    final_reason = "errors_exhausted"
-                    return final_reason
+                    # v0.7.63: same never-exit policy as stalls. 5 back-to-back
+                    # outer-iter exceptions almost always mean the network/edge
+                    # is down -- rest + retry instead of exiting. The per-iter
+                    # exceptions are still logged above (a genuine crash-loop
+                    # stays greppable), we just don't quit on them.
+                    _safe_log(
+                        "tv_loop.tv_play: 5 consecutive errors -> "
+                        "forbidden-backoff (rest + retry, no exit)"
+                    )
+                    resumed = _forbidden_backoff()
+                    consecutive_errors = 0
+                    consecutive_stalls = 0
+                    if resumed is None:
+                        final_reason = "screensaver_dismissed"
+                        return final_reason
+                    # fall through -> next outer iter retries
                 if monitor.waitForAbort(30):
                     final_reason = "aborted"
                     return final_reason

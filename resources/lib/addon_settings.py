@@ -24,6 +24,12 @@ _POLL_MIN_DEFAULT = 10
 _POLL_MIN_FLOOR = 1
 _POLL_MIN_CEIL = 60
 
+# v0.7.63: how long TV mode rests in the screensaver on a forbidden/IP block
+# before retrying (minutes). 1..120; getSettingInt returns 0 when unwritten.
+_BACKOFF_MIN_DEFAULT = 20
+_BACKOFF_MIN_FLOOR = 1
+_BACKOFF_MIN_CEIL = 120
+
 _PROXY_PORT_DEFAULT = 0  # 0 = kernel-assigned
 
 _DIALOG_TIMEOUT_DEFAULT = 10
@@ -64,6 +70,25 @@ def poll_minutes() -> int:
         return _POLL_MIN_DEFAULT
     if v > _POLL_MIN_CEIL:
         return _POLL_MIN_CEIL
+    return v
+
+
+def forbidden_backoff_minutes() -> int:
+    """Minutes to rest in the screensaver on a forbidden/IP block before
+    retrying (v0.7.63). On an upstream/CDN 403 block every reachable stream
+    fails; instead of thrashing or exiting, TV mode idles this long then
+    retries. settings.xml constrains 1..120, but getSettingInt returns 0 when
+    the setting was never written, so we floor to the default (never 0 -- that
+    would busy-retry with no rest).
+    """
+    try:
+        v = int(_addon().getSettingInt("forbidden_backoff_minutes"))
+    except Exception:
+        return _BACKOFF_MIN_DEFAULT
+    if v < _BACKOFF_MIN_FLOOR:
+        return _BACKOFF_MIN_DEFAULT
+    if v > _BACKOFF_MIN_CEIL:
+        return _BACKOFF_MIN_CEIL
     return v
 
 

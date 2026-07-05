@@ -44,6 +44,31 @@ def test_poll_minutes_reads_setting(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _import().poll_minutes() == 5
 
 
+def test_forbidden_backoff_minutes_reads_setting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v0.7.63: minutes TV mode rests in the screensaver on a forbidden/IP
+    block before retrying."""
+    _install_xbmcaddon(monkeypatch, {"forbidden_backoff_minutes": 30})
+    assert _import().forbidden_backoff_minutes() == 30
+
+
+def test_forbidden_backoff_minutes_defaults_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """getSettingInt returns 0 when never written -> fall back to 20, never 0
+    (0 would busy-retry with no rest)."""
+    _install_xbmcaddon(monkeypatch, {"forbidden_backoff_minutes": 0})
+    assert _import().forbidden_backoff_minutes() == 20
+
+
+def test_forbidden_backoff_minutes_clamps_above_max(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_xbmcaddon(monkeypatch, {"forbidden_backoff_minutes": 500})
+    assert _import().forbidden_backoff_minutes() == 120
+
+
 def test_poll_minutes_clamps_below_one_to_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

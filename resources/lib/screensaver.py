@@ -162,6 +162,7 @@ def run(
     wait_for_abort: _TickFn,
     heartbeat: Callable[[], None] | None = None,
     re_walk_interval_seconds: float = 60.0,
+    min_wait_seconds: float = 0.0,
     tick_interval_seconds: float = 0.05,
     color: str = _DEFAULT_COLOR,
     window_factory: Callable[[], Any] | None = None,
@@ -196,6 +197,12 @@ def run(
         _safe_log(f"screensaver.run: show() failed err={exc!r}; bailing")
         return None
     elapsed = 0.0
+    # v0.7.63: total wall-clock the saver has been up (accumulated from
+    # tick_interval, deterministic + test-drivable). min_wait_seconds > 0 is
+    # the forbidden-backoff hold: even when re_walk finds a 'live' target we
+    # do NOT resume until total >= min_wait, so on an IP/CDN block TV mode
+    # rests the full backoff instead of thrashing straight back into the 403.
+    total = 0.0
     try:
         while not win.dismissed:
             if wait_for_abort(tick_interval_seconds):
@@ -210,6 +217,7 @@ def run(
             except Exception as exc:
                 _safe_log(f"screensaver.run: tick err={exc!r}")
             elapsed += tick_interval_seconds
+            total += tick_interval_seconds
             if elapsed >= re_walk_interval_seconds:
                 elapsed = 0.0
                 if heartbeat is not None:
@@ -223,9 +231,17 @@ def run(
                     heartbeat()
                 target = re_walk_func()
                 if target is not None:
-                    _safe_log("screensaver.run: re_walk found live target")
-                    return target
-                _safe_log("screensaver.run: re_walk still no live")
+                    if total >= min_wait_seconds:
+                        _safe_log("screensaver.run: re_walk found live target")
+                        return target
+                    # forbidden-backoff hold: a target is available but we
+                    # haven't rested the full backoff yet -- keep idling.
+                    _safe_log(
+                        f"screensaver.run: holding backoff "
+                        f"({total:.0f}/{min_wait_seconds:.0f}s) before resume"
+                    )
+                else:
+                    _safe_log("screensaver.run: re_walk still no live")
         _safe_log("screensaver.run: dismissed by user")
         return None
     finally:

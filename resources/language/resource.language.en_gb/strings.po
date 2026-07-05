@@ -31,6 +31,14 @@ msgctxt "#32021"
 msgid "How often the TV loop checks for promotion candidates"
 msgstr "How often the TV loop checks for promotion candidates"
 
+msgctxt "#32080"
+msgid "Blocked-connection backoff (minutes)"
+msgstr "Blocked-connection backoff (minutes)"
+
+msgctxt "#32081"
+msgid "On an upstream/IP block (every stream 403s), TV mode rests in the screensaver this long, then retries -- it never exits"
+msgstr "On an upstream/IP block (every stream 403s), TV mode rests in the screensaver this long, then retries -- it never exits"
+
 msgctxt "#32030"
 msgid "ISA proxy port (0 = auto)"
 msgstr "ISA proxy port (0 = auto)"
