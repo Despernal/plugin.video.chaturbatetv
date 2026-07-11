@@ -250,6 +250,30 @@ def test_fetch_browse_page_sends_ipad_headers() -> None:
     assert "User-Agent" in headers
 
 
+def test_fetch_browse_page_sends_xrequestedwith() -> None:
+    """The room-list JSON endpoint is now gated behind the XHR header.
+
+    v0.7.64 (2026-07-11): Chaturbate started answering
+    ``/api/ts/roomlist/room-list/`` with ``302 -> /?next=<path>`` (an HTML
+    homepage) for any request missing ``X-Requested-With: XMLHttpRequest``.
+    urlopen follows the redirect, parse_roomlist gets HTML instead of JSON,
+    and Top Cams / New Cams / Female / Male / Couple / Trans / Search all go
+    blank. The sibling endpoints (fetch_room_status_json, fetch_biocontext)
+    already send this header; the browse path was the only listing route that
+    didn't. Pin it so the gate can't silently un-fix (Lesson 15 / 37).
+    """
+    calls: list[_FetchCall] = []
+    fetch = _record_fetch("{}", calls)
+
+    cb_client.fetch_browse_page(
+        "https://chaturbate.com/api/ts/roomlist/room-list/?limit=100&offset=0",
+        fetch_func=fetch,
+    )
+
+    _url, _body, headers, _method = calls[0]
+    assert headers.get("X-Requested-With") == "XMLHttpRequest"
+
+
 def test_fetch_browse_page_rejects_empty_url() -> None:
     with pytest.raises(ValueError):
         cb_client.fetch_browse_page("", fetch_func=_record_fetch("", []))

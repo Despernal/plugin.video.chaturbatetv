@@ -310,6 +310,16 @@ def fetch_browse_page(url: str, fetch_func: _FetchFn | None = None) -> str:
     fetch = _resolved(fetch_func)
     headers = dict(HTTP_HEADERS_IPAD)
     headers["Referer"] = "https://chaturbate.com/"
+    # v0.7.64 (2026-07-11): Chaturbate now gates /api/ts/roomlist/room-list/
+    # behind the XHR header. A request WITHOUT X-Requested-With gets a
+    # 302 -> /?next=<path> redirect to an HTML homepage; urlopen follows it,
+    # parse_roomlist sees HTML instead of JSON, and every room-list view
+    # (Top Cams, New Cams, Female/Male/Couple/Trans, Search) renders empty.
+    # The sibling endpoints fetch_room_status_json + fetch_biocontext already
+    # send this header; this was the last listing route that didn't. The
+    # affiliate onlinerooms endpoint is NOT gated and is unaffected by adding
+    # it (verified 200 with the header). Lesson 37.
+    headers["X-Requested-With"] = "XMLHttpRequest"
     body = fetch(url, body=None, headers=headers, method="GET")
     logger._log(
         f"cb_client.fetch_browse_page: url={safe_url} bytes={len(body)}"
