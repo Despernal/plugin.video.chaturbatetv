@@ -58,6 +58,7 @@ import ssl
 import threading
 import time
 import zlib
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -199,6 +200,15 @@ class _State:
     # one (its own _active_proxy). Comparing port against the player's
     # actual currently-playing URL is process-agnostic.
     port: int = 0
+    # 0.7.65: HTTP status of the last failed master refresh (None after a
+    # success or a non-HTTP error). 403/404/410 mean the edge REVOKED this
+    # stream URL - refreshing the same URL again cannot work, a fresh
+    # resolve can (see _run_reconnect).
+    last_refresh_code: int | None = None
+    # 0.7.65: optional callback returning a FRESH hls_source for the same
+    # room, or None when the room is offline. Wired by playvid_resolver in
+    # production; None keeps the pre-0.7.65 give-up behaviour.
+    re_resolve: Callable[[], str | None] | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -661,10 +671,14 @@ def _refresh_session(state: _State, host: str = "", port: int = 0) -> bool:
             _log("refresh_session: dedup skip (within 2s of last refresh)")
             return False
         state.last_refresh = now
+        state.last_refresh_code = None
     redacted = _redact_url(state.stream_url)
     try:
         raw, _ct = _fetch(state.stream_url, state.headers)
     except Exception as exc:
+        code = getattr(exc, "code", None)
+        with state.lock:
+            state.last_refresh_code = code if isinstance(code, int) else None
         _log(f"refresh_session: FAIL upstream={redacted!r} err={exc!r}")
         return False
     try:
@@ -712,6 +726,7 @@ def _run_reconnect(state: _State) -> None:
             state.peak_reconnect_threads, state.active_reconnect_threads,
         )
     needs_terminal = True
+    re_resolved = False
     try:
         for attempt in range(1, 6):
             if state.stopping or state.terminal:
@@ -719,7 +734,19 @@ def _run_reconnect(state: _State) -> None:
                 needs_terminal = False
                 return
             _log(f"reconnect: attempt={attempt}/5")
-            if _refresh_session(state):
+            ok = _refresh_session(state)
+            # 0.7.65: a 403/404/410 on the master means the edge revoked
+            # this stream URL (observed ~6-11 min into every stream). Five
+            # refreshes of the same URL all fail and the player gets
+            # stopped; one fresh resolve recovers in place. At most ONCE
+            # per cycle, so a real IP block cannot hammer the API.
+            if (not ok and not re_resolved
+                    and state.re_resolve is not None
+                    and state.last_refresh_code in _REVOKED_CODES):
+                re_resolved = True
+                if _re_resolve_session(state):
+                    ok = _refresh_session(state)
+            if ok:
                 _log(f"reconnect: OK at attempt={attempt}")
                 with state.lock:
                     state.reconnecting = False
@@ -788,6 +815,35 @@ def _run_reconnect(state: _State) -> None:
             # showing a buffer wheel forever. Fire the hammer here too
             # so the bg-thread covers the case where ISA went silent.
             _force_player_stop(state)
+
+
+_REVOKED_CODES = frozenset({403, 404, 410})
+
+
+def _re_resolve_session(state: _State) -> bool:
+    """Ask ``state.re_resolve`` for a fresh stream URL and swap it in.
+
+    Returns True when a new URL was installed. Never raises: an offline
+    room (None / empty) or a resolver error falls back to the normal
+    give-up path. Resets ``last_refresh`` so the immediate refresh of the
+    NEW URL is not swallowed by the 2s same-URL dedup.
+    """
+    fn = state.re_resolve
+    if fn is None:
+        return False
+    try:
+        new_url = fn()
+    except Exception as exc:
+        _log(f"reconnect: re_resolve FAIL err={exc!r}")
+        return False
+    if not new_url:
+        _log("reconnect: re_resolve got no stream (room offline?)")
+        return False
+    with state.lock:
+        state.stream_url = new_url
+        state.last_refresh = 0.0
+    _log(f"reconnect: re_resolve OK stream_url={_redact_url(new_url)!r}")
+    return True
 
 
 def _sleep_or_stop(state: _State, seconds: float) -> None:
@@ -1300,7 +1356,8 @@ def stop_all() -> None:
 
 
 def start_proxy(stream_url: str, room_url: str,
-                port: int = 0) -> ProxyHandle:
+                port: int = 0,
+                re_resolve: Callable[[], str | None] | None = None) -> ProxyHandle:
     """Bind a localhost HTTP server and start serving the rewritten master.
 
     Args:
@@ -1312,6 +1369,10 @@ def start_proxy(stream_url: str, room_url: str,
         port: Localhost port to bind. ``0`` (default) lets the kernel
             assign one. Settings.xml exposes ``isa_proxy_port`` for
             users on locked-down LAN firewalls who need a fixed port.
+        re_resolve: Optional ``() -> str | None`` returning a fresh
+            ``hls_source`` for the same room (None = offline). Used once
+            per reconnect cycle when the edge revokes the stream URL
+            (403/404/410) so playback recovers without a player stop.
 
     Returns:
         A ``ProxyHandle`` whose ``master_url`` is the URL to hand to
@@ -1331,7 +1392,7 @@ def start_proxy(stream_url: str, room_url: str,
     redacted = _redact_url(stream_url)
     _log(f"start_proxy: stream_url={redacted!r} room_url={room_url!r}")
 
-    state = _State(stream_url=stream_url, headers=headers)
+    state = _State(stream_url=stream_url, headers=headers, re_resolve=re_resolve)
     # Stash the absolutized master so we can rewrite to /chunklist?name=...
     # once we know the bound port.
     prefetch_absolutized = ""

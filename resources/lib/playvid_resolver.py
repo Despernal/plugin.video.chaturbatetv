@@ -151,6 +151,21 @@ def _default_resolve(slug: str) -> Resolution:
     return res
 
 
+def _slug_from_room_url(room_url: str) -> str:
+    from urllib.parse import urlparse
+    return urlparse(room_url).path.strip("/").split("/")[0]
+
+
+def _make_re_resolve(slug: str) -> Callable[[], str | None]:
+    """0.7.65: a fresh ``hls_source`` for ``slug`` (None if offline), for
+    hls_proxy's mid-stream recovery when the edge revokes the stream URL.
+    Looks ``_default_resolve`` up at call time (tests patch it)."""
+    def _re_resolve() -> str | None:
+        res = _default_resolve(slug)
+        return res.hls_source if (res.is_live and res.hls_source) else None
+    return _re_resolve
+
+
 def _default_start_proxy(stream_url: str, room_url: str) -> Any:
     from resources.lib import addon_settings
     from resources.lib.hls_proxy import start_proxy
@@ -158,6 +173,7 @@ def _default_start_proxy(stream_url: str, room_url: str) -> Any:
         stream_url=stream_url,
         room_url=room_url,
         port=addon_settings.isa_proxy_port(),
+        re_resolve=_make_re_resolve(_slug_from_room_url(room_url)),
     )
 
 
